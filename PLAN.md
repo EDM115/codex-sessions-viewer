@@ -17,7 +17,7 @@ The source of truth remains the rollout JSONL files. `session_index.jsonl`, glob
 - Package manager: `pnpm@11.21.0`, declared through `packageManager`.
 - Runtime: Node.js `>=26.7`; never Bun, derined in `package.json`'s engines + devEngines.runtime with onFail:download.
 - Framework: Nuxt 4, Vue 3, TypeScript, SSR enabled.
-- Bind live and preview servers only to `127.0.0.1`; do not offer a non-loopback host option.
+- Bind live and offline servers only to `127.0.0.1`; do not offer a non-loopback host option.
 - The application remains fully functional offline. Favicon network fetching is opportunistic and never required for rendering.
 - Bundle fonts, icons, Mermaid, syntax grammars, search assets, and all application resources locally; use no CDN or remote font.
 - Treat all files under Codex home as immutable and potentially mid-write.
@@ -105,7 +105,7 @@ Implement these package scripts:
 pnpm live [--codex-home <path>] [--port <number>]
 pnpm export [--codex-home <path>] [--output <path>] [--offline] [--force]
 pnpm offline [--port <number>]
-pnpm doctor [--codex-home <path>]
+pnpm run doctor [--codex-home <path>]
 pnpm test
 pnpm test:integration
 pnpm test:e2e
@@ -123,7 +123,7 @@ Behavior:
 - `pnpm export --offline` never attempts favicon or other remote requests; it reuses cached favicons and local fallbacks.
 - `pnpm export --force` retransforms all sessions while still respecting the source read-only boundary.
 - `pnpm offline` serves `.output/public` on loopback.
-- `pnpm doctor` is read-only and reports source discovery, cache status, parser diagnostics, snapshot health, and mode capabilities.
+- `pnpm run doctor` is read-only and reports source discovery, cache status, parser diagnostics, snapshot health, and mode capabilities. The explicit `run` is required because `doctor` is also a PNPM command.
 
 Codex-home precedence:
 
@@ -312,7 +312,7 @@ Steps:
 6. Inspect PNPM’s resolved build-script requests and edit the `pnpm-workspace.yaml` as needed to allow builds or not (then re-run `pnpm i` to run the scripts). Keep the default isolated linker and avoid hoisting or phantom dependencies.
 7. Configure SSR, strict TypeScript/template checking, a fixed Nuxt/Nitro `compatibilityDate`, locally bundled assets, no external font/CDN requests, noindex metadata, and mode-specific static/live behavior.
 8. Ignore `.generated/`, `.output/`, `.nuxt/`, coverage, Playwright artifacts, local cache pointers, and environment files.
-9. Document the four user commands—live, export, preview, and doctor—in `README.md`.
+9. Document the four user commands—live, export, offline, and doctor—in `README.md`.
 10. Run `pnpm exec nuxt prepare`, `pnpm typecheck`, `pnpm build`, and a minimal SSR plus client-navigation smoke test before continuing.
 
 No Git write commands are part of this or any later task.
@@ -823,7 +823,7 @@ Required verification sequence:
 8. `pnpm build`
 9. `pnpm export --offline`
 10. `pnpm test:e2e`
-11. `pnpm doctor`
+11. `pnpm run doctor`
 12. Run `scripts/verify-output.ts` against `.output/public`
 13. All execution of `.ts` files in package.json's scripts use jiti instead of tsx
 
@@ -884,7 +884,7 @@ Acceptance scenarios:
 - Favicon fetching may use the network during export/live mode, but failure never harms rendering and `--offline` disables attempts completely.
 - Remote images are not automatically mirrored merely because favicons are fetched. Local and embedded referenced media are preserved; uncached remote images degrade to a safe linked placeholder when offline.
 - Clipboard-image APIs are available on secure localhost contexts in supported browsers; unsupported cases remain visibly disabled rather than silently failing.
-- The static site is expected to be served locally over HTTP with `pnpm preview`; direct `file://` loading is not an acceptance target because chunked payload/search loading requires a local origin.
+- The static site is expected to be served locally over HTTP with `pnpm offline`; direct `file://` loading is not an acceptance target because chunked payload/search loading requires a local origin.
 - The app has no deployment, account, remote-sharing, synchronization, provider-control, or session-editing scope.
 - Implementation remains in the existing checkout with no worktree and no Git writes.
 - The fetched Taste and Soft skills are advisory for anti-slop craft, not architectural owners for this product UI. Their React/Tailwind, landing-page, hero, scroll-reveal, magnetic-button, and mandatory double-bezel examples are intentionally not dependencies or acceptance criteria.
