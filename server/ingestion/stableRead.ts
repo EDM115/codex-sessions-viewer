@@ -33,6 +33,7 @@ export interface StableReadSuccess {
   endExclusive: number;
   identity: SourceIdentity;
   size: number;
+  mtimeMs: number;
 }
 
 export interface StableReadChanged {
@@ -203,6 +204,7 @@ export async function stableRead(
       endExclusive,
       identity: { device: handleAfter.device, inode: handleAfter.inode },
       size: initialSize,
+      mtimeMs: Number(handleAfter.mtimeNs) / 1_000_000,
     };
   } finally {
     await handle.close();

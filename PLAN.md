@@ -778,6 +778,7 @@ Code blocks:
 - Unknown languages render safely as plain text.
 - Preserve horizontal scrolling when wrapping is off.
 - Tables support horizontal scrolling and copy as Markdown/CSV through icon menus.
+- Diffs (e.g. agent edits) will be rendered with `@pierre/diffs` (has SSR & workers support).
 
 Mermaid:
 
