@@ -1,23 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+
+import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import {
   DEFAULT_FETCH_FAVICONS,
   DEFAULT_SERVER_PORT,
   persistedServerSettingsSchema,
   serverViewerSettingsSchema,
   type ServerViewerSettings,
-} from "../../shared/types/settings";
-import {
-  createViewerDiagnostic,
-  type ViewerDiagnostic,
-} from "../../shared/types/diagnostics";
+} from "../../shared/types/settings.ts";
 import {
   resolveCodexHome,
   resolveViewerPaths,
   type CodexHomeSource,
   type PathResolutionOptions,
   type ViewerPaths,
-} from "./paths";
+} from "./paths.ts";
 
 export interface ServerConfigCliOptions {
   codexHome?: string | undefined;
@@ -54,9 +52,7 @@ function errorCode(error: unknown): string | undefined {
     : undefined;
 }
 
-async function readPersistedConfig(
-  configFile: string,
-): Promise<PersistedConfigReadResult> {
+async function readPersistedConfig(configFile: string): Promise<PersistedConfigReadResult> {
   let source: string;
   try {
     source = await readFile(configFile, "utf8");
@@ -106,8 +102,7 @@ async function readPersistedConfig(
           code: "config.invalid_settings",
           severity: "warning",
           area: "config",
-          message:
-            "The viewer configuration does not match the current schema.",
+          message: "The viewer configuration does not match the current schema.",
           path: configFile,
           details: { issueCount: parsedConfig.error.issues.length },
         }),
@@ -118,9 +113,7 @@ async function readPersistedConfig(
   return { settings: parsedConfig.data.settings, diagnostics: [] };
 }
 
-export async function validateCodexHome(
-  codexHome: string,
-): Promise<ViewerDiagnostic | null> {
+export async function validateCodexHome(codexHome: string): Promise<ViewerDiagnostic | null> {
   try {
     const codexHomeStats = await stat(codexHome);
     if (!codexHomeStats.isDirectory()) {
@@ -161,19 +154,17 @@ export async function loadServerViewerConfig(
   const paths = options.paths ?? resolveViewerPaths(options);
   const persisted = await readPersistedConfig(paths.configFile);
   const codexHome = resolveCodexHome({
-    platform: options.platform,
-    homeDir: options.homeDir,
-    env: options.env,
-    cliCodexHome: options.cli?.codexHome,
+    platform: options["platform"],
+    homeDir: options["homeDir"],
+    env: options["env"],
+    cliCodexHome: options["cli"]?.codexHome,
     configuredCodexHome: persisted.settings?.codexHome,
   });
   const settingsInput = {
     codexHome: codexHome.path,
-    port: options.cli?.port ?? persisted.settings?.port ?? DEFAULT_SERVER_PORT,
+    port: options["cli"]?.port ?? persisted.settings?.port ?? DEFAULT_SERVER_PORT,
     fetchFavicons:
-      options.cli?.fetchFavicons ??
-      persisted.settings?.fetchFavicons ??
-      DEFAULT_FETCH_FAVICONS,
+      options["cli"]?.fetchFavicons ?? persisted.settings?.fetchFavicons ?? DEFAULT_FETCH_FAVICONS,
   };
   const parsedSettings = serverViewerSettingsSchema.safeParse(settingsInput);
   const diagnostics = [...persisted.diagnostics];
@@ -225,8 +216,7 @@ export async function saveServerViewerConfig(
           code: "config.invalid_settings",
           severity: "warning",
           area: "config",
-          message:
-            "The server settings were not saved because they are invalid.",
+          message: "The server settings were not saved because they are invalid.",
           path: paths.configFile,
           details: { issueCount: parsedSettings.error.issues.length },
         }),
@@ -234,9 +224,7 @@ export async function saveServerViewerConfig(
     };
   }
 
-  const codexHomeDiagnostic = await validateCodexHome(
-    parsedSettings.data.codexHome,
-  );
+  const codexHomeDiagnostic = await validateCodexHome(parsedSettings.data.codexHome);
   if (codexHomeDiagnostic !== null) {
     return { written: false, diagnostics: [codexHomeDiagnostic] };
   }

@@ -1,12 +1,11 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  loadServerViewerConfig,
-  saveServerViewerConfig,
-} from "../../../server/core/config";
-import type { ViewerPaths } from "../../../server/core/paths";
+
+import { loadServerViewerConfig, saveServerViewerConfig } from "../../../server/core/config.ts";
+import type { ViewerPaths } from "../../../server/core/paths.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -33,9 +32,7 @@ async function createFixture(): Promise<{
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories
-      .splice(0)
-      .map((path) => rm(path, { recursive: true, force: true })),
+    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
 });
 
@@ -46,9 +43,7 @@ describe("server viewer configuration", () => {
     const configHome = join(root, "from-config");
     const environmentHome = join(root, "from-environment");
     await Promise.all(
-      [cliHome, configHome, environmentHome].map((path) =>
-        mkdir(path, { recursive: true }),
-      ),
+      [cliHome, configHome, environmentHome].map((path) => mkdir(path, { recursive: true })),
     );
     await mkdir(paths.configDir, { recursive: true });
     await writeFile(
@@ -101,9 +96,7 @@ describe("server viewer configuration", () => {
     });
     expect(loaded.codexHomeSource).toBe("environment");
     expect(loaded.onboardingRequired).toBe(false);
-    expect(loaded.diagnostics.map(({ code }) => code)).toEqual([
-      "config.invalid_json",
-    ]);
+    expect(loaded.diagnostics.map(({ code }) => code)).toEqual(["config.invalid_json"]);
     expect(await readFile(paths.configFile, "utf8")).toBe("{ invalid");
   });
 
@@ -119,9 +112,7 @@ describe("server viewer configuration", () => {
 
     expect(loaded.settings.codexHome).toBe(missingHome);
     expect(loaded.onboardingRequired).toBe(true);
-    expect(loaded.diagnostics.map(({ code }) => code)).toEqual([
-      "codex_home.missing",
-    ]);
+    expect(loaded.diagnostics.map(({ code }) => code)).toEqual(["codex_home.missing"]);
   });
 
   it("persists only versioned server settings", async () => {
@@ -163,9 +154,7 @@ describe("server viewer configuration", () => {
     );
 
     expect(result.written).toBe(false);
-    expect(result.diagnostics.map(({ code }) => code)).toEqual([
-      "codex_home.missing",
-    ]);
+    expect(result.diagnostics.map(({ code }) => code)).toEqual(["codex_home.missing"]);
     await expect(readFile(paths.configFile, "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });

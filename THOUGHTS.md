@@ -1,0 +1,11 @@
+# THOUGHTS — Things Heard, Observed, Unclear, Guessed, Hacked, Tracked, or Suspected : A living document about non-trivial details
+
+This document will serve as a scratchpad for things encountered during development.  
+You will find here notes about undocumented stuff, questions about implementation, random ideas that don't fit quite yet the PLAN, ...  
+Developpers and Agents alike can write here freely so knowledge never gets lost. Some things can stay in a conversation, in an LLM inner Chain-of-Thoughts, in reasoning, ... but what if we start a new thread ? Everything gets lost. `THOUGHTS.md` fixes that, by providing a persistent, searchable record of non-trivial details that Agents and Developpers can write into and refer to.  
+Information already present elsewhere (README, AGENTS, PLAN, PROGRESS, plans folder, docs, code & comments, ...) shouldn't be duplicated here.
+
+## 2026-08-13 — Unknown model — Codex Desktop — "Implement Plan Task 3 ingestion boundaries"
+
+- On Windows, one Chokidar v5 instance combining existing session directories with exact metadata paths that do not yet exist can suppress directory change events; keep the active-session, archive, and exact-metadata watchers independent unless a replacement is verified against the live append test.
+- Nuxt's production SSR build generated an unresolved `entry-styles-*.mjs-!~{...}~.js` placeholder when the custom Rolldown `manualChunks` function forced Vue/Nuxt packages into vendor chunks; the build passed after removing that function, so do not restore equivalent chunking without verifying `pnpm build` and `pnpm export`.

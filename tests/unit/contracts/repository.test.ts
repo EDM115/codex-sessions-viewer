@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
+
 import {
   conversationSummarySchema,
   sourceFingerprintSchema,
-} from "../../../shared/types/conversation";
+} from "../../../shared/types/conversation.ts";
 import {
   repositoryCapabilitiesForMode,
   turnNavigatorResponseSchema,
   viewerInvalidationSchema,
-} from "../../../shared/types/repository";
+} from "../../../shared/types/repository.ts";
 
 describe("persisted conversation contracts", () => {
   it("accepts complete cache records and rejects an invalid fingerprint hash", () => {
@@ -58,10 +59,7 @@ describe("persisted conversation contracts", () => {
     };
 
     expect(conversationSummarySchema.parse(summary)).toEqual(summary);
-    expect(
-      conversationSummarySchema.safeParse({ ...summary, turnCount: -1 })
-        .success,
-    ).toBe(false);
+    expect(conversationSummarySchema.safeParse({ ...summary, turnCount: -1 }).success).toBe(false);
   });
 });
 
@@ -112,9 +110,8 @@ describe("repository mode contracts", () => {
     };
 
     expect(turnNavigatorResponseSchema.parse([item])).toEqual([item]);
-    expect(
-      turnNavigatorResponseSchema.safeParse([{ ...item, proseLengthBucket: 5 }])
-        .success,
-    ).toBe(false);
+    expect(turnNavigatorResponseSchema.safeParse([{ ...item, proseLengthBucket: 5 }]).success).toBe(
+      false,
+    );
   });
 });

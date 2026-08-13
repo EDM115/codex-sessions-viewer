@@ -1,4 +1,5 @@
 import * as z from "zod";
+
 import {
   conversationScopeSchema,
   conversationSummarySchema,
@@ -13,7 +14,7 @@ import {
   type JsonValue,
   type TokenUsage,
   type TurnNavigatorItem,
-} from "./conversation";
+} from "./conversation.ts";
 
 export type RepositoryMode = "live" | "static";
 
@@ -118,9 +119,7 @@ export interface ViewerInvalidation {
 
 export interface ConversationRepository {
   capabilities(): RepositoryCapabilities;
-  listSessions(
-    query: SessionListQuery,
-  ): Promise<CursorPage<ConversationSummary>>;
+  listSessions(query: SessionListQuery): Promise<CursorPage<ConversationSummary>>;
   search(query: SearchQuery): Promise<CursorPage<SearchHit>>;
   getSession(id: string): Promise<ConversationSummary>;
   getTurnNavigator(id: string): Promise<TurnNavigatorItem[]>;
@@ -136,9 +135,7 @@ export const repositoryCapabilitiesSchema = z.strictObject({
   backgroundFaviconFetch: z.boolean(),
 });
 
-export function repositoryCapabilitiesForMode(
-  mode: RepositoryMode,
-): RepositoryCapabilities {
+export function repositoryCapabilitiesForMode(mode: RepositoryMode): RepositoryCapabilities {
   const enabled = mode === "live";
   return {
     liveUpdates: enabled,
@@ -183,9 +180,7 @@ export const searchHitSchema = z.strictObject({
   score: z.number().nonnegative(),
 });
 
-export const sessionListResponseSchema = cursorPageSchema(
-  conversationSummarySchema,
-);
+export const sessionListResponseSchema = cursorPageSchema(conversationSummarySchema);
 export const searchResponseSchema = cursorPageSchema(searchHitSchema);
 export const turnNavigatorResponseSchema = z.array(turnNavigatorItemSchema);
 
@@ -241,12 +236,7 @@ export const resolvedAssetSchema = z.strictObject({
 });
 
 export const viewerInvalidationSchema = z.strictObject({
-  type: z.enum([
-    "library.updated",
-    "session.updated",
-    "settings.updated",
-    "diagnostic.updated",
-  ]),
+  type: z.enum(["library.updated", "session.updated", "settings.updated", "diagnostic.updated"]),
   ids: z.array(z.string()),
   revision: z.string().min(1),
 });

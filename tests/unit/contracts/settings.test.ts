@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
+
 import {
   DEFAULT_PRESENTATION_SETTINGS,
   migratePresentationSettings,
   persistedPresentationSettingsSchema,
   serializePresentationSettings,
-} from "../../../shared/types/settings";
+} from "../../../shared/types/settings.ts";
 
 describe("presentation settings migration", () => {
   it("fills new defaults while preserving recognized legacy preferences", () => {
@@ -45,8 +46,6 @@ describe("presentation settings migration", () => {
     const persisted = serializePresentationSettings(settings);
 
     expect(persisted).toEqual({ version: 1, settings });
-    expect(persistedPresentationSettingsSchema.parse(persisted)).toEqual(
-      persisted,
-    );
+    expect(persistedPresentationSettingsSchema.parse(persisted)).toEqual(persisted);
   });
 });

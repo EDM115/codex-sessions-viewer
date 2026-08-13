@@ -1,10 +1,11 @@
 import * as z from "zod";
+
 import {
   disclosureDefaultSchema,
   viewerThemeSchema,
   type DisclosureDefault,
   type ViewerTheme,
-} from "./conversation";
+} from "./conversation.ts";
 
 export interface ServerViewerSettings {
   codexHome: string;
@@ -39,19 +40,17 @@ export interface ViewerSettings {
 
 export const DEFAULT_SERVER_PORT = 3_000;
 export const DEFAULT_FETCH_FAVICONS = true;
-export const PRESENTATION_SETTINGS_STORAGE_KEY =
-  "codex-sessions-viewer:presentation:v1";
+export const PRESENTATION_SETTINGS_STORAGE_KEY = "codex-sessions-viewer:presentation:v1";
 
-export const DEFAULT_PRESENTATION_SETTINGS: Readonly<PresentationSettings> =
-  Object.freeze({
-    theme: "midnight-glass",
-    toolCallsDefault: "collapsed",
-    reasoningDefault: "collapsed",
-    timestampFormat: "both",
-    wrapCode: false,
-    liveFollow: true,
-    turnMinimap: true,
-  });
+export const DEFAULT_PRESENTATION_SETTINGS: Readonly<PresentationSettings> = Object.freeze({
+  theme: "midnight-glass",
+  toolCallsDefault: "collapsed",
+  reasoningDefault: "collapsed",
+  timestampFormat: "both",
+  wrapCode: false,
+  liveFollow: true,
+  turnMinimap: true,
+});
 
 export const serverViewerSettingsSchema = z.strictObject({
   codexHome: z.string().trim().min(1),
@@ -116,23 +115,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function migratePresentationSettings(
-  persisted: unknown,
-): PresentationSettings {
+export function migratePresentationSettings(persisted: unknown): PresentationSettings {
   const current = persistedPresentationSettingsSchema.safeParse(persisted);
   if (current.success) {
     return current.data.settings;
   }
 
   const candidate =
-    isRecord(persisted) && "settings" in persisted
-      ? persisted.settings
-      : persisted;
+    isRecord(persisted) && "settings" in persisted ? persisted["settings"] : persisted;
   const migrated = presentationMigrationSchema.safeParse(candidate);
 
-  return migrated.success
-    ? migrated.data
-    : { ...DEFAULT_PRESENTATION_SETTINGS };
+  return migrated.success ? migrated.data : { ...DEFAULT_PRESENTATION_SETTINGS };
 }
 
 export function serializePresentationSettings(

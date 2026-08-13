@@ -3,8 +3,7 @@ import * as z from "zod";
 export type ConversationScope = "active" | "archived";
 export type MessageRole = "user" | "assistant";
 export type DisclosureDefault = "collapsed" | "expanded";
-export type ViewerTheme =
-  "midnight-glass" | "quiet-precision" | "editorial-archive";
+export type ViewerTheme = "midnight-glass" | "quiet-precision" | "editorial-archive";
 export type JsonPrimitive = boolean | number | string | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
 export interface JsonObject {
@@ -80,7 +79,12 @@ export interface TokenUsage {
 }
 
 export type ActivityStatus =
-  "pending" | "running" | "succeeded" | "failed" | "cancelled" | "unknown";
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "unknown";
 
 interface ConversationActivityBase {
   id: string;
@@ -210,11 +214,7 @@ export interface TurnNavigatorItem {
 export const conversationScopeSchema = z.enum(["active", "archived"]);
 export const messageRoleSchema = z.enum(["user", "assistant"]);
 export const disclosureDefaultSchema = z.enum(["collapsed", "expanded"]);
-export const viewerThemeSchema = z.enum([
-  "midnight-glass",
-  "quiet-precision",
-  "editorial-archive",
-]);
+export const viewerThemeSchema = z.enum(["midnight-glass", "quiet-precision", "editorial-archive"]);
 export const isoTimestampSchema = z.iso.datetime({ offset: true });
 export const sha256Schema = z.string().regex(/^[a-f\d]{64}$/i);
 
@@ -430,11 +430,6 @@ export const turnNavigatorItemSchema = z.strictObject({
   userMessageId: z.string().nullable(),
   promptPreview: z.string(),
   assistantPreview: z.string(),
-  proseLengthBucket: z.union([
-    z.literal(1),
-    z.literal(2),
-    z.literal(3),
-    z.literal(4),
-  ]),
+  proseLengthBucket: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
   createdAt: nullableTimestampSchema,
 });

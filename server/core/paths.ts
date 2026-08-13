@@ -46,11 +46,7 @@ function pathApiFor(platform: NodeJS.Platform): typeof posix {
   return platform === "win32" ? win32 : posix;
 }
 
-function expandAndResolve(
-  value: string,
-  homeDir: string,
-  pathApi: typeof posix,
-): string {
+function expandAndResolve(value: string, homeDir: string, pathApi: typeof posix): string {
   const homeRelative = value.match(/^~(?:[\\/](.*))?$/);
   if (homeRelative !== null) {
     return pathApi.resolve(homeDir, homeRelative[1] ?? "");
@@ -59,9 +55,7 @@ function expandAndResolve(
   return pathApi.resolve(value);
 }
 
-export function resolveViewerPaths(
-  options: PathResolutionOptions = {},
-): ViewerPaths {
+export function resolveViewerPaths(options: PathResolutionOptions = {}): ViewerPaths {
   const platform = options.platform ?? process.platform;
   const homeDir = options.homeDir ?? homedir();
   const env = options.env ?? process.env;
@@ -71,23 +65,15 @@ export function resolveViewerPaths(
   let cacheDir: string;
 
   if (platform === "win32") {
-    const localAppData =
-      nonEmpty(env.LOCALAPPDATA) ?? pathApi.join(homeDir, "AppData", "Local");
+    const localAppData = nonEmpty(env.LOCALAPPDATA) ?? pathApi.join(homeDir, "AppData", "Local");
     configDir = pathApi.join(localAppData, APPLICATION_NAME);
     cacheDir = pathApi.join(configDir, "cache");
   } else if (platform === "darwin") {
-    configDir = pathApi.join(
-      homeDir,
-      "Library",
-      "Application Support",
-      APPLICATION_NAME,
-    );
+    configDir = pathApi.join(homeDir, "Library", "Application Support", APPLICATION_NAME);
     cacheDir = pathApi.join(homeDir, "Library", "Caches", APPLICATION_NAME);
   } else {
-    const configRoot =
-      nonEmpty(env.XDG_CONFIG_HOME) ?? pathApi.join(homeDir, ".config");
-    const cacheRoot =
-      nonEmpty(env.XDG_CACHE_HOME) ?? pathApi.join(homeDir, ".cache");
+    const configRoot = nonEmpty(env.XDG_CONFIG_HOME) ?? pathApi.join(homeDir, ".config");
+    const cacheRoot = nonEmpty(env.XDG_CACHE_HOME) ?? pathApi.join(homeDir, ".cache");
     configDir = pathApi.join(configRoot, APPLICATION_NAME);
     cacheDir = pathApi.join(cacheRoot, APPLICATION_NAME);
   }
@@ -101,9 +87,7 @@ export function resolveViewerPaths(
   };
 }
 
-export function resolveCodexHome(
-  options: CodexHomeResolutionOptions = {},
-): CodexHomeResolution {
+export function resolveCodexHome(options: CodexHomeResolutionOptions = {}): CodexHomeResolution {
   const platform = options.platform ?? process.platform;
   const homeDir = options.homeDir ?? homedir();
   const env = options.env ?? process.env;

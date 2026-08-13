@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  resolveCodexHome,
-  resolveViewerPaths,
-} from "../../../server/core/paths";
+
+import { resolveCodexHome, resolveViewerPaths } from "../../../server/core/paths.ts";
 
 describe("viewer-owned paths", () => {
   it("uses LOCALAPPDATA as the single Windows viewer root", () => {
@@ -32,10 +30,8 @@ describe("viewer-owned paths", () => {
       configDir: "/Users/dev/Library/Application Support/codex-sessions-viewer",
       cacheDir: "/Users/dev/Library/Caches/codex-sessions-viewer",
       generatedDir: "/Users/dev/Library/Caches/codex-sessions-viewer/generated",
-      configFile:
-        "/Users/dev/Library/Application Support/codex-sessions-viewer/config.json",
-      cacheDatabase:
-        "/Users/dev/Library/Caches/codex-sessions-viewer/viewer.sqlite",
+      configFile: "/Users/dev/Library/Application Support/codex-sessions-viewer/config.json",
+      cacheDatabase: "/Users/dev/Library/Caches/codex-sessions-viewer/viewer.sqlite",
     });
   });
 

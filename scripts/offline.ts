@@ -77,16 +77,11 @@ function isWithinRoot(root: string, candidate: string): boolean {
   const pathFromRoot = relative(root, candidate);
   return (
     pathFromRoot === "" ||
-    (pathFromRoot !== ".." &&
-      !pathFromRoot.startsWith(`..${sep}`) &&
-      !isAbsolute(pathFromRoot))
+    (pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${sep}`) && !isAbsolute(pathFromRoot))
   );
 }
 
-async function findFile(
-  root: string,
-  pathname: string,
-): Promise<string | null> {
+async function findFile(root: string, pathname: string): Promise<string | null> {
   const relativePath = pathname.replace(/^\/+/, "");
   const candidate = resolve(root, relativePath || "index.html");
 
@@ -100,11 +95,12 @@ async function findFile(
 
   for (const path of candidates) {
     try {
+      // oxlint-disable-next-line no-await-in-loop -- Static-route candidates must retain fallback priority.
       const fileStats = await stat(path);
-      const filePath = fileStats.isDirectory()
-        ? resolve(path, "index.html")
-        : path;
+      const filePath = fileStats.isDirectory() ? resolve(path, "index.html") : path;
+      // oxlint-disable-next-line no-await-in-loop -- Resolve only the first candidate that exists.
       const resolvedPath = await realpath(filePath);
+      // oxlint-disable-next-line no-await-in-loop -- Validate the selected candidate before trying the fallback.
       const resolvedStats = await stat(resolvedPath);
 
       if (resolvedStats.isFile() && isWithinRoot(root, resolvedPath)) {
@@ -125,8 +121,7 @@ async function sendFile(
   statusCode = 200,
 ): Promise<void> {
   const fileStats = await stat(filePath);
-  const contentType =
-    contentTypes[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+  const contentType = contentTypes[extname(filePath).toLowerCase()] ?? "application/octet-stream";
 
   response.writeHead(statusCode, {
     "Cache-Control": filePath.endsWith(".html")
@@ -159,9 +154,7 @@ async function main(): Promise<void> {
       throw new Error("not a directory");
     }
   } catch {
-    throw new Error(
-      `Static output not found at ${outputDirectory}. Run pnpm export first.`,
-    );
+    throw new Error(`Static output not found at ${outputDirectory}. Run pnpm export first.`);
   }
 
   const server = createServer((request, response) => {
@@ -174,9 +167,7 @@ async function main(): Promise<void> {
 
       let pathname: string;
       try {
-        pathname = decodeURIComponent(
-          new URL(request.url ?? "/", "http://offline.local").pathname,
-        );
+        pathname = decodeURIComponent(new URL(request.url ?? "/", "http://offline.local").pathname);
       } catch {
         response.writeHead(400);
         response.end("Bad request");

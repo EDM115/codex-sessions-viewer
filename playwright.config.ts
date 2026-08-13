@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "@playwright/test";
+
 import type { ConfigOptions } from "@nuxt/test-utils/playwright";
+import { defineConfig } from "@playwright/test";
 
 export default defineConfig<ConfigOptions>({
   testDir: "./tests/e2e",

@@ -143,57 +143,57 @@ Default viewer-owned paths must follow platform conventions:
 Create the shared contracts under `shared/types/`:
 
 ```ts
-export type ConversationScope = "active" | "archived"
-export type MessageRole = "user" | "assistant"
-export type DisclosureDefault = "collapsed" | "expanded"
-export type ViewerTheme = "midnight-glass" | "quiet-precision" | "editorial-archive"
+export type ConversationScope = "active" | "archived";
+export type MessageRole = "user" | "assistant";
+export type DisclosureDefault = "collapsed" | "expanded";
+export type ViewerTheme = "midnight-glass" | "quiet-precision" | "editorial-archive";
 
 export interface SourceFingerprint {
-  path: string
-  size: number
-  mtimeMs: number
-  sha256: string
-  parsedBytes: number
-  parserVersion: number
+  path: string;
+  size: number;
+  mtimeMs: number;
+  sha256: string;
+  parsedBytes: number;
+  parserVersion: number;
 }
 
 export interface ConversationSummary {
-  id: string
-  title: string
-  scope: ConversationScope
-  sourcePath: string
-  createdAt: string
-  updatedAt: string
-  cwd: string | null
-  gitBranch: string | null
-  gitSha: string | null
-  gitOriginUrl: string | null
-  models: string[]
-  reasoningEfforts: string[]
-  turnCount: number
-  assistantMessageCount: number
-  toolCallCount: number
-  toolCounts: Record<string, number>
-  preview: string
-  pinned: boolean
-  sectionName: string | null
-  parentThreadId: string | null
-  childThreadIds: string[]
-  hasMedia: boolean
-  diagnosticCount: number
-  revision: string
+  id: string;
+  title: string;
+  scope: ConversationScope;
+  sourcePath: string;
+  createdAt: string;
+  updatedAt: string;
+  cwd: string | null;
+  gitBranch: string | null;
+  gitSha: string | null;
+  gitOriginUrl: string | null;
+  models: string[];
+  reasoningEfforts: string[];
+  turnCount: number;
+  assistantMessageCount: number;
+  toolCallCount: number;
+  toolCounts: Record<string, number>;
+  preview: string;
+  pinned: boolean;
+  sectionName: string | null;
+  parentThreadId: string | null;
+  childThreadIds: string[];
+  hasMedia: boolean;
+  diagnosticCount: number;
+  revision: string;
 }
 
 export interface ConversationMessage {
-  id: string
-  turnId: string
-  role: MessageRole
-  phase: string | null
-  createdAt: string
-  sourceMarkdown: string
-  body: RichTextDocument
-  attachmentIds: string[]
-  rawEventIds: string[]
+  id: string;
+  turnId: string;
+  role: MessageRole;
+  phase: string | null;
+  createdAt: string;
+  sourceMarkdown: string;
+  body: RichTextDocument;
+  attachmentIds: string[];
+  rawEventIds: string[];
 }
 
 export type ConversationActivity =
@@ -206,52 +206,52 @@ export type ConversationActivity =
   | StatusActivity
   | CompactionActivity
   | MediaActivity
-  | UnknownActivity
+  | UnknownActivity;
 
 export interface ConversationTurn {
-  id: string
-  sessionId: string
-  index: number
-  userMessage: ConversationMessage | null
-  assistantMessages: ConversationMessage[]
-  activities: ConversationActivity[]
-  startedAt: string | null
-  completedAt: string | null
-  durationMs: number | null
-  timeToFirstTokenMs: number | null
-  tokenDelta: TokenUsage | null
-  models: string[]
-  reasoningEfforts: string[]
-  toolCounts: Record<string, number>
-  diagnosticIds: string[]
+  id: string;
+  sessionId: string;
+  index: number;
+  userMessage: ConversationMessage | null;
+  assistantMessages: ConversationMessage[];
+  activities: ConversationActivity[];
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  timeToFirstTokenMs: number | null;
+  tokenDelta: TokenUsage | null;
+  models: string[];
+  reasoningEfforts: string[];
+  toolCounts: Record<string, number>;
+  diagnosticIds: string[];
 }
 
 export interface TurnNavigatorItem {
-  turnId: string
-  index: number
-  userMessageId: string | null
-  promptPreview: string
-  assistantPreview: string
-  proseLengthBucket: 1 | 2 | 3 | 4
-  createdAt: string | null
+  turnId: string;
+  index: number;
+  userMessageId: string | null;
+  promptPreview: string;
+  assistantPreview: string;
+  proseLengthBucket: 1 | 2 | 3 | 4;
+  createdAt: string | null;
 }
 
 export interface RepositoryCapabilities {
-  liveUpdates: boolean
-  serverSettings: boolean
-  backgroundFaviconFetch: boolean
+  liveUpdates: boolean;
+  serverSettings: boolean;
+  backgroundFaviconFetch: boolean;
 }
 
 export interface ConversationRepository {
-  capabilities(): RepositoryCapabilities
-  listSessions(query: SessionListQuery): Promise<CursorPage<ConversationSummary>>
-  search(query: SearchQuery): Promise<CursorPage<SearchHit>>
-  getSession(id: string): Promise<ConversationSummary>
-  getTurnNavigator(id: string): Promise<TurnNavigatorItem[]>
-  getTurns(id: string, query: TurnChunkQuery): Promise<TurnChunk>
-  getInspector(id: string, target: InspectorTarget): Promise<InspectorRecord>
-  resolveAsset(assetId: string): Promise<ResolvedAsset>
-  subscribe(listener: (event: ViewerInvalidation) => void): () => void
+  capabilities(): RepositoryCapabilities;
+  listSessions(query: SessionListQuery): Promise<CursorPage<ConversationSummary>>;
+  search(query: SearchQuery): Promise<CursorPage<SearchHit>>;
+  getSession(id: string): Promise<ConversationSummary>;
+  getTurnNavigator(id: string): Promise<TurnNavigatorItem[]>;
+  getTurns(id: string, query: TurnChunkQuery): Promise<TurnChunk>;
+  getInspector(id: string, target: InspectorTarget): Promise<InspectorRecord>;
+  resolveAsset(assetId: string): Promise<ResolvedAsset>;
+  subscribe(listener: (event: ViewerInvalidation) => void): () => void;
 }
 ```
 
@@ -337,19 +337,19 @@ Implement:
 
 ```ts
 interface ServerViewerSettings {
-  codexHome: string
-  port: number
-  fetchFavicons: boolean
+  codexHome: string;
+  port: number;
+  fetchFavicons: boolean;
 }
 
 interface PresentationSettings {
-  theme: ViewerTheme
-  toolCallsDefault: DisclosureDefault
-  reasoningDefault: DisclosureDefault
-  timestampFormat: "relative" | "absolute" | "both"
-  wrapCode: boolean
-  liveFollow: boolean
-  turnMinimap: boolean
+  theme: ViewerTheme;
+  toolCallsDefault: DisclosureDefault;
+  reasoningDefault: DisclosureDefault;
+  timestampFormat: "relative" | "absolute" | "both";
+  wrapCode: boolean;
+  liveFollow: boolean;
+  turnMinimap: boolean;
 }
 ```
 

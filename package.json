@@ -3,38 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.21.0",
-  "engines": {
-    "node": ">=26.7.0 <27",
-    "pnpm": ">=11.21.0 <12"
-  },
-  "devEngines": {
-    "runtime": {
-      "name": "node",
-      "version": ">=26.7.0 <27",
-      "onFail": "download"
-    },
-    "packageManager": {
-      "name": "pnpm",
-      "version": "11.21.0",
-      "onFail": "download"
-    }
-  },
   "scripts": {
     "build": "cross-env CODEX_VIEWER_MODE=live nuxt build",
     "coverage": "vitest run --coverage",
     "dev": "pnpm live",
     "doctor": "nuxt info",
     "export": "cross-env CODEX_VIEWER_MODE=static nuxt generate",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "lint": "eslint . --max-warnings=0",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "lint": "oxlint",
     "live": "cross-env CODEX_VIEWER_MODE=live nuxt dev --host 127.0.0.1",
     "offline": "jiti scripts/offline.ts",
     "postinstall": "nuxt prepare",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "test:integration": "vitest run --project nuxt --passWithNoTests",
+    "test:integration": "vitest run --project node tests/integration --passWithNoTests",
     "typecheck": "nuxt typecheck"
   },
   "dependencies": {
@@ -60,20 +43,33 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
-    "@nuxt/eslint": "^1.17.0",
     "@nuxt/test-utils": "^4.1.0",
     "@playwright/test": "^1.62.1",
     "@testing-library/vue": "^8.1.0",
-    "@types/node": "^26.0.0",
+    "@types/node": "^26.2.0",
     "@vitest/coverage-v8": "^4.1.10",
     "@vue/test-utils": "^2.4.11",
     "cross-env": "^10.1.0",
-    "eslint": "^10.8.1",
     "happy-dom": "^20.11.2",
     "jiti": "^2.7.0",
-    "prettier": "^3.9.6",
+    "node": "^26.7.0",
+    "oxfmt": "^0.63.0",
+    "oxlint": "^1.78.0",
+    "oxlint-tsgolint": "^7.0.2001",
     "typescript": "^6.0.3",
     "vitest": "^4.1.10",
     "vue-tsc": "^3.3.9"
-  }
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.21.0",
+      "onFail": "download"
+    }
+  },
+  "engines": {
+    "node": ">=26.7.0 <27",
+    "pnpm": ">=11.21.0 <12"
+  },
+  "packageManager": "pnpm@11.21.0"
 }

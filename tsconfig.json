@@ -1,4 +1,16 @@
 {
+  "compilerOptions": {
+    "allowArbitraryExtensions": true,
+    "disableSizeLimit": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "incremental": true,
+    "isolatedDeclarations": false,
+    "noErrorTruncation": true,
+    "preserveWatchOutput": true,
+    "removeComments": true,
+    "tsBuildInfoFile": "./.nuxt/tsconfig.tsbuildinfo"
+  },
   "files": [],
   "references": [
     {
@@ -12,6 +24,9 @@
     },
     {
       "path": "./.nuxt/tsconfig.node.json"
+    },
+    {
+      "path": "./tsconfig.custom.json"
     }
   ]
 }

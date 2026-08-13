@@ -1,9 +1,6 @@
 import * as z from "zod";
-import {
-  isoTimestampSchema,
-  jsonValueSchema,
-  type JsonObject,
-} from "./conversation";
+
+import { isoTimestampSchema, jsonValueSchema, type JsonObject } from "./conversation.ts";
 
 export type ViewerDiagnosticCode =
   | "config.invalid_json"
@@ -20,8 +17,7 @@ export type ViewerDiagnosticCode =
   | "cache.unavailable";
 
 export type ViewerDiagnosticSeverity = "info" | "warning" | "error";
-export type ViewerDiagnosticArea =
-  "config" | "source" | "metadata" | "cache" | "export";
+export type ViewerDiagnosticArea = "config" | "source" | "metadata" | "cache" | "export";
 
 export interface ViewerDiagnostic {
   id: string;
@@ -76,9 +72,7 @@ export const viewerDiagnosticSchema = z.strictObject({
   details: z.record(z.string(), jsonValueSchema),
 });
 
-export function createViewerDiagnostic(
-  input: CreateViewerDiagnosticInput,
-): ViewerDiagnostic {
+export function createViewerDiagnostic(input: CreateViewerDiagnosticInput): ViewerDiagnostic {
   const path = input.path ?? null;
   const sessionId = input.sessionId ?? null;
 

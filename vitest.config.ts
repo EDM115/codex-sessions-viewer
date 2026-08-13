@@ -9,8 +9,8 @@ export default defineConfig({
     projects: [
       {
         test: {
-          name: "unit",
-          include: ["tests/unit/**/*.{test,spec}.ts"],
+          name: "node",
+          include: ["tests/unit/**/*.{test,spec}.ts", "tests/integration/**/*.{test,spec}.ts"],
           environment: "node",
         },
       },
