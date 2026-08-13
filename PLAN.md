@@ -102,10 +102,10 @@ The following implementation rules distill the complete requested skill entrypoi
 Implement these package scripts:
 
 ```text
-pnpm live [--codex-home <path>] [--port <number>]
-pnpm export [--codex-home <path>] [--output <path>] [--offline] [--force]
-pnpm offline [--port <number>]
-pnpm run doctor [--codex-home <path>]
+pnpm live [--codex-home <path>] [--port <number>] [--help]
+pnpm export [--codex-home <path>] [--output <path>] [--offline] [--force] [--help]
+pnpm offline [--port <number>] [--help]
+pnpm run doctor [--codex-home <path>] [--help]
 pnpm test
 pnpm test:integration
 pnpm test:e2e
@@ -124,6 +124,7 @@ Behavior:
 - `pnpm export --force` retransforms all sessions while still respecting the source read-only boundary.
 - `pnpm offline` serves `.output/public` on loopback.
 - `pnpm run doctor` is read-only and reports source discovery, cache status, parser diagnostics, snapshot health, and mode capabilities. The explicit `run` is required because `doctor` is also a PNPM command.
+- Every command accepts `--help`, prints its available options, and exits without starting application work.
 
 Codex-home precedence:
 

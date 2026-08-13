@@ -18,3 +18,10 @@ Information already present elsewhere (README, AGENTS, PLAN, PROGRESS, plans fol
 
 - A successful favicon-provider HTTP status is not sufficient validation: providers differ between a 404 image and a 200 tiny placeholder for an unknown domain. Probe each provider with a deterministic nonexistent host, compare the decoded image hash with the candidate, and fall through to the site's declared icons and `/favicon.ico` when they match.
 - Keep IPv4 and IPv6 private-address ranges in separate Node `BlockList` instances. Mixing the IPv6 `::ffff:0:0/96` mapped-address range into the IPv4 list made public IPv4 literals match as blocked through Node's internal mapped representation.
+
+## 2026-08-13 — Unknown model — Codex Desktop — "Implement Plan Task 7 static export"
+
+- The Task 7 route manifest must be generated now but session-route prerendering cannot become active until Task 10 adds `app/pages/session/[id].vue`; make the Nuxt hook consume the manifest conditionally so the export pipeline remains usable throughout incremental implementation.
+- Output reuse and stale reconciliation need Windows-specific regression coverage: replacing an existing changed file can fail with `EPERM`, and rewriting a session with fewer turns must remove only its proven obsolete chunk files after the replacement payloads have succeeded.
+- Keep `.generated` as the private canonical export staging area and mirror it into the selected public output only after `nuxt generate`, because generation may clear its public directory. Build Pagefind last against the final public output.
+- Jiti does not set `import.meta.main` when it launches these TypeScript package scripts, so executable entrypoints must run unconditionally and import testable helpers from a separate module. On managed Windows PNPM, `npm_execpath` may be `pnpm.exe` rather than JavaScript; execute that path directly and use Node only for `.js`, `.cjs`, or `.mjs` launchers.

@@ -269,6 +269,52 @@ export function replaceCachedSession(
   });
 }
 
+export function updateCachedSessionRichContent(
+  database: DatabaseSync,
+  session: NormalizedSession,
+): void {
+  withCacheTransaction(database, () => {
+    const revision = database
+      .prepare("SELECT revision FROM sessions WHERE id = ?")
+      .get(session.summary.id)?.["revision"];
+    if (revision !== session.summary.revision) {
+      throw new Error("Refusing to cache rich content for a stale session revision.");
+    }
+    const updateTurn = database.prepare(`
+      UPDATE turns SET payload_json = ? WHERE session_id = ? AND id = ?
+    `);
+    const updateMessage = database.prepare(`
+      UPDATE messages SET body_json = ? WHERE session_id = ? AND id = ?
+    `);
+    const updateActivity = database.prepare(`
+      UPDATE activities SET payload_json = ? WHERE session_id = ? AND id = ?
+    `);
+    for (const turn of session.turns) {
+      const validatedTurn = conversationTurnSchema.parse(turn);
+      if (updateTurn.run(json(validatedTurn), session.summary.id, turn.id).changes !== 1) {
+        throw new Error("The cached session turn changed while rich content was being stored.");
+      }
+      const messages = [turn.userMessage, ...turn.assistantMessages].filter(
+        (message): message is ConversationMessage => message !== null,
+      );
+      for (const message of messages) {
+        if (updateMessage.run(json(message.body), session.summary.id, message.id).changes !== 1) {
+          throw new Error(
+            "The cached session message changed while rich content was being stored.",
+          );
+        }
+      }
+      for (const activity of turn.activities) {
+        if (updateActivity.run(json(activity), session.summary.id, activity.id).changes !== 1) {
+          throw new Error(
+            "The cached session activity changed while rich content was being stored.",
+          );
+        }
+      }
+    }
+  });
+}
+
 function requiredText(row: Record<string, SQLOutputValue>, key: string): string {
   const value = row[key];
   if (typeof value !== "string") {

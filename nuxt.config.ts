@@ -1,4 +1,30 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 const viewerMode = process.env.CODEX_VIEWER_MODE === "static" ? "static" : "live";
+const configuredOutput = process.env.CODEX_VIEWER_OUTPUT?.trim();
+const routeManifest = process.env.CODEX_VIEWER_ROUTE_MANIFEST?.trim();
+
+function staticSessionRoutes(): string[] {
+  if (
+    viewerMode !== "static" ||
+    routeManifest === undefined ||
+    !existsSync(resolve("app/pages/session/[id].vue"))
+  ) {
+    return [];
+  }
+  const parsed = JSON.parse(readFileSync(resolve(routeManifest), "utf8")) as unknown;
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("routes" in parsed) ||
+    !Array.isArray(parsed.routes) ||
+    !parsed.routes.every((route) => typeof route === "string" && route.startsWith("/session/"))
+  ) {
+    throw new Error("The static session route manifest has an unsupported shape.");
+  }
+  return [...new Set(parsed.routes)].toSorted((left, right) => left.localeCompare(right));
+}
 
 export default defineNuxtConfig({
   compatibilityDate: "2026-08-01",
@@ -75,6 +101,7 @@ export default defineNuxtConfig({
     server: false,
   },
   nitro: {
+    ...(configuredOutput === undefined ? {} : { output: { publicDir: resolve(configuredOutput) } }),
     compressPublicAssets: {
       brotli: true,
       gzip: true,
@@ -84,6 +111,13 @@ export default defineNuxtConfig({
       crawlLinks: viewerMode === "static",
       failOnError: true,
       ignore: ["/.netlify"],
+    },
+  },
+  hooks: {
+    "prerender:routes"({ routes }) {
+      for (const route of staticSessionRoutes()) {
+        routes.add(route);
+      }
     },
   },
   vite: {

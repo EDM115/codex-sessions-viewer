@@ -6,6 +6,13 @@ import { pipeline } from "node:stream/promises";
 
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
+const HELP = `Codex Sessions Viewer offline server
+
+Usage: pnpm offline [options]
+
+Options:
+  -p, --port <number>  Listen on this loopback port (default: ${DEFAULT_PORT})
+  --help               Show this help and exit`;
 
 const contentTypes: Readonly<Record<string, string>> = {
   ".avif": "image/avif",
@@ -143,7 +150,13 @@ async function sendFile(
 }
 
 async function main(): Promise<void> {
-  const port = parsePort(process.argv.slice(2));
+  const rawArguments = process.argv.slice(2);
+  if (rawArguments.includes("--help")) {
+    console.log(HELP);
+    return;
+  }
+
+  const port = parsePort(rawArguments);
   const outputDirectory = resolve(process.cwd(), ".output/public");
   let root: string;
 

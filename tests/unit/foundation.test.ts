@@ -22,7 +22,8 @@ describe("project foundation", () => {
       pnpm: ">=11.21.0 <12",
     });
     expect(packageJson.devDependencies["typescript"]).toMatch(/^\^6\./);
-    expect(packageJson.scripts["doctor"]).toBe("nuxt info");
+    expect(packageJson.scripts["doctor"]).toBe("jiti scripts/doctor.ts");
+    expect(packageJson.scripts["export"]).toBe("jiti scripts/export.ts");
     expect(packageJson.scripts["offline"]).toBe("jiti scripts/offline.ts");
     expect(packageJson.scripts).not.toHaveProperty("preview");
   });
