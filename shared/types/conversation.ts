@@ -1,5 +1,7 @@
 import * as z from "zod";
 
+import { richTextDocumentSchema, type RichTextDocument } from "./richText.ts";
+
 export type ConversationScope = "active" | "archived";
 export type MessageRole = "user" | "assistant";
 export type DisclosureDefault = "collapsed" | "expanded";
@@ -8,18 +10,6 @@ export type JsonPrimitive = boolean | number | string | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
 export interface JsonObject {
   [key: string]: JsonValue;
-}
-
-export interface RichTextNode {
-  type: string;
-  text?: string | undefined;
-  attributes?: JsonObject | undefined;
-  children?: RichTextNode[] | undefined;
-}
-
-export interface RichTextDocument {
-  type: "document";
-  children: RichTextNode[];
 }
 
 export interface SourceFingerprint {
@@ -228,20 +218,6 @@ export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
     z.record(z.string(), jsonValueSchema),
   ]),
 );
-
-export const richTextNodeSchema: z.ZodType<RichTextNode> = z.lazy(() =>
-  z.strictObject({
-    type: z.string().min(1),
-    text: z.string().optional(),
-    attributes: z.record(z.string(), jsonValueSchema).optional(),
-    children: z.array(richTextNodeSchema).optional(),
-  }),
-);
-
-export const richTextDocumentSchema = z.strictObject({
-  type: z.literal("document"),
-  children: z.array(richTextNodeSchema),
-});
 
 const countSchema = z.int().nonnegative();
 const nullableTimestampSchema = isoTimestampSchema.nullable();

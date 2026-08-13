@@ -13,3 +13,8 @@ Information already present elsewhere (README, AGENTS, PLAN, PROGRESS, plans fol
 - Validate that a file-backed cache is exactly an unlinked `viewer.sqlite` before constructing `DatabaseSync`: connection setup such as `journal_mode=WAL` can mutate a database before migrations get a chance to reject it, and a correctly named hard link can otherwise target Codex's `state_5.sqlite`.
 - Rollout turn, message, activity, and raw-event IDs are session-local and repeat across transcripts, so viewer-cache keys and foreign keys must remain composite on `(session_id, id)` even when a fixture set appears globally unique.
 - Persist source mtime from the same verified stable-read observation used for the exact hash, then compare it with the post-read path observation; taking mtime only from a later stat can pair an old hash with a newer same-size rewrite and incorrectly trust it on the next scan.
+
+## 2026-08-13 — Unknown model — Codex Desktop — "Implement Plan Task 6 rich content and favicons"
+
+- A successful favicon-provider HTTP status is not sufficient validation: providers differ between a 404 image and a 200 tiny placeholder for an unknown domain. Probe each provider with a deterministic nonexistent host, compare the decoded image hash with the candidate, and fall through to the site's declared icons and `/favicon.ico` when they match.
+- Keep IPv4 and IPv6 private-address ranges in separate Node `BlockList` instances. Mixing the IPv6 `::ffff:0:0/96` mapped-address range into the IPv4 list made public IPv4 literals match as blocked through Node's internal mapped representation.

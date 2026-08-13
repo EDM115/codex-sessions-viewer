@@ -1,10 +1,6 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 
-import type {
-  ConversationActivity,
-  ConversationTurn,
-  RichTextDocument,
-} from "../../shared/types/conversation.ts";
+import type { ConversationActivity, ConversationTurn } from "../../shared/types/conversation.ts";
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import {
   searchQuerySchema,
@@ -13,6 +9,7 @@ import {
   type SearchHit,
   type SearchQuery,
 } from "../../shared/types/repository.ts";
+import type { RichTextDocument } from "../../shared/types/richText.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 
 interface SearchColumns {
@@ -28,11 +25,14 @@ function documentText(document: RichTextDocument | null): string {
   const text: string[] = [];
   const visit = (nodes: RichTextDocument["children"]): void => {
     for (const node of nodes) {
-      if (node.text !== undefined) {
+      if (node.type === "text") {
         text.push(node.text);
-      }
-      if (node.children !== undefined) {
+      } else if ("children" in node) {
         visit(node.children);
+      } else if (node.type === "code" || node.type === "mermaid") {
+        text.push(node.source);
+      } else if (node.type === "media") {
+        text.push(node.alt, node.originalSource);
       }
     }
   };

@@ -22,6 +22,7 @@ import {
   type WebSearchActivity,
 } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import type { RichTextDocument } from "../../shared/types/richText.ts";
 import type { JsonlRecord } from "../ingestion/jsonlStream.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
@@ -121,10 +122,10 @@ function unique(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
-function plainDocument(text: string) {
+function plainDocument(text: string): RichTextDocument {
   return {
     type: "document" as const,
-    children: text === "" ? [] : [{ type: "text", text }],
+    children: text === "" ? [] : [{ type: "text" as const, text }],
   };
 }
 
