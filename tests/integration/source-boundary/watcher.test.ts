@@ -1,4 +1,13 @@
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -21,7 +30,7 @@ const fixtureDatabases = new Set<DatabaseSync>();
 const sourceWatchers = new Set<SourceWatcher>();
 
 async function createCodexHome(): Promise<string> {
-  const fixtureRoot = await mkdtemp(join(tmpdir(), "codex-viewer-watch-boundary-"));
+  const fixtureRoot = await mkdtemp(join(await realpath(tmpdir()), "codex-viewer-watch-boundary-"));
   temporaryDirectories.push(fixtureRoot);
   const root = join(fixtureRoot, "codex-home");
   await Promise.all([

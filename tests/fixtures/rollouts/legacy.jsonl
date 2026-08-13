@@ -1,0 +1,15 @@
+{"timestamp":"2025-01-01T09:00:00.000Z","type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333","timestamp":"2025-01-01T09:00:00.000Z","cwd":"/workspace/legacy","model_provider":"openai"}}
+{"timestamp":"2025-01-01T09:00:00.100Z","type":"world_state","payload":{"full":true,"state":{}}}
+{"timestamp":"2025-01-01T09:00:00.200Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":{}}}
+{"timestamp":"2025-01-01T09:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":"Legacy prompt","images":[],"local_images":[]}}
+{"timestamp":"2025-01-01T09:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"legacy-turn"}}
+{"timestamp":"2025-01-01T09:00:03.000Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"opaque"}}
+{"timestamp":"2025-01-01T09:00:03.100Z","type":"response_item","payload":{"type":"agent_message","id":"agent-message-1","author":"researcher","recipient":"root","content":"Research completed"}}
+{"timestamp":"2025-01-01T09:00:03.200Z","type":"response_item","payload":{"type":"image_generation_call","id":"image-call-legacy","status":"completed","result":"data:image/png;base64,AAAA","revised_prompt":"diagram"}}
+{"timestamp":"2025-01-01T09:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"missing-output","name":"exec","input":"echo hello","status":"in_progress"}}
+{"timestamp":"2025-01-01T09:00:05.000Z","type":"response_item","payload":{"type":"web_search_call","id":"search-legacy","action":{"type":"search","query":"legacy"},"status":"completed"}}
+{"timestamp":"2025-01-01T09:00:06.000Z","type":"event_msg","payload":{"type":"thread_goal_updated","threadId":"33333333-3333-4333-8333-333333333333","goal":{"objective":"Finish legacy parsing","status":"in_progress"}}}
+{"timestamp":"2025-01-01T09:00:07.000Z","type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}
+{"timestamp":"2025-01-01T09:00:08.000Z","type":"event_msg","payload":{"type":"context_compacted"}}
+{"timestamp":"2025-01-01T09:00:09.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"legacy-turn","last_agent_message":null}}
+{"timestamp":"2025-01-01T09:00:10.000Z","type":"future_top_level","payload":{"safe":"visible","refresh_token":"not-a-real-token"}}
