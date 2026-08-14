@@ -38,5 +38,14 @@
     "verbatimModuleSyntax": true
   },
   "include": ["./scripts/**/*.ts", "./server/**/*.ts", "./shared/**/*.ts", "./tests/**/*.ts"],
-  "exclude": ["./.data", "./.output", "./app/**/*", "./dist", "./node_modules/**/*"]
+  "exclude": [
+    "./.data",
+    "./.output",
+    "./app/**/*",
+    "./dist",
+    "./node_modules/**/*",
+    "./server/api/**/*",
+    "./server/middleware/**/*",
+    "./server/plugins/**/*"
+  ]
 }

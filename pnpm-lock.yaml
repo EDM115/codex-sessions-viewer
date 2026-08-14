@@ -228,6 +228,9 @@ importers:
       gray-matter:
         specifier: ^4.0.3
         version: 4.0.3
+      h3:
+        specifier: ^1.15.11
+        version: 1.15.11
       mermaid:
         specifier: ^11.16.1
         version: 11.16.1

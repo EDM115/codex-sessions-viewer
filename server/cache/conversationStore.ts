@@ -357,3 +357,32 @@ export function getCachedSession(
     );
   return { summary, turns, rawEvents };
 }
+
+export function removeCachedSource(database: DatabaseSync, sourcePath: string): string | null {
+  return withCacheTransaction(database, () => {
+    const source = database
+      .prepare("SELECT session_id FROM source_files WHERE path = ?")
+      .get(sourcePath);
+    if (source === undefined) {
+      return null;
+    }
+    const sessionId = typeof source["session_id"] === "string" ? source["session_id"] : null;
+    if (sessionId !== null) {
+      const session = database
+        .prepare("SELECT source_path FROM sessions WHERE id = ?")
+        .get(sessionId);
+      if (session?.["source_path"] === sourcePath) {
+        database.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
+      }
+    }
+    database.prepare("DELETE FROM source_files WHERE path = ?").run(sourcePath);
+    return sessionId;
+  });
+}
+
+export function listCachedSourcePaths(database: DatabaseSync): string[] {
+  return database
+    .prepare("SELECT path FROM source_files ORDER BY path")
+    .all()
+    .map((row) => requiredText(row, "path"));
+}

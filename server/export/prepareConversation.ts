@@ -15,6 +15,7 @@ export interface PrepareConversationExportOptions {
   mediaRoot: string;
   faviconRoot: string;
   offline: boolean;
+  mode?: "export" | "live" | undefined;
 }
 
 export interface PreparedConversationExport {
@@ -108,7 +109,7 @@ export async function prepareConversationForExport(
   for (const origin of [...faviconOrigins].toSorted()) {
     // oxlint-disable-next-line no-await-in-loop -- Export favicon requests are an intentional bounded origin cascade.
     const resolution = await resolveFavicon(database, origin, {
-      mode: "export",
+      mode: options.mode ?? "export",
       offline: options.offline,
       faviconRoot: options.faviconRoot,
     });

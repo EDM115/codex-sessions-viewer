@@ -123,7 +123,7 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
   };
   const paths = [roots.active, roots.archived, ...roots.metadata.keys()];
   const pending = new Map<string, SourceChange>();
-  let debounceTimer: NodeJS.Timeout | null = null;
+  const debounceTimers = new Map<string, NodeJS.Timeout>();
   let flushChain = Promise.resolve();
   let closed = false;
 
@@ -137,15 +137,17 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
     }),
   );
 
-  async function flush(): Promise<void> {
-    debounceTimer = null;
-    if (pending.size === 0) {
+  async function flush(keys: readonly string[]): Promise<void> {
+    const changes = keys
+      .map((key) => pending.get(key))
+      .filter((change): change is SourceChange => change !== undefined)
+      .toSorted((left, right) => left.path.localeCompare(right.path));
+    for (const key of keys) {
+      pending.delete(key);
+    }
+    if (changes.length === 0) {
       return;
     }
-    const changes = [...pending.values()].toSorted((left, right) =>
-      left.path.localeCompare(right.path),
-    );
-    pending.clear();
     try {
       await options.onBatch({ changes, observedAt: new Date().toISOString() });
     } catch (error) {
@@ -153,19 +155,23 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
     }
   }
 
-  function enqueueFlush(): Promise<void> {
-    flushChain = flushChain.then(flush);
+  function enqueueFlush(keys: readonly string[]): Promise<void> {
+    flushChain = flushChain.then(() => flush(keys));
     return flushChain;
   }
 
   function schedule(change: SourceChange): void {
-    pending.set(pathKey(change.path), change);
-    if (debounceTimer !== null) {
-      clearTimeout(debounceTimer);
+    const key = pathKey(change.path);
+    pending.set(key, change);
+    const existingTimer = debounceTimers.get(key);
+    if (existingTimer !== undefined) {
+      clearTimeout(existingTimer);
     }
-    debounceTimer = setTimeout(() => {
-      void enqueueFlush();
+    const timer = setTimeout(() => {
+      debounceTimers.delete(key);
+      void enqueueFlush([key]);
     }, debounceMs);
+    debounceTimers.set(key, timer);
   }
 
   const ready = Promise.all(
@@ -208,10 +214,11 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
         return;
       }
       closed = true;
-      if (debounceTimer !== null) {
-        clearTimeout(debounceTimer);
+      for (const timer of debounceTimers.values()) {
+        clearTimeout(timer);
       }
-      await enqueueFlush();
+      debounceTimers.clear();
+      await enqueueFlush([...pending.keys()]);
       await Promise.all(watchers.map((watcher) => watcher.close()));
     },
   };
