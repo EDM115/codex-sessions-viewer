@@ -26,8 +26,17 @@ async function main(): Promise<void> {
     `Viewer cache: ${report.cache.status}; ${report.cache.sessionCount} sessions and ${report.cache.diagnosticCount} parser diagnostics.`,
   );
   console.log(
-    `State snapshot: ${report.snapshotManifest}; offline output ${report.capabilities.offline ? "available" : "missing"}.`,
+    `State snapshot: ${report.snapshotManifest}; offline output ${report.offlineOutput.status} (${report.offlineOutput.sessionCount} sessions, search ${report.offlineOutput.searchIndex}).`,
   );
+  if (report.offlineOutput.missingFiles.length > 0) {
+    const shown = report.offlineOutput.missingFiles.slice(0, 20);
+    console.log(`Offline output missing: ${shown.join(", ")}`);
+    if (shown.length < report.offlineOutput.missingFiles.length) {
+      console.log(
+        `Offline output has ${report.offlineOutput.missingFiles.length - shown.length} more missing files.`,
+      );
+    }
+  }
   for (const diagnostic of report.diagnostics) {
     console.log(
       `[${diagnostic.severity}] ${diagnostic.code}: ${diagnostic.message}${diagnostic.path === null ? "" : ` (${diagnostic.path})`}`,

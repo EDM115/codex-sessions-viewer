@@ -22,6 +22,8 @@ export interface WriteStaticPayloadOptions {
   generatedRoot: string;
   publicRoot?: string | undefined;
   chunkSize?: number | undefined;
+  writeIndex?: boolean | undefined;
+  writeSessions?: boolean | undefined;
   diagnosticsBySession?: ReadonlyMap<string, readonly ViewerDiagnostic[]> | undefined;
 }
 
@@ -269,14 +271,16 @@ export async function writeStaticPayloads(
       right.summary.updatedAt.localeCompare(left.summary.updatedAt) ||
       left.summary.id.localeCompare(right.summary.id),
   );
-  dispositions.push(
-    ...(await writePayload(options, ["sessions", "index.json"], {
-      version: 1,
-      sessions: ordered.map(({ summary }) => summary),
-    })),
-  );
+  if (options.writeIndex !== false) {
+    dispositions.push(
+      ...(await writePayload(options, ["sessions", "index.json"], {
+        version: 1,
+        sessions: ordered.map(({ summary }) => summary),
+      })),
+    );
+  }
   let turnChunkCount = 0;
-  for (const conversation of ordered) {
+  for (const conversation of options.writeSessions === false ? [] : ordered) {
     const id = conversation.summary.id;
     assertSafeOutputComponent(id);
     // oxlint-disable-next-line no-await-in-loop -- Each session payload set is published coherently before the next one.
@@ -337,6 +341,52 @@ export async function writeStaticPayloads(
     reusedFileCount: dispositions.filter((value) => value === "reused").length,
     published: options.publicRoot !== undefined,
   };
+}
+
+async function mirrorGeneratedTree(
+  sourceRoot: string,
+  publicRoot: string,
+  targetSegments: readonly string[],
+): Promise<number> {
+  let entries;
+  try {
+    entries = await readdir(sourceRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+  let count = 0;
+  for (const entry of entries.toSorted((left, right) => left.name.localeCompare(right.name))) {
+    assertSafeOutputComponent(entry.name);
+    const sourcePath = join(sourceRoot, entry.name);
+    // oxlint-disable-next-line no-await-in-loop -- Every path is verified immediately before its bytes are mirrored.
+    const metadata = await lstat(sourcePath);
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+      // oxlint-disable-next-line no-await-in-loop -- Viewer-owned generated trees are mirrored in deterministic path order.
+      count += await mirrorGeneratedTree(sourcePath, publicRoot, [...targetSegments, entry.name]);
+      continue;
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink > 1) {
+      throw new Error(`Generated export content is not an unlinked regular file: ${sourcePath}`);
+    }
+    // oxlint-disable-next-line no-await-in-loop -- Each verified generated file is atomically written to isolated public staging.
+    await writeOutputFile(publicRoot, [...targetSegments, entry.name], await readFile(sourcePath));
+    count += 1;
+  }
+  return count;
+}
+
+export async function publishGeneratedExportFiles(
+  generatedRoot: string,
+  publicRoot: string,
+): Promise<number> {
+  const counts = await Promise.all([
+    mirrorGeneratedTree(join(generatedRoot, "payloads"), publicRoot, ["payloads"]),
+    mirrorGeneratedTree(join(generatedRoot, "markdown"), publicRoot, ["downloads"]),
+  ]);
+  return counts.reduce((total, count) => total + count, 0);
 }
 
 function rowText(row: Record<string, SQLOutputValue>, key: string): string | null {

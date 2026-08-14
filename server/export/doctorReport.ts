@@ -2,7 +2,10 @@ import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import {
+  viewerDiagnosticCodeSchema,
+  type ViewerDiagnostic,
+} from "../../shared/types/diagnostics.ts";
 import { loadServerViewerConfig } from "../core/config.ts";
 import type { ViewerPaths } from "../core/paths.ts";
 import { discoverSources } from "../ingestion/discoverSources.ts";
@@ -20,6 +23,15 @@ export interface DoctorCacheReport {
   size: number | null;
 }
 
+export interface DoctorOfflineOutputReport {
+  status: "available" | "missing" | "incomplete";
+  sessionCount: number;
+  missingFiles: string[];
+  searchIndex: "pagefind" | "disabled" | "unknown";
+}
+
+type DoctorDiagnostic = Pick<ViewerDiagnostic, "code" | "severity" | "area" | "message" | "path">;
+
 export interface DoctorReport {
   codexHome: string;
   codexHomeSource: string;
@@ -33,23 +45,48 @@ export interface DoctorReport {
   };
   cache: DoctorCacheReport;
   snapshotManifest: "available" | "missing" | "unavailable";
+  offlineOutput: DoctorOfflineOutputReport;
   capabilities: {
     live: true;
     export: true;
     offline: boolean;
   };
-  diagnostics: Array<Pick<ViewerDiagnostic, "code" | "severity" | "area" | "message" | "path">>;
+  diagnostics: DoctorDiagnostic[];
 }
 
 function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
-async function inspectViewerCache(path: string): Promise<DoctorCacheReport> {
+function isDiagnosticSeverity(value: unknown): value is ViewerDiagnostic["severity"] {
+  return value === "info" || value === "warning" || value === "error";
+}
+
+function isDiagnosticArea(value: unknown): value is ViewerDiagnostic["area"] {
+  return (
+    value === "config" ||
+    value === "source" ||
+    value === "metadata" ||
+    value === "cache" ||
+    value === "export"
+  );
+}
+
+async function inspectViewerCache(
+  path: string,
+): Promise<{ report: DoctorCacheReport; diagnostics: DoctorDiagnostic[] }> {
   try {
     const metadata = await lstat(path);
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink > 1) {
-      return { status: "unavailable", sessionCount: 0, diagnosticCount: 0, size: metadata.size };
+      return {
+        report: {
+          status: "unavailable",
+          sessionCount: 0,
+          diagnosticCount: 0,
+          size: metadata.size,
+        },
+        diagnostics: [],
+      };
     }
     const database = new DatabaseSync(path, { readOnly: true, allowExtension: false });
     try {
@@ -57,19 +94,53 @@ async function inspectViewerCache(path: string): Promise<DoctorCacheReport> {
       database.exec("PRAGMA query_only = ON");
       const sessionRow = database.prepare("SELECT COUNT(*) AS count FROM sessions").get();
       const diagnosticRow = database.prepare("SELECT COUNT(*) AS count FROM diagnostics").get();
+      const diagnostics = database
+        .prepare(
+          "SELECT code, severity, area, message, path FROM diagnostics ORDER BY created_at DESC, id",
+        )
+        .all()
+        .flatMap((row): DoctorDiagnostic[] => {
+          const { code, severity, area, message, path: diagnosticPath } = row;
+          const parsedCode = viewerDiagnosticCodeSchema.safeParse(code);
+          if (
+            !parsedCode.success ||
+            !isDiagnosticSeverity(severity) ||
+            !isDiagnosticArea(area) ||
+            typeof message !== "string" ||
+            (diagnosticPath !== null && typeof diagnosticPath !== "string")
+          ) {
+            return [];
+          }
+          return [
+            {
+              code: parsedCode.data,
+              severity,
+              area,
+              message,
+              path: diagnosticPath,
+            },
+          ];
+        });
       return {
-        status: "available",
-        sessionCount: typeof sessionRow?.["count"] === "number" ? sessionRow["count"] : 0,
-        diagnosticCount: typeof diagnosticRow?.["count"] === "number" ? diagnosticRow["count"] : 0,
-        size: metadata.size,
+        report: {
+          status: "available",
+          sessionCount: typeof sessionRow?.["count"] === "number" ? sessionRow["count"] : 0,
+          diagnosticCount:
+            typeof diagnosticRow?.["count"] === "number" ? diagnosticRow["count"] : 0,
+          size: metadata.size,
+        },
+        diagnostics,
       };
     } finally {
       database.close();
     }
   } catch (error) {
-    return isMissing(error)
-      ? { status: "missing", sessionCount: 0, diagnosticCount: 0, size: null }
-      : { status: "unavailable", sessionCount: 0, diagnosticCount: 0, size: null };
+    return {
+      report: isMissing(error)
+        ? { status: "missing", sessionCount: 0, diagnosticCount: 0, size: null }
+        : { status: "unavailable", sessionCount: 0, diagnosticCount: 0, size: null },
+      diagnostics: [],
+    };
   }
 }
 
@@ -97,6 +168,141 @@ async function directoryExists(path: string): Promise<boolean> {
   }
 }
 
+async function regularFileExists(path: string): Promise<boolean> {
+  try {
+    const metadata = await lstat(path);
+    return metadata.isFile() && !metadata.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+interface OfflineSessionEntry {
+  id: string;
+  scope: "active" | "archived";
+}
+
+function offlineSessionEntries(value: unknown): OfflineSessionEntry[] | null {
+  if (value === null || typeof value !== "object" || !("sessions" in value)) {
+    return null;
+  }
+  const sessions = value.sessions;
+  if (!Array.isArray(sessions)) {
+    return null;
+  }
+  const entries: OfflineSessionEntry[] = [];
+  for (const session of sessions) {
+    if (
+      session === null ||
+      typeof session !== "object" ||
+      !("id" in session) ||
+      typeof session.id !== "string" ||
+      !/^[\w.-]+$/.test(session.id) ||
+      !("scope" in session) ||
+      (session.scope !== "active" && session.scope !== "archived")
+    ) {
+      return null;
+    }
+    entries.push({ id: session.id, scope: session.scope });
+  }
+  return entries;
+}
+
+async function inspectOfflineOutput(publicRoot: string): Promise<DoctorOfflineOutputReport> {
+  if (!(await directoryExists(publicRoot))) {
+    return { status: "missing", sessionCount: 0, missingFiles: [], searchIndex: "unknown" };
+  }
+  const missingFiles: string[] = [];
+  const requireFile = async (relativePath: string): Promise<void> => {
+    if (!(await regularFileExists(join(publicRoot, ...relativePath.split("/"))))) {
+      missingFiles.push(relativePath);
+    }
+  };
+  await requireFile("index.html");
+  let searchIndex: DoctorOfflineOutputReport["searchIndex"] = "unknown";
+  try {
+    const manifest = JSON.parse(
+      await readFile(join(publicRoot, "payloads", "export.json"), "utf8"),
+    ) as unknown;
+    if (
+      manifest !== null &&
+      typeof manifest === "object" &&
+      "version" in manifest &&
+      manifest.version === 1 &&
+      "pagefind" in manifest &&
+      typeof manifest.pagefind === "boolean"
+    ) {
+      searchIndex = manifest.pagefind ? "pagefind" : "disabled";
+    }
+  } catch {
+    // Report the required export manifest below.
+  }
+  if (searchIndex === "unknown") {
+    missingFiles.push("payloads/export.json");
+  } else if (searchIndex === "pagefind") {
+    await requireFile("pagefind/pagefind.js");
+  }
+
+  const indexPath = join(publicRoot, "payloads", "sessions", "index.json");
+  let sessions: OfflineSessionEntry[] | null = null;
+  try {
+    sessions = offlineSessionEntries(JSON.parse(await readFile(indexPath, "utf8")) as unknown);
+  } catch {
+    // Report the required index below.
+  }
+  if (sessions === null) {
+    missingFiles.push("payloads/sessions/index.json");
+    return { status: "incomplete", sessionCount: 0, missingFiles, searchIndex };
+  }
+
+  await Promise.all(
+    sessions.map(async ({ id, scope }) => {
+      const base = `payloads/sessions/${id}`;
+      await Promise.all([
+        requireFile(`${base}/summary.json`),
+        requireFile(`downloads/${scope}/${id}.md`),
+      ]);
+      const navigatorPath = join(publicRoot, "payloads", "sessions", id, "navigator.json");
+      let chunkCount: number | null = null;
+      try {
+        const navigator = JSON.parse(await readFile(navigatorPath, "utf8")) as unknown;
+        if (
+          navigator !== null &&
+          typeof navigator === "object" &&
+          "chunkSize" in navigator &&
+          typeof navigator.chunkSize === "number" &&
+          Number.isSafeInteger(navigator.chunkSize) &&
+          navigator.chunkSize > 0 &&
+          "items" in navigator &&
+          Array.isArray(navigator.items)
+        ) {
+          chunkCount = Math.ceil(navigator.items.length / navigator.chunkSize);
+        }
+      } catch {
+        // Report the required navigator below.
+      }
+      if (chunkCount === null) {
+        missingFiles.push(`${base}/navigator.json`);
+        return;
+      }
+      await Promise.all(
+        Array.from({ length: chunkCount }, async (_, index) =>
+          Promise.all([
+            requireFile(`${base}/turn-${index}.json`),
+            requireFile(`${base}/inspector-${index}.json`),
+          ]),
+        ),
+      );
+    }),
+  );
+  return {
+    status: missingFiles.length === 0 ? "available" : "incomplete",
+    sessionCount: sessions.length,
+    missingFiles: missingFiles.toSorted(),
+    searchIndex,
+  };
+}
+
 export async function collectDoctorReport(
   options: CollectDoctorReportOptions = {},
 ): Promise<DoctorReport> {
@@ -106,6 +312,8 @@ export async function collectDoctorReport(
     cli: { codexHome: options.codexHome },
   });
   const discovery = await discoverSources(config.settings.codexHome);
+  const cache = await inspectViewerCache(config.paths.cacheDatabase);
+  const offlineOutput = await inspectOfflineOutput(join(cwd, ".output", "public"));
   return {
     codexHome: config.settings.codexHome,
     codexHomeSource: config.codexHomeSource,
@@ -117,16 +325,17 @@ export async function collectDoctorReport(
       stateDatabase: discovery.metadata.stateDatabase !== null,
       stateWal: discovery.metadata.stateWal !== null,
     },
-    cache: await inspectViewerCache(config.paths.cacheDatabase),
+    cache: cache.report,
     snapshotManifest: await inspectSnapshotManifest(
       join(config.paths.cacheDir, "state-snapshots", "current.json"),
     ),
+    offlineOutput,
     capabilities: {
       live: true,
       export: true,
-      offline: await directoryExists(join(cwd, ".output", "public")),
+      offline: offlineOutput.status === "available",
     },
-    diagnostics: [...config.diagnostics, ...discovery.diagnostics].map(
+    diagnostics: [...config.diagnostics, ...discovery.diagnostics, ...cache.diagnostics].map(
       ({ code, severity, area, message, path }) => ({ code, severity, area, message, path }),
     ),
   };

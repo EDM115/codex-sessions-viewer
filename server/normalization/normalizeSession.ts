@@ -19,6 +19,7 @@ import {
   type StatusActivity,
   type SubagentActivity,
   type TokenUsage,
+  type ToolActivity,
   type WebSearchActivity,
 } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
@@ -43,6 +44,7 @@ import { createUnknownActivity, sanitizeUnknownPayload } from "./unknownEvents.t
 const filenameUuidPattern =
   /([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?=\.jsonl$)/i;
 const epochTimestamp = "1970-01-01T00:00:00.000Z";
+export const NORMALIZATION_PARSER_VERSION = 2;
 
 export interface NormalizeSessionInput {
   records: readonly JsonlRecord[];
@@ -714,16 +716,16 @@ function normalizeActivities(
   turn: AssembledTurnEvents,
   media: MediaActivity[],
   eventOffsets: ReadonlyMap<string, number>,
+  tools: readonly ToolActivity[],
+  consumedToolEventIds: ReadonlySet<string>,
 ): ConversationActivity[] {
-  const tools = pairToolCalls(turn.events);
-  const consumed = new Set(tools.consumedEventIds);
   const activities: ConversationActivity[] = [
     ...normalizeReasoning(turn.events, turn.id),
-    ...tools.activities,
+    ...tools.filter(({ turnId }) => turnId === turn.id),
     ...media,
   ];
   for (const { event } of turn.events) {
-    if (consumed.has(event.id)) {
+    if (consumedToolEventIds.has(event.id)) {
       continue;
     }
     const activity =
@@ -744,6 +746,53 @@ function normalizeActivities(
       activityOffset(left, eventOffsets) - activityOffset(right, eventOffsets) ||
       left.id.localeCompare(right.id),
   );
+}
+
+function mergedActivityStatus(left: ActivityStatus, right: ActivityStatus): ActivityStatus {
+  const priority: Record<ActivityStatus, number> = {
+    failed: 6,
+    cancelled: 5,
+    succeeded: 4,
+    running: 3,
+    pending: 2,
+    unknown: 1,
+  };
+  return priority[right] > priority[left] ? right : left;
+}
+
+function reconcileActivity(
+  activity: ConversationActivity,
+  seen: Map<string, ConversationActivity>,
+  eventOffsets: ReadonlyMap<string, number>,
+): ConversationActivity | null {
+  const existing = seen.get(activity.id);
+  if (existing === undefined) {
+    seen.set(activity.id, activity);
+    return activity;
+  }
+  if (existing.kind === "web_search" && activity.kind === "web_search") {
+    existing.rawEventIds = unique([...existing.rawEventIds, ...activity.rawEventIds]).toSorted(
+      (left, right) =>
+        (eventOffsets.get(left) ?? Number.MAX_SAFE_INTEGER) -
+        (eventOffsets.get(right) ?? Number.MAX_SAFE_INTEGER),
+    );
+    existing.query ||= activity.query;
+    existing.status = mergedActivityStatus(existing.status, activity.status);
+    existing.resultCount ??= activity.resultCount;
+    return null;
+  }
+
+  const occurrence = activity.rawEventIds[0] ?? `turn-${activity.turnId}`;
+  const baseId = `${activity.id}:${occurrence}`;
+  let id = baseId;
+  let suffix = 2;
+  while (seen.has(id)) {
+    id = `${baseId}:${suffix}`;
+    suffix += 1;
+  }
+  activity.id = id;
+  seen.set(id, activity);
+  return activity;
 }
 
 function tokenSnapshot(turn: AssembledTurnEvents): TokenUsage | null {
@@ -917,6 +966,7 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
   if (unscopedUnknownEvents.length > 0) {
     const target = assembly.turns.at(-1) ?? {
       id: `${sessionId}:turn-0`,
+      sourceTurnId: null,
       index: 0,
       events: [],
     };
@@ -926,12 +976,24 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
     target.events.push(...unscopedUnknownEvents.map((event) => ({ event, turnId: target.id })));
   }
   const eventOffsets = new Map(events.map((event) => [event.id, event.byteStart]));
+  const pairedTools = pairToolCalls(assembly.turns.flatMap(({ events: turnEvents }) => turnEvents));
+  const consumedToolEventIds = new Set(pairedTools.consumedEventIds);
+  const seenActivities = new Map<string, ConversationActivity>();
   const fallbackTimestamp = sessionTimestamps(events, meta.timestamp).createdAt;
   const turns: ConversationTurn[] = [];
   let previousTokens: TokenUsage | null = null;
   for (const assembled of assembly.turns) {
     const messages = normalizeMessages(assembled, fallbackTimestamp);
-    const activities = normalizeActivities(assembled, messages.media, eventOffsets);
+    const activities = normalizeActivities(
+      assembled,
+      messages.media,
+      eventOffsets,
+      pairedTools.activities,
+      consumedToolEventIds,
+    ).flatMap((activity) => {
+      const reconciled = reconcileActivity(activity, seenActivities, eventOffsets);
+      return reconciled === null ? [] : [reconciled];
+    });
     const evidence = turnModelEvidence(assembled, events);
     const metrics = turnMetrics(assembled);
     const cumulativeTokens = tokenSnapshot(assembled);
@@ -948,23 +1010,25 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
         activity.namespace === null ? activity.name : `${activity.namespace}.${activity.name}`;
       toolCounts[name] = (toolCounts[name] ?? 0) + 1;
     }
-    turns.push(
-      conversationTurnSchema.parse({
-        id: assembled.id,
-        sessionId,
-        index: assembled.index,
-        userMessage: messages.userMessage,
-        assistantMessages: messages.assistantMessages,
-        activities,
-        ...metrics,
-        tokenDelta: delta,
-        models: evidence.models,
-        reasoningEfforts: evidence.efforts,
-        toolCounts,
-        diagnosticIds: [],
-      }),
-    );
+    turns.push({
+      id: assembled.id,
+      sourceTurnId: assembled.sourceTurnId,
+      sessionId,
+      index: assembled.index,
+      userMessage: messages.userMessage,
+      assistantMessages: messages.assistantMessages,
+      activities,
+      ...metrics,
+      tokenDelta: delta,
+      models: evidence.models,
+      reasoningEfforts: evidence.efforts,
+      toolCounts,
+      diagnosticIds: [],
+    });
   }
+  turns.forEach((turn, index) => {
+    turns[index] = conversationTurnSchema.parse(turn);
+  });
 
   const preview =
     turns.find(({ userMessage }) => userMessage !== null)?.userMessage?.sourceMarkdown ?? "";
@@ -1016,7 +1080,8 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
     childThreadIds: metadata.childThreadIds,
     hasMedia: turns.some(({ activities }) => activities.some(({ kind }) => kind === "media")),
     diagnosticCount: diagnostics.length,
-    revision: input.revision ?? `parser-1:${events.at(-1)?.byteEnd ?? 0}`,
+    revision:
+      input.revision ?? `parser-${NORMALIZATION_PARSER_VERSION}:${events.at(-1)?.byteEnd ?? 0}`,
   });
   const turnIds = new Map<string, string>();
   for (const turn of assembly.turns) {

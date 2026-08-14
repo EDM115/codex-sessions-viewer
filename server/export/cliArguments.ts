@@ -3,6 +3,7 @@ export interface ExportArguments {
   output?: string | undefined;
   offline: boolean;
   force: boolean;
+  index: boolean;
 }
 
 export interface DoctorArguments {
@@ -18,13 +19,15 @@ function optionValue(args: readonly string[], index: number, option: string): st
 }
 
 export function parseExportArguments(args: readonly string[]): ExportArguments {
-  const parsed: ExportArguments = { offline: false, force: false };
+  const parsed: ExportArguments = { offline: false, force: false, index: true };
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
     if (argument === "--offline") {
       parsed.offline = true;
     } else if (argument === "--force") {
       parsed.force = true;
+    } else if (argument === "--no-index") {
+      parsed.index = false;
     } else if (argument === "--codex-home" || argument === "--output") {
       const value = optionValue(args, index, argument);
       if (argument === "--codex-home") {

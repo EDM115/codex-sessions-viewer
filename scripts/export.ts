@@ -13,6 +13,7 @@ Options:
   --output <path>      Write the generated site to this directory
   --offline            Disable remote favicon requests
   --force              Retransform every discovered session
+  --no-index           Skip Pagefind generation and disable static search
   --help               Show this help and exit`;
 
 async function main(): Promise<void> {
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
       outputRoot: args.output === undefined ? undefined : resolve(args.output),
       offline: args.offline,
       force: args.force,
+      index: args.index,
       progress,
     });
   } catch (error) {
@@ -40,14 +42,22 @@ async function main(): Promise<void> {
     progress.finish();
   }
   console.log(
-    `Codex Sessions Viewer export: ${summary.sessionCount} sessions, ${summary.transformed} transformed, ${summary.reused} reused, ${summary.failed} failed.`,
+    `Codex Sessions Viewer export: ${summary.sessionCount} sessions, ${summary.transformed} transformed, ${summary.reused} reused, ${summary.failed} failed, ${summary.richContentFailures.length} rich-content fallbacks.`,
   );
   console.log(`Static output: ${summary.outputRoot}`);
   console.log(
-    `Pagefind: ${summary.pagefindRecords} turn records; content: ${summary.publishedAssets} assets and ${summary.publishedFavicons} favicons.`,
+    `${summary.searchIndex ? `Pagefind: ${summary.pagefindRecords} turn records` : "Pagefind: disabled (--no-index)"}; content: ${summary.publishedAssets} assets and ${summary.publishedFavicons} favicons.`,
   );
   if (Object.keys(summary.diagnosticCounts).length > 0) {
     console.log(`Diagnostics: ${JSON.stringify(summary.diagnosticCounts)}`);
+  }
+  if (summary.richContentFailures.length > 0) {
+    console.log("Rich-content fallbacks:");
+    for (const failure of summary.richContentFailures) {
+      console.log(`- ${failure.sessionId}`);
+      console.log(`  Source: ${failure.sourcePath}`);
+      console.log(`  Stage: ${failure.stage}; ${failure.errorName}: ${failure.errorMessage}`);
+    }
   }
 }
 

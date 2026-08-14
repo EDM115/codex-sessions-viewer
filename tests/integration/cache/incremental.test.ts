@@ -72,6 +72,38 @@ describe("incremental session cache", () => {
     }
   });
 
+  it("reparses an unchanged source when the normalized parser version advances", async () => {
+    const root = await temporaryRoot();
+    const sourcePath = join(root, "modern.jsonl");
+    const cachePath = join(root, "viewer.sqlite");
+    await writeFile(sourcePath, await fixture("modern.jsonl"), "utf8");
+    const oldDatabase = openCacheDatabase(cachePath);
+    try {
+      const oldUpdater = new SessionCacheUpdater(oldDatabase, { parserVersion: 1 });
+      await expect(oldUpdater.update({ path: sourcePath, scope: "active" })).resolves.toMatchObject(
+        {
+          status: "updated",
+        },
+      );
+    } finally {
+      oldDatabase.close();
+    }
+
+    const upgradedDatabase = openCacheDatabase(cachePath);
+    const upgradedNormalize = vi.fn<typeof normalizeSession>(normalizeSession);
+    try {
+      const upgradedUpdater = new SessionCacheUpdater(upgradedDatabase, {
+        normalize: upgradedNormalize,
+      });
+      await expect(
+        upgradedUpdater.update({ path: sourcePath, scope: "active" }),
+      ).resolves.toMatchObject({ status: "updated", mode: "full" });
+      expect(upgradedNormalize).toHaveBeenCalledOnce();
+    } finally {
+      upgradedDatabase.close();
+    }
+  });
+
   it("appends one growing session from memory and fully reparses it after truncation", async () => {
     const root = await temporaryRoot();
     const sourcePath = join(root, "modern.jsonl");
@@ -118,6 +150,33 @@ describe("incremental session cache", () => {
     }
   });
 
+  it("does not retain parsed source state when static scanning disables append reuse", async () => {
+    const root = await temporaryRoot();
+    const sourcePath = join(root, "modern.jsonl");
+    await writeFile(sourcePath, await fixture("modern.jsonl"), "utf8");
+    const database = openCacheDatabase(":memory:");
+    const updater = new SessionCacheUpdater(database, { retainLiveSources: false });
+
+    try {
+      await expect(updater.update({ path: sourcePath, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+        mode: "full",
+      });
+      await appendFile(
+        sourcePath,
+        '{"timestamp":"2026-01-01T10:00:24.000Z","type":"event_msg","payload":{"type":"agent_message","message":"Static append"}}\n',
+        "utf8",
+      );
+
+      await expect(updater.update({ path: sourcePath, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+        mode: "full",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it("keeps the last good normalized revision when the source changes during a read", async () => {
     const root = await temporaryRoot();
     const sourcePath = join(root, "modern.jsonl");
@@ -159,6 +218,60 @@ describe("incremental session cache", () => {
         retainedSessionId: first.sessionId,
       });
       expect(getCachedSession(database, first.sessionId)).toEqual(before);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("persists a source-level cache failure until that source updates successfully", async () => {
+    const root = await temporaryRoot();
+    const sourcePath = join(root, "modern.jsonl");
+    await writeFile(sourcePath, await fixture("modern.jsonl"), "utf8");
+    const database = openCacheDatabase(":memory:");
+    let shouldFail = true;
+    const updater = new SessionCacheUpdater(database, {
+      normalize(input) {
+        if (shouldFail) {
+          throw new Error("Synthetic normalization failure");
+        }
+        return normalizeSession(input);
+      },
+    });
+
+    try {
+      await expect(updater.update({ path: sourcePath, scope: "active" })).resolves.toMatchObject({
+        status: "failed",
+        retainedSessionId: null,
+        diagnostics: [
+          expect.objectContaining({
+            code: "cache.unavailable",
+            path: sourcePath,
+            details: { error: "Synthetic normalization failure" },
+          }),
+        ],
+      });
+      expect(
+        database
+          .prepare("SELECT session_id, code, path, details_json FROM diagnostics WHERE path = ?")
+          .all(sourcePath),
+      ).toEqual([
+        {
+          session_id: null,
+          code: "cache.unavailable",
+          path: sourcePath,
+          details_json: '{"error":"Synthetic normalization failure"}',
+        },
+      ]);
+
+      shouldFail = false;
+      await expect(updater.update({ path: sourcePath, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+      });
+      expect(
+        database
+          .prepare("SELECT COUNT(*) AS count FROM diagnostics WHERE path = ?")
+          .get(sourcePath),
+      ).toEqual({ count: 0 });
     } finally {
       database.close();
     }

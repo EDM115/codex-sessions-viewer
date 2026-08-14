@@ -22,6 +22,16 @@ async function fixtureRecords(name: string): Promise<JsonlRecord[]> {
   return records;
 }
 
+function jsonlRecords(values: JsonlRecord["value"][]): JsonlRecord[] {
+  return values.map((value, index) => ({
+    lineNumber: index + 1,
+    byteStart: index * 100,
+    byteEnd: (index + 1) * 100,
+    raw: JSON.stringify(value),
+    value,
+  }));
+}
+
 describe("session normalization", () => {
   it("normalizes a modern rollout without double-counting duplicated prose or token snapshots", async () => {
     const records = await fixtureRecords("modern.jsonl");
@@ -293,6 +303,245 @@ describe("session normalization", () => {
         kind: "status",
         status: "failed",
         message: "Synthetic failure",
+      }),
+    ]);
+  });
+
+  it("normalizes an in-flight steering message as a distinct viewer turn with shared source provenance", () => {
+    const values = [
+      {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "88888888-8888-4888-8888-888888888888" },
+      },
+      {
+        timestamp: "2026-01-01T00:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "turn-running" },
+      },
+      {
+        timestamp: "2026-01-01T00:00:02.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "initial prompt" },
+      },
+      {
+        timestamp: "2026-01-01T00:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "agent_reasoning", text: "still working" },
+      },
+      {
+        timestamp: "2026-01-01T00:00:04.000Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: "steer the running model" },
+      },
+      {
+        timestamp: "2026-01-01T00:00:05.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn-running" },
+      },
+    ] as JsonlRecord["value"][];
+
+    const result = normalizeSession({
+      sourcePath: "steering.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: values.map((value, index) => ({
+        lineNumber: index + 1,
+        byteStart: index * 100,
+        byteEnd: (index + 1) * 100,
+        raw: JSON.stringify(value),
+        value,
+      })),
+    });
+
+    expect(result.session?.turns).toEqual([
+      expect.objectContaining({
+        id: "turn-running",
+        sourceTurnId: "turn-running",
+        userMessage: expect.objectContaining({ sourceMarkdown: "initial prompt" }),
+      }),
+      expect.objectContaining({
+        id: "turn-running:raw-400",
+        sourceTurnId: "turn-running",
+        userMessage: expect.objectContaining({ sourceMarkdown: "steer the running model" }),
+      }),
+    ]);
+  });
+
+  it("coalesces both web-search representations without losing completion details", () => {
+    const result = normalizeSession({
+      sourcePath: "web-search.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: jsonlRecords([
+        {
+          timestamp: "2026-01-01T00:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "99999999-9999-4999-8999-999999999999" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn-web" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:02.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "search" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:03.000Z",
+          type: "event_msg",
+          payload: {
+            type: "web_search_end",
+            call_id: "search-1",
+            query: "Nuxt offline rendering",
+            results: [{ url: "https://nuxt.com" }, { url: "https://pagefind.app" }],
+          },
+        },
+        {
+          timestamp: "2026-01-01T00:00:03.010Z",
+          type: "response_item",
+          payload: {
+            type: "web_search_call",
+            id: "search-1",
+            status: "completed",
+            action: { type: "search", query: "Nuxt offline rendering" },
+          },
+        },
+      ]),
+    });
+
+    expect(
+      result.session?.turns[0]?.activities.filter(({ kind }) => kind === "web_search"),
+    ).toEqual([
+      expect.objectContaining({
+        id: "web-search-1",
+        query: "Nuxt offline rendering",
+        status: "succeeded",
+        resultCount: 2,
+        rawEventIds: ["raw-300", "raw-400"],
+      }),
+    ]);
+  });
+
+  it("pairs a tool call and output across an in-flight steering boundary", () => {
+    const result = normalizeSession({
+      sourcePath: "steered-tool.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: jsonlRecords([
+        {
+          timestamp: "2026-01-01T00:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn-tool" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:02.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "run it" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:03.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            call_id: "call-1",
+            name: "exec_command",
+            arguments: '{"cmd":"pnpm test"}',
+          },
+        },
+        {
+          timestamp: "2026-01-01T00:00:04.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "do not stop the running model" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:05.000Z",
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "call-1", output: "passed" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:06.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "turn-tool" },
+        },
+      ]),
+    });
+
+    const tools = result.session?.turns.flatMap(({ activities }) =>
+      activities.filter(({ kind }) => kind === "tool"),
+    );
+    expect(tools).toEqual([
+      expect.objectContaining({
+        id: "tool-call-1",
+        turnId: "turn-tool",
+        name: "exec_command",
+        input: { cmd: "pnpm test" },
+        output: "passed",
+        status: "succeeded",
+        rawEventIds: ["raw-300", "raw-500"],
+      }),
+    ]);
+  });
+
+  it("keeps repeated plan revisions as separately addressable activities", () => {
+    const result = normalizeSession({
+      sourcePath: "plans.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: jsonlRecords([
+        {
+          timestamp: "2026-01-01T00:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn-plan" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:02.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "write the plan" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:03.000Z",
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: { type: "Plan", id: "plan-1", text: "Version one" },
+          },
+        },
+        {
+          timestamp: "2026-01-01T00:00:04.000Z",
+          type: "event_msg",
+          payload: {
+            type: "item_completed",
+            item: { type: "Plan", id: "plan-1", text: "Version two" },
+          },
+        },
+      ]),
+    });
+
+    expect(result.session?.turns[0]?.activities.filter(({ kind }) => kind === "plan")).toEqual([
+      expect.objectContaining({
+        id: "plan-plan-1",
+        items: [{ step: "Version one", status: "completed" }],
+      }),
+      expect.objectContaining({
+        id: "plan-plan-1:raw-400",
+        items: [{ step: "Version two", status: "completed" }],
       }),
     ]);
   });

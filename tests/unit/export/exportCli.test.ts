@@ -11,13 +11,16 @@ describe("static export command arguments", () => {
         "--output=C:\\viewer output",
         "--offline",
         "--force",
+        "--no-index",
       ]),
     ).toEqual({
       codexHome: "C:\\Codex home",
       output: "C:\\viewer output",
       offline: true,
       force: true,
+      index: false,
     });
+    expect(parseExportArguments([])).toEqual({ offline: false, force: false, index: true });
   });
 
   it("rejects unknown and incomplete options", () => {

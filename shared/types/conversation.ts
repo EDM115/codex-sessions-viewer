@@ -175,6 +175,7 @@ export type ConversationActivity =
 
 export interface ConversationTurn {
   id: string;
+  sourceTurnId: string | null;
   sessionId: string;
   index: number;
   userMessage: ConversationMessage | null;
@@ -384,6 +385,7 @@ export const conversationActivitySchema = z.discriminatedUnion("kind", [
 
 export const conversationTurnSchema = z.strictObject({
   id: z.string().min(1),
+  sourceTurnId: z.string().min(1).nullable(),
   sessionId: z.string().min(1),
   index: countSchema,
   userMessage: conversationMessageSchema.nullable(),

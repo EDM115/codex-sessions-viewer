@@ -1,6 +1,10 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+
+import type { CustomRecord } from "pagefind";
 
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import { getCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
@@ -14,7 +18,9 @@ import { readSessionIndex, type SessionIndexEntry } from "../metadata/sessionInd
 import { snapshotStateDatabase, type StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 import {
-  buildPagefind,
+  appendPagefindRecords,
+  buildPagefindRecordSpool,
+  createPagefindTurnRecords,
   type PagefindBuildOptions,
   type PagefindBuildResult,
 } from "./buildPagefind.ts";
@@ -23,26 +29,53 @@ import {
   type ExportProgressSink,
   type ExportProgressStep,
 } from "./exportProgress.ts";
-import { serializedJson, writeOutputFile } from "./outputFiles.ts";
-import { prepareConversationForExport } from "./prepareConversation.ts";
+import {
+  createOutputStagingDirectories,
+  discardOutputStagingDirectories,
+  publishStagedOutput,
+  serializedJson,
+  writeOutputFile,
+} from "./outputFiles.ts";
+import {
+  prepareConversationForExport,
+  type PreparedConversationExport,
+  type PrepareConversationExportOptions,
+} from "./prepareConversation.ts";
 import { writeConversationExport } from "./writeConversationExport.ts";
 import {
   publishCachedContent,
+  publishGeneratedExportFiles,
   reconcileStaticSessionArtifacts,
   writeStaticPayloads,
 } from "./writeStaticPayloads.ts";
 
 export interface StaticGenerateInput {
   outputRoot: string;
+  buildRoot: string;
   routeManifest: string;
+  searchIndex: boolean;
 }
 
 export type StaticGenerateRunner = (input: StaticGenerateInput) => Promise<void>;
 export type PagefindBuilder = (
-  conversations: readonly NormalizedSession[],
+  records: readonly CustomRecord[],
   outputPath: string,
   options?: PagefindBuildOptions,
 ) => Promise<PagefindBuildResult>;
+export type ConversationPreparer = (
+  database: DatabaseSync,
+  source: NormalizedSession,
+  options: PrepareConversationExportOptions,
+) => Promise<PreparedConversationExport>;
+
+export interface RichContentFailure {
+  sessionId: string;
+  title: string;
+  sourcePath: string;
+  stage: "prepare" | "cache";
+  errorName: string;
+  errorMessage: string;
+}
 
 export interface RunStaticExportOptions {
   cwd?: string | undefined;
@@ -51,9 +84,11 @@ export interface RunStaticExportOptions {
   generatedRoot?: string | undefined;
   offline?: boolean | undefined;
   force?: boolean | undefined;
+  index?: boolean | undefined;
   paths?: ViewerPaths | undefined;
   generate?: StaticGenerateRunner | undefined;
   buildSearch?: PagefindBuilder | undefined;
+  prepareConversation?: ConversationPreparer | undefined;
   progress?: ExportProgressSink | undefined;
 }
 
@@ -67,10 +102,12 @@ export interface StaticExportSummary {
   cacheHits: number;
   sessionCount: number;
   pagefindRecords: number;
+  searchIndex: boolean;
   publishedAssets: number;
   publishedFavicons: number;
   removedArtifacts: number;
   diagnosticCounts: Record<string, number>;
+  richContentFailures: RichContentFailure[];
 }
 
 interface ExportMetadata {
@@ -164,7 +201,9 @@ async function defaultGenerateRunner(cwd: string, input: StaticGenerateInput): P
         ...process.env,
         CODEX_VIEWER_MODE: "static",
         CODEX_VIEWER_OUTPUT: input.outputRoot,
+        CODEX_VIEWER_BUILD_OUTPUT: input.buildRoot,
         CODEX_VIEWER_ROUTE_MANIFEST: input.routeManifest,
+        CODEX_VIEWER_PAGEFIND: input.searchIndex ? "1" : "0",
       },
       stdio: "inherit",
       windowsHide: true,
@@ -190,6 +229,9 @@ async function prepareConversations(
   paths: ViewerPaths,
   offline: boolean,
   failedSessions: Set<string>,
+  richContentFailures: RichContentFailure[],
+  prepareConversation: ConversationPreparer,
+  onPrepared: (conversation: NormalizedSession) => Promise<void>,
   onProgress: (completed: number, total: number) => void,
 ): Promise<{
   conversations: NormalizedSession[];
@@ -207,35 +249,61 @@ async function prepareConversations(
       onProgress(sessionIndex + 1, orderedSessionIds.length);
       continue;
     }
+    let conversation = cached;
+    let prepared: PreparedConversationExport | null = null;
     try {
       // oxlint-disable-next-line no-await-in-loop -- Each session is prepared deterministically and failures retain the plain cached conversation.
-      const prepared = await prepareConversationForExport(database, cached, {
+      prepared = await prepareConversation(database, cached, {
         mediaRoot: join(paths.cacheDir, "assets"),
         faviconRoot: join(paths.cacheDir, "favicons"),
         offline,
       });
-      updateCachedSessionRichContent(database, prepared.conversation);
-      conversations.push(prepared.conversation);
-      for (const id of prepared.assetIds) {
-        assetIds.add(id);
-      }
-      for (const origin of prepared.faviconOrigins) {
-        faviconOrigins.add(origin);
-      }
-    } catch {
-      failedSessions.add(sessionId);
-      conversations.push(cached);
+    } catch (error) {
+      richContentFailures.push(richContentFailure(cached, "prepare", error));
     }
+    if (prepared !== null) {
+      try {
+        updateCachedSessionRichContent(database, prepared.conversation);
+        conversation = prepared.conversation;
+        for (const id of prepared.assetIds) {
+          assetIds.add(id);
+        }
+        for (const origin of prepared.faviconOrigins) {
+          faviconOrigins.add(origin);
+        }
+      } catch (error) {
+        richContentFailures.push(richContentFailure(cached, "cache", error));
+      }
+    }
+    // oxlint-disable-next-line no-await-in-loop -- Full raw events are staged before this loop releases the session object.
+    await onPrepared(conversation);
+    conversations.push({ summary: conversation.summary, turns: [], rawEvents: [] });
     onProgress(sessionIndex + 1, orderedSessionIds.length);
   }
   return { conversations, assetIds, faviconOrigins };
+}
+
+function richContentFailure(
+  conversation: NormalizedSession,
+  stage: RichContentFailure["stage"],
+  error: unknown,
+): RichContentFailure {
+  return {
+    sessionId: conversation.summary.id,
+    title: conversation.summary.title,
+    sourcePath: conversation.summary.sourcePath,
+    stage,
+    errorName: error instanceof Error ? error.name : "UnknownError",
+    errorMessage: error instanceof Error ? error.message : String(error),
+  };
 }
 
 export async function runStaticExport(
   options: RunStaticExportOptions = {},
 ): Promise<StaticExportSummary> {
   const progress = options.progress ?? noopExportProgress;
-  progress.setSteps(EXPORT_PROGRESS_STEPS);
+  const searchIndex = options.index !== false;
+  progress.setSteps(searchIndex ? EXPORT_PROGRESS_STEPS : EXPORT_PROGRESS_STEPS.slice(0, -1));
   const cwd = resolve(options.cwd ?? process.cwd());
   const generatedRoot = resolve(options.generatedRoot ?? join(cwd, ".generated"));
   const outputRoot = resolve(options.outputRoot ?? join(cwd, ".output", "public"));
@@ -262,12 +330,15 @@ export async function runStaticExport(
   const diagnostics = [...config.diagnostics, ...discovery.diagnostics, ...metadata.diagnostics];
   const diagnosticsBySession = new Map<string, ViewerDiagnostic[]>();
   const failedSessions = new Set<string>();
+  const richContentFailures: RichContentFailure[] = [];
   const transformedSessions = new Set<string>();
   const reusedSessions = new Set<string>();
   const sessionIds = new Set<string>();
   const database = openCacheDatabase(config.paths.cacheDatabase);
+  let pagefindRecordSpool: string | null = null;
   try {
     const updater = new SessionCacheUpdater(database, {
+      retainLiveSources: false,
       sessionIndexEntries: metadata.sessionIndexEntries,
       stateSnapshot: metadata.stateSnapshot,
     });
@@ -306,44 +377,57 @@ export async function runStaticExport(
     );
 
     progress.statusProgress("Preparing conversations", 0, sessionIds.size);
+    let pagefindSpoolPath: string | null = null;
+    if (searchIndex) {
+      const spoolName = `pagefind-records-${randomUUID()}.jsonl`;
+      await writeOutputFile(generatedRoot, [spoolName], "");
+      pagefindSpoolPath = join(generatedRoot, spoolName);
+      pagefindRecordSpool = pagefindSpoolPath;
+    }
+    const pagefindRecords: CustomRecord[] | null =
+      searchIndex && options.buildSearch !== undefined ? [] : null;
+    let pagefindRecordCount = 0;
     const prepared = await prepareConversations(
       database,
       sessionIds,
       config.paths,
       options.offline === true || !config.settings.fetchFavicons,
       failedSessions,
+      richContentFailures,
+      options.prepareConversation ?? prepareConversationForExport,
+      async (conversation) => {
+        await writeConversationExport(conversation, { generatedRoot });
+        await writeStaticPayloads([conversation], {
+          generatedRoot,
+          writeIndex: false,
+          diagnosticsBySession,
+        });
+        if (pagefindSpoolPath !== null) {
+          const records = createPagefindTurnRecords([conversation]);
+          pagefindRecordCount += records.length;
+          await appendPagefindRecords(pagefindSpoolPath, records);
+          pagefindRecords?.push(...records);
+        }
+      },
       (completed, total) => progress.statusProgress("Preparing conversations", completed, total),
     );
     progress.step(
-      `Prepared ${prepared.conversations.length} ${pluralize("conversation", prepared.conversations.length)}`,
-      failedSessions.size === 0 ? "success" : "neutral",
+      `Prepared ${prepared.conversations.length} ${pluralize("conversation", prepared.conversations.length)}${richContentFailures.length === 0 ? "" : ` with ${richContentFailures.length} rich-content ${pluralize("fallback", richContentFailures.length)}`}`,
+      failedSessions.size === 0 && richContentFailures.length === 0 ? "success" : "neutral",
     );
 
-    const stagingWorkTotal = prepared.conversations.length + 4;
-    progress.statusProgress("Writing generated Markdown", 0, stagingWorkTotal);
-    for (const [conversationIndex, conversation] of prepared.conversations.entries()) {
-      // oxlint-disable-next-line no-await-in-loop -- Markdown files are staged before the public directory is regenerated.
-      await writeConversationExport(conversation, { generatedRoot });
-      progress.statusProgress(
-        "Writing generated Markdown",
-        conversationIndex + 1,
-        stagingWorkTotal,
-      );
-    }
-    progress.statusProgress(
-      "Writing generated static payloads",
-      prepared.conversations.length,
-      stagingWorkTotal,
-    );
+    const stagingWorkTotal = 4;
+    progress.statusProgress("Writing the generated session index", 0, stagingWorkTotal);
     await writeStaticPayloads(prepared.conversations, {
       generatedRoot,
-      diagnosticsBySession,
+      writeSessions: false,
     });
-    progress.statusProgress(
-      "Publishing generated assets and favicons",
-      prepared.conversations.length + 1,
-      stagingWorkTotal,
+    await writeOutputFile(
+      generatedRoot,
+      ["payloads", "export.json"],
+      serializedJson({ version: 1, pagefind: searchIndex }),
     );
+    progress.statusProgress("Publishing generated assets and favicons", 1, stagingWorkTotal);
     await publishCachedContent(database, {
       generatedRoot,
       assetIds: prepared.assetIds,
@@ -357,19 +441,11 @@ export async function runStaticExport(
       !discovery.diagnostics.some(
         ({ area, code }) => area === "source" && code === "codex_home.unreadable",
       );
-    progress.statusProgress(
-      "Reconciling proven stale generated artifacts",
-      prepared.conversations.length + 2,
-      stagingWorkTotal,
-    );
+    progress.statusProgress("Reconciling proven stale generated artifacts", 2, stagingWorkTotal);
     const removed = await reconcileStaticSessionArtifacts(generatedRoot, expectedScopes, {
       completeReconciliation,
     });
-    progress.statusProgress(
-      "Writing the session route manifest",
-      prepared.conversations.length + 3,
-      stagingWorkTotal,
-    );
+    progress.statusProgress("Writing the session route manifest", 3, stagingWorkTotal);
     const routeManifest = join(generatedRoot, "routes.json");
     const routes = prepared.conversations
       .map(({ summary }) => `/session/${encodeURIComponent(summary.id)}`)
@@ -378,89 +454,100 @@ export async function runStaticExport(
     progress.statusProgress("Generated export staging ready", stagingWorkTotal, stagingWorkTotal);
     progress.step(`Staged ${prepared.conversations.length} conversations for static generation`);
 
-    progress.status("Generating the Nuxt static site");
-    progress.suspend();
+    const outputStaging = await createOutputStagingDirectories(outputRoot);
     try {
-      await (options.generate ?? ((input) => defaultGenerateRunner(cwd, input)))({
-        outputRoot,
-        routeManifest,
-      });
-    } finally {
-      progress.resume();
-    }
-    progress.step("Generated the Nuxt static site");
+      progress.status("Generating the Nuxt static site in isolated staging");
+      progress.suspend();
+      try {
+        await (options.generate ?? ((input) => defaultGenerateRunner(cwd, input)))({
+          outputRoot: outputStaging.publicRoot,
+          buildRoot: outputStaging.buildRoot,
+          routeManifest,
+          searchIndex,
+        });
+      } finally {
+        progress.resume();
+      }
+      progress.step("Generated the Nuxt static site in isolated staging");
 
-    const publicationWorkTotal = prepared.conversations.length + 2;
-    progress.statusProgress("Publishing downloadable Markdown", 0, publicationWorkTotal);
-    for (const [conversationIndex, conversation] of prepared.conversations.entries()) {
-      // oxlint-disable-next-line no-await-in-loop -- Downloads are mirrored only after Nuxt has finalized its public directory.
-      await writeConversationExport(conversation, { generatedRoot, publicRoot: outputRoot });
+      const publicationWorkTotal = 2;
+      progress.statusProgress("Mirroring generated conversations", 0, publicationWorkTotal);
+      await publishGeneratedExportFiles(generatedRoot, outputStaging.publicRoot);
+      progress.statusProgress("Preparing referenced assets and favicons", 1, publicationWorkTotal);
+      const published = await publishCachedContent(database, {
+        generatedRoot,
+        publicRoot: outputStaging.publicRoot,
+        assetIds: prepared.assetIds,
+        faviconOrigins: prepared.faviconOrigins,
+      });
       progress.statusProgress(
-        "Publishing downloadable Markdown",
-        conversationIndex + 1,
+        "Prepared the offline data repository",
+        publicationWorkTotal,
         publicationWorkTotal,
       );
-    }
-    progress.statusProgress(
-      "Publishing static conversation payloads",
-      prepared.conversations.length,
-      publicationWorkTotal,
-    );
-    await writeStaticPayloads(prepared.conversations, {
-      generatedRoot,
-      publicRoot: outputRoot,
-      diagnosticsBySession,
-    });
-    progress.statusProgress(
-      "Publishing referenced assets and favicons",
-      prepared.conversations.length + 1,
-      publicationWorkTotal,
-    );
-    const published = await publishCachedContent(database, {
-      generatedRoot,
-      publicRoot: outputRoot,
-      assetIds: prepared.assetIds,
-      faviconOrigins: prepared.faviconOrigins,
-    });
-    progress.statusProgress(
-      "Published the offline data repository",
-      publicationWorkTotal,
-      publicationWorkTotal,
-    );
-    progress.step(
-      `Published ${prepared.conversations.length} conversations, ${published.assetCount} assets, and ${published.faviconCount} favicons`,
-    );
+      progress.step(
+        `Prepared ${prepared.conversations.length} conversations, ${published.assetCount} assets, and ${published.faviconCount} favicons for publication`,
+      );
 
-    const pagefindRecordCount = prepared.conversations.reduce(
-      (total, conversation) => total + conversation.turns.length,
-      0,
-    );
-    progress.statusProgress("Building the offline search index", 0, pagefindRecordCount);
-    const pagefind = await (options.buildSearch ?? buildPagefind)(
-      prepared.conversations,
-      join(outputRoot, "pagefind"),
-      {
-        onRecordProgress: (completed, total) =>
-          progress.statusProgress("Building the offline search index", completed, total),
-      },
-    );
-    progress.step(`Built the offline search index with ${pagefind.recordCount} turn records`);
-    return {
-      codexHome: config.settings.codexHome,
-      outputRoot,
-      discovered: discovery.rollouts.length,
-      transformed: transformedSessions.size,
-      reused: reusedSessions.size,
-      failed: failedSessions.size,
-      cacheHits: reusedSessions.size,
-      sessionCount: prepared.conversations.length,
-      pagefindRecords: pagefind.recordCount,
-      publishedAssets: published.assetCount,
-      publishedFavicons: published.faviconCount,
-      removedArtifacts: removed.length,
-      diagnosticCounts: diagnosticCounts(diagnostics),
-    };
+      let publishedPagefindRecords = 0;
+      if (searchIndex) {
+        if (pagefindSpoolPath === null) {
+          throw new Error("Pagefind record spool was not created.");
+        }
+        progress.statusProgress("Building the offline search index", 0, pagefindRecordCount);
+        const pagefindOptions: PagefindBuildOptions = {
+          onRecordProgress: (completed, total) =>
+            progress.statusProgress("Building the offline search index", completed, total),
+          onWriteStart: () => progress.status("Finalizing the offline search index"),
+        };
+        const pagefind =
+          options.buildSearch === undefined
+            ? await buildPagefindRecordSpool(
+                pagefindSpoolPath,
+                pagefindRecordCount,
+                join(outputStaging.publicRoot, "pagefind"),
+                pagefindOptions,
+              )
+            : await options.buildSearch(
+                pagefindRecords ?? [],
+                join(outputStaging.publicRoot, "pagefind"),
+                pagefindOptions,
+              );
+        publishedPagefindRecords = pagefind.recordCount;
+      } else {
+        progress.step("Skipped the offline search index (--no-index)");
+      }
+      progress.status("Publishing the complete offline site");
+      await publishStagedOutput(outputStaging.publicRoot, outputRoot);
+      progress.step(
+        searchIndex
+          ? `Published the complete offline site with ${publishedPagefindRecords} indexed turn records`
+          : "Published the complete offline site without a search index",
+      );
+      return {
+        codexHome: config.settings.codexHome,
+        outputRoot,
+        discovered: discovery.rollouts.length,
+        transformed: transformedSessions.size,
+        reused: reusedSessions.size,
+        failed: failedSessions.size,
+        cacheHits: reusedSessions.size,
+        sessionCount: prepared.conversations.length,
+        pagefindRecords: publishedPagefindRecords,
+        searchIndex,
+        publishedAssets: published.assetCount,
+        publishedFavicons: published.faviconCount,
+        removedArtifacts: removed.length,
+        diagnosticCounts: diagnosticCounts(diagnostics),
+        richContentFailures,
+      };
+    } finally {
+      await discardOutputStagingDirectories(outputStaging);
+    }
   } finally {
     database.close();
+    if (pagefindRecordSpool !== null) {
+      await rm(pagefindRecordSpool, { force: true });
+    }
   }
 }

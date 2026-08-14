@@ -214,7 +214,9 @@ export function pairToolCalls(events: readonly TurnScopedEvent[]): ToolPairingRe
         pair.output = decodedValue(payload["output"]);
       }
       const details = resultDetails(pair.output);
-      pair.status = mappedStatus(payload["status"]) ?? details.status;
+      pair.status =
+        mappedStatus(payload["status"]) ??
+        (details.status === "unknown" ? "succeeded" : details.status);
       pair.error = details.error;
       continue;
     }

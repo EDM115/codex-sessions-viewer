@@ -3,7 +3,15 @@ import { resolve } from "node:path";
 
 const viewerMode = process.env.CODEX_VIEWER_MODE === "static" ? "static" : "live";
 const configuredOutput = process.env.CODEX_VIEWER_OUTPUT?.trim();
+const configuredBuildOutput = process.env.CODEX_VIEWER_BUILD_OUTPUT?.trim();
 const routeManifest = process.env.CODEX_VIEWER_ROUTE_MANIFEST?.trim();
+const pagefindEnabled = process.env.CODEX_VIEWER_PAGEFIND !== "0";
+const buildOutput =
+  configuredBuildOutput === undefined
+    ? viewerMode === "live"
+      ? resolve(".output-live")
+      : undefined
+    : resolve(configuredBuildOutput);
 
 function staticSessionRoutes(): string[] {
   if (
@@ -101,7 +109,14 @@ export default defineNuxtConfig({
     server: false,
   },
   nitro: {
-    ...(configuredOutput === undefined ? {} : { output: { publicDir: resolve(configuredOutput) } }),
+    ...(configuredOutput === undefined && buildOutput === undefined
+      ? {}
+      : {
+          output: {
+            ...(buildOutput === undefined ? {} : { dir: buildOutput }),
+            ...(configuredOutput === undefined ? {} : { publicDir: resolve(configuredOutput) }),
+          },
+        }),
     compressPublicAssets: {
       brotli: true,
       gzip: true,
@@ -142,6 +157,9 @@ export default defineNuxtConfig({
   },
   runtimeConfig: {
     viewerMode,
+    public: {
+      pagefindEnabled,
+    },
   },
   routeRules: {
     "/**": {

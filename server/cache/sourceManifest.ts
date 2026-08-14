@@ -17,13 +17,14 @@ import type { SourceIdentity } from "../ingestion/stableRead.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
 import {
+  NORMALIZATION_PARSER_VERSION,
   normalizeSession,
   type NormalizeSessionInput,
   type NormalizeSessionResult,
 } from "../normalization/normalizeSession.ts";
 import { replaceCachedSession } from "./conversationStore.ts";
 
-export const CACHE_PARSER_VERSION = 1;
+export const CACHE_PARSER_VERSION = NORMALIZATION_PARSER_VERSION;
 const PREFIX_PROBE_BYTES = 64;
 
 export interface SourceManifestEntry {
@@ -41,6 +42,7 @@ export type StableJsonlReader = (
 
 export interface SessionCacheUpdaterOptions {
   parserVersion?: number | undefined;
+  retainLiveSources?: boolean | undefined;
   normalize?: ((input: NormalizeSessionInput) => NormalizeSessionResult) | undefined;
   readJsonl?: StableJsonlReader | undefined;
   sessionIndexEntries?: SessionIndexEntry[] | undefined;
@@ -221,11 +223,54 @@ function parseErrors(path: string, errors: readonly JsonlParseError[]): ViewerDi
   ];
 }
 
+function replaceSourceFailureDiagnostics(
+  database: DatabaseSync,
+  path: string,
+  diagnostics: readonly ViewerDiagnostic[],
+): void {
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    database.prepare("DELETE FROM diagnostics WHERE session_id IS NULL AND path = ?").run(path);
+    const insert = database.prepare(`
+      INSERT INTO diagnostics (
+        id, session_id, code, severity, area, message, path, recoverable, created_at, details_json
+      ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const diagnostic of diagnostics) {
+      insert.run(
+        `${diagnostic.id}:source-failure`,
+        diagnostic.code,
+        diagnostic.severity,
+        diagnostic.area,
+        diagnostic.message,
+        path,
+        diagnostic.recoverable ? 1 : 0,
+        diagnostic.createdAt,
+        JSON.stringify(diagnostic.details),
+      );
+    }
+    database.exec("COMMIT");
+  } catch {
+    if (database.isTransaction) {
+      database.exec("ROLLBACK");
+    }
+  }
+}
+
+function clearSourceFailureDiagnostics(database: DatabaseSync, path: string): void {
+  try {
+    database.prepare("DELETE FROM diagnostics WHERE session_id IS NULL AND path = ?").run(path);
+  } catch {
+    // A cache cleanup failure must not make a successfully parsed Codex source unavailable.
+  }
+}
+
 export class SessionCacheUpdater {
   readonly #database: DatabaseSync;
   readonly #parserVersion: number;
   readonly #normalize: (input: NormalizeSessionInput) => NormalizeSessionResult;
   readonly #readJsonl: StableJsonlReader;
+  readonly #retainLiveSources: boolean;
   readonly #defaultSessionIndexEntries: SessionIndexEntry[];
   readonly #defaultStateSnapshot: StateMetadataSnapshot | null;
   readonly #liveSources = new Map<string, LiveSourceState>();
@@ -235,6 +280,7 @@ export class SessionCacheUpdater {
     this.#parserVersion = options.parserVersion ?? CACHE_PARSER_VERSION;
     this.#normalize = options.normalize ?? normalizeSession;
     this.#readJsonl = options.readJsonl ?? readStableJsonl;
+    this.#retainLiveSources = options.retainLiveSources ?? true;
     this.#defaultSessionIndexEntries = options.sessionIndexEntries ?? [];
     this.#defaultStateSnapshot = options.stateSnapshot ?? null;
     if (!Number.isSafeInteger(this.#parserVersion) || this.#parserVersion <= 0) {
@@ -349,6 +395,7 @@ export class SessionCacheUpdater {
     });
     const diagnostics = [...normalized.diagnostics, ...parseErrors(source.path, candidate.errors)];
     if (normalized.session === null) {
+      replaceSourceFailureDiagnostics(this.#database, source.path, diagnostics);
       return {
         status: "failed",
         retainedSessionId: getSourceManifestEntry(this.#database, source.path)?.sessionId ?? null,
@@ -365,7 +412,12 @@ export class SessionCacheUpdater {
         identity: candidate.identity,
       },
     });
-    this.#liveSources.set(source.path, candidate);
+    clearSourceFailureDiagnostics(this.#database, source.path);
+    if (this.#retainLiveSources) {
+      this.#liveSources.set(source.path, candidate);
+    } else {
+      this.#liveSources.delete(source.path);
+    }
     return {
       status: "updated",
       mode,
@@ -412,18 +464,22 @@ export class SessionCacheUpdater {
         ? await this.#readAppend(source, live)
         : await this.#readFull(source);
       if (candidate === null) {
+        const diagnostics = [changedDuringRead(source.path)];
+        replaceSourceFailureDiagnostics(this.#database, source.path, diagnostics);
         return {
           status: "failed",
           retainedSessionId: persisted?.sessionId ?? null,
-          diagnostics: [changedDuringRead(source.path)],
+          diagnostics,
         };
       }
       return this.#normalizeAndStore(source, candidate, candidate.mode, context);
     } catch (error) {
+      const diagnostics = [cacheFailure(source.path, error)];
+      replaceSourceFailureDiagnostics(this.#database, source.path, diagnostics);
       return {
         status: "failed",
         retainedSessionId: persisted?.sessionId ?? null,
-        diagnostics: [cacheFailure(source.path, error)],
+        diagnostics,
       };
     }
   }

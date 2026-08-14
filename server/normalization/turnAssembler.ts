@@ -2,6 +2,7 @@ import { payloadObject, type CodexEvent, type TurnScopedEvent } from "./eventSch
 
 export interface AssembledTurnEvents {
   id: string;
+  sourceTurnId: string | null;
   index: number;
   events: TurnScopedEvent[];
 }
@@ -13,6 +14,7 @@ export interface TurnAssemblyResult {
 
 interface MutableTurn {
   id: string;
+  sourceTurnId: string | null;
   index: number;
   provisional: boolean;
   closed: boolean;
@@ -74,8 +76,9 @@ function addEvent(turn: MutableTurn, event: CodexEvent): void {
   turn.events.push({ event, turnId: turn.id });
 }
 
-function renameTurn(turn: MutableTurn, id: string): void {
+function renameTurn(turn: MutableTurn, id: string, sourceTurnId: string): void {
   turn.id = id;
+  turn.sourceTurnId = sourceTurnId;
   turn.provisional = false;
   for (const scoped of turn.events) {
     scoped.turnId = id;
@@ -90,9 +93,22 @@ export function assembleTurnEvents(
   const unscopedEvents: CodexEvent[] = [];
   let active: MutableTurn | null = null;
 
-  const createTurn = (id: string | null, provisional: boolean): MutableTurn => {
+  const viewerTurnId = (sourceTurnId: string, event: CodexEvent): string =>
+    turns.some((turn) => turn.sourceTurnId === sourceTurnId)
+      ? `${sourceTurnId}:${event.id}`
+      : sourceTurnId;
+
+  const createTurn = (
+    sourceTurnId: string | null,
+    provisional: boolean,
+    event?: CodexEvent,
+  ): MutableTurn => {
     const turn: MutableTurn = {
-      id: id ?? `${sessionId}:turn-${turns.length}`,
+      id:
+        sourceTurnId === null
+          ? `${sessionId}:turn-${turns.length}`
+          : viewerTurnId(sourceTurnId, event!),
+      sourceTurnId,
       index: turns.length,
       provisional,
       closed: false,
@@ -118,23 +134,23 @@ export function assembleTurnEvents(
 
     if (beginsOrNamesTurn(event)) {
       if (active !== null && active.provisional && !active.closed && explicit !== null) {
-        renameTurn(active, explicit);
+        renameTurn(active, viewerTurnId(explicit, active.events[0]?.event ?? event), explicit);
       } else if (
         active === null ||
         active.closed ||
-        (explicit !== null && active.id !== explicit)
+        (explicit !== null && active.sourceTurnId !== explicit)
       ) {
-        active = createTurn(explicit, explicit === null);
+        active = createTurn(explicit, explicit === null, event);
       }
       addEvent(active, event);
       continue;
     }
 
     if (explicit !== null) {
-      if (active === null || (active.id !== explicit && !active.provisional)) {
-        active = createTurn(explicit, false);
+      if (active === null || (active.sourceTurnId !== explicit && !active.provisional)) {
+        active = createTurn(explicit, false, event);
       } else if (active.provisional) {
-        renameTurn(active, explicit);
+        renameTurn(active, viewerTurnId(explicit, active.events[0]?.event ?? event), explicit);
       }
       addEvent(active, event);
       if (closesTurn(event)) {
@@ -152,7 +168,12 @@ export function assembleTurnEvents(
   }
 
   return {
-    turns: turns.map(({ id, index, events: turnEvents }) => ({ id, index, events: turnEvents })),
+    turns: turns.map(({ id, sourceTurnId, index, events: turnEvents }) => ({
+      id,
+      sourceTurnId,
+      index,
+      events: turnEvents,
+    })),
     unscopedEvents,
   };
 }
