@@ -129,4 +129,19 @@ plain <source>
     expect(JSON.stringify(result.document)).toContain("unfinished");
     expect(JSON.stringify(result.document)).toContain("after");
   });
+
+  it("preserves inert file references for viewer-side path presentation", async () => {
+    const result = await parseRichText(
+      "Inspect [reader.ts](file:///C:/work/src/reader.ts#L12C4) before retrying.",
+    );
+    const nodes = descendants(result.document.children);
+
+    expect(nodes).toContainEqual(
+      expect.objectContaining({
+        type: "link",
+        url: "file:///C:/work/src/reader.ts#L12C4",
+        origin: null,
+      }),
+    );
+  });
 });

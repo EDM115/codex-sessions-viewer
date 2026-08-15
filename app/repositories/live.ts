@@ -40,6 +40,15 @@ function queryString(input: object): string {
   return encoded === "" ? "" : `?${encoded}`;
 }
 
+function base64Url(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
 async function request(path: string, options: RepositoryRequestOptions = {}): Promise<unknown> {
   const response = await fetch(path, {
     headers: { Accept: "application/json" },
@@ -101,6 +110,10 @@ export class LiveApiConversationRepository implements ConversationRepository {
     return resolvedAssetSchema.parse(
       await this.requester(`/api/assets/${encodeURIComponent(assetId)}`),
     );
+  }
+
+  async resolveFavicon(origin: string): Promise<string> {
+    return `/api/favicons/${base64Url(origin)}`;
   }
 
   subscribe(listener: (event: ViewerInvalidation) => void): () => void {

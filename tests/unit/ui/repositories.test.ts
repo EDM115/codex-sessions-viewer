@@ -217,4 +217,27 @@ describe("conversation repository adapters", () => {
       backgroundFaviconFetch: false,
     });
   });
+
+  it("resolves cached favicon URLs without contacting external origins", async () => {
+    const staticRequest = vi.fn<RepositoryRequester>(async (path) => {
+      expect(path).toBe("/payloads/favicons.json");
+      return {
+        version: 1,
+        favicons: [{ origin: "https://nuxt.com", url: "/favicons/nuxt.png" }],
+      };
+    });
+    const staticRepository = new StaticConversationRepository(staticRequest);
+    const liveRequest = vi.fn<RepositoryRequester>();
+    const liveRepository = new LiveApiConversationRepository(liveRequest);
+
+    await expect(staticRepository.resolveFavicon("https://nuxt.com")).resolves.toBe(
+      "/favicons/nuxt.png",
+    );
+    await expect(staticRepository.resolveFavicon("https://missing.example")).resolves.toBeNull();
+    expect(staticRequest).toHaveBeenCalledOnce();
+    await expect(liveRepository.resolveFavicon("https://nuxt.com")).resolves.toBe(
+      "/api/favicons/aHR0cHM6Ly9udXh0LmNvbQ",
+    );
+    expect(liveRequest).not.toHaveBeenCalled();
+  });
 });

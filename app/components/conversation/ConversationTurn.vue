@@ -2,15 +2,18 @@
 import { computed } from "vue";
 
 import type { ConversationTurn } from "#shared/types/conversation.ts";
-import type { InspectorTarget } from "#shared/types/repository.ts";
+import type { InspectorTarget, ResolvedAsset } from "#shared/types/repository.ts";
 import type { PresentationSettings } from "#shared/types/settings.ts";
 
+import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
 import ConversationActivityList from "./ConversationActivityList.vue";
 import ConversationMessage from "./ConversationMessage.vue";
 import { agentWorkText } from "./format.ts";
 
 const props = defineProps<{
   reasoningDefault: PresentationSettings["reasoningDefault"];
+  resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
+  resolveFavicon?: (origin: string) => Promise<string | null>;
   timestampFormat: PresentationSettings["timestampFormat"];
   toolCallsDefault: PresentationSettings["toolCallsDefault"];
   turn: ConversationTurn;
@@ -19,6 +22,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   beforeResize: [];
   inspect: [target: InspectorTarget];
+  openMedia: [item: MediaViewerItem];
   resized: [];
 }>();
 
@@ -30,7 +34,10 @@ const workText = computed(() => agentWorkText(props.turn));
     <ConversationMessage
       v-if="turn.userMessage !== null"
       :message="turn.userMessage"
+      :resolve-asset="resolveAsset"
+      :resolve-favicon="resolveFavicon"
       :timestamp-format="timestampFormat"
+      @open-media="emit('openMedia', $event)"
     />
     <ConversationActivityList
       :activities="turn.activities"
@@ -43,10 +50,13 @@ const workText = computed(() => agentWorkText(props.turn));
       v-for="(message, index) in turn.assistantMessages"
       :key="message.id"
       :message="message"
+      :resolve-asset="resolveAsset"
+      :resolve-favicon="resolveFavicon"
       :timestamp-format="timestampFormat"
       :duration-ms="index === turn.assistantMessages.length - 1 ? turn.durationMs : null"
       :agent-work="workText"
       @inspect="emit('inspect', { type: 'message', id: $event })"
+      @open-media="emit('openMedia', $event)"
     />
   </section>
 </template>

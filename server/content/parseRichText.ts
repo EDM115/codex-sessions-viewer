@@ -89,6 +89,12 @@ function annotateMarkdown() {
           ...node.data.hProperties,
           dataOriginalSrc: node.url,
         };
+      } else if (node.type === "link" && node.url !== undefined) {
+        node.data = node.data ?? {};
+        node.data.hProperties = {
+          ...node.data.hProperties,
+          dataOriginalHref: node.url,
+        };
       }
       if ("children" in node) {
         for (const child of node.children) {
@@ -156,7 +162,9 @@ function canonicalLink(
     if (url.protocol === "http:" || url.protocol === "https:") {
       return { url: url.href, origin: url.origin };
     }
-    return url.protocol === "mailto:" ? { url: url.href, origin: null } : null;
+    return url.protocol === "mailto:" || url.protocol === "file:"
+      ? { url: url.href, origin: null }
+      : null;
   } catch {
     return /^[#./]/u.test(href) ? { url: href, origin: null } : null;
   }
@@ -316,7 +324,7 @@ async function convertNode(
   }
   if (node.tagName === "a") {
     const children = await convertChildren(node, context);
-    const href = property(node.properties, "href");
+    const href = property(node.properties, "dataOriginalHref", "data-original-href", "href");
     const link = href === null ? null : canonicalLink(href, context.options.baseUrl);
     return link === null
       ? children

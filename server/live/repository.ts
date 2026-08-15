@@ -84,6 +84,10 @@ export class LiveConversationRepository implements ConversationRepository {
     };
   }
 
+  async resolveFavicon(origin: string) {
+    return `/api/favicons/${Buffer.from(origin).toString("base64url")}`;
+  }
+
   subscribe(listener: Parameters<InvalidationBus["subscribe"]>[0]) {
     return this.#bus.subscribe(listener);
   }

@@ -18,7 +18,7 @@ export default defineConfig({
         test: {
           name: "node",
           include: ["tests/unit/**/*.{test,spec}.ts", "tests/integration/**/*.{test,spec}.ts"],
-          exclude: ["tests/unit/ui/**/*"],
+          exclude: ["tests/unit/content-rendering/**/*", "tests/unit/ui/**/*"],
           environment: "node",
         },
       },
@@ -29,7 +29,10 @@ export default defineConfig({
         },
         test: {
           name: "ui",
-          include: ["tests/unit/ui/**/*.{test,spec}.ts"],
+          include: [
+            "tests/unit/content-rendering/**/*.{test,spec}.ts",
+            "tests/unit/ui/**/*.{test,spec}.ts",
+          ],
           environment: "happy-dom",
         },
       },

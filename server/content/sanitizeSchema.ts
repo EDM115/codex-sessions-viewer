@@ -11,6 +11,7 @@ export const richTextSanitizeSchema: Options = {
   ],
   attributes: {
     ...defaultSchema.attributes,
+    a: [...attributesFor("a"), "dataOriginalHref"],
     code: [...attributesFor("code"), "dataLanguage", "dataMeta"],
     details: [...attributesFor("details"), "open"],
     img: [...attributesFor("img"), "dataOriginalSrc"],

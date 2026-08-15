@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { PhArrowDown, PhArrowLeft, PhArrowUp, PhSidebarSimple } from "@phosphor-icons/vue";
 import { useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/vue-virtual";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  shallowRef,
+} from "vue";
 
 import { shouldAdjustForMeasuredRow } from "#shared/timeline/scrollAnchoring.ts";
 import { activeVirtualRowIndex } from "#shared/timeline/turnMinimap.ts";
@@ -14,6 +22,7 @@ import type {
 } from "#shared/types/repository.ts";
 
 import { useConversationTimeline } from "../../composables/useConversationTimeline.ts";
+import { useMediaViewer } from "../../composables/useMediaViewer.ts";
 import { usePresentationSettings } from "../../composables/usePresentationSettings.ts";
 import {
   type ScrollAnchorSnapshot,
@@ -27,6 +36,8 @@ import ConversationInspector from "./ConversationInspector.vue";
 import ConversationTurn from "./ConversationTurn.vue";
 import { formatTimestamp } from "./format.ts";
 import TurnMinimap from "./TurnMinimap.vue";
+
+const MediaViewer = defineAsyncComponent(() => import("../media/MediaViewer.vue"));
 
 const props = defineProps<{
   initialChunk: TurnChunk;
@@ -47,6 +58,9 @@ const requestFetch = useRequestFetch() as unknown as (
 const requester: RepositoryRequester = (path, options = {}) =>
   requestFetch(path, { signal: options.signal }) as Promise<unknown>;
 const repository = createConversationRepository(props.mode, requester);
+const resolveAsset = (assetId: string) => repository.resolveAsset(assetId);
+const resolveFavicon = (origin: string) => repository.resolveFavicon(origin);
+const mediaViewer = useMediaViewer();
 const summaryState = shallowRef(props.summary);
 const timeline = useConversationTimeline({
   sessionId: props.summary.id,
@@ -519,11 +533,14 @@ onBeforeUnmount(() => {
               v-if="timeline.turns.value[row.index] !== undefined"
               :turn="timeline.turns.value[row.index]!"
               :reasoning-default="settings.reasoningDefault"
+              :resolve-asset="resolveAsset"
+              :resolve-favicon="resolveFavicon"
               :tool-calls-default="settings.toolCallsDefault"
               :timestamp-format="settings.timestampFormat"
               @before-resize="captureDisclosureAnchor"
               @resized="restoreDisclosureAnchor"
               @inspect="openInspector"
+              @open-media="mediaViewer.open"
             />
           </div>
         </div>
@@ -533,9 +550,12 @@ onBeforeUnmount(() => {
             :key="turn.id"
             :turn="turn"
             :reasoning-default="settings.reasoningDefault"
+            :resolve-asset="resolveAsset"
+            :resolve-favicon="resolveFavicon"
             :tool-calls-default="settings.toolCallsDefault"
             :timestamp-format="settings.timestampFormat"
             @inspect="openInspector"
+            @open-media="mediaViewer.open"
           />
         </div>
         <div class="conversation-timeline__load conversation-timeline__load--after">
@@ -575,4 +595,10 @@ onBeforeUnmount(() => {
       />
     </section>
   </main>
+  <MediaViewer
+    v-if="mediaViewer.item.value !== null"
+    :item="mediaViewer.item.value"
+    :background="workbench ?? undefined"
+    @close="mediaViewer.close"
+  />
 </template>

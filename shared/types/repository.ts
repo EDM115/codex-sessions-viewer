@@ -133,6 +133,7 @@ export interface ConversationRepository {
   getTurns(id: string, query: TurnChunkQuery): Promise<TurnChunk>;
   getInspector(id: string, target: InspectorTarget): Promise<InspectorRecord>;
   resolveAsset(assetId: string): Promise<ResolvedAsset>;
+  resolveFavicon(origin: string): Promise<string | null>;
   subscribe(listener: (event: ViewerInvalidation) => void): () => void;
 }
 

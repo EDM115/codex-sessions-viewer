@@ -90,9 +90,16 @@ describe("session normalization", () => {
       expect.objectContaining({
         phase: "final",
         createdAt: "2026-01-01T10:00:05.000Z",
-        sourceMarkdown: "The parser is ready.",
+        sourceMarkdown: expect.stringContaining("The parser is ready."),
       }),
     ]);
+    expect(session.turns[0]?.assistantMessages[0]?.sourceMarkdown).toContain(
+      '```ts title="reader.ts"',
+    );
+    expect(session.turns[0]?.assistantMessages[0]?.sourceMarkdown).toContain("```mermaid");
+    expect(session.turns[0]?.assistantMessages[0]?.sourceMarkdown).toContain(
+      "![Generated pixel](data:image/png;base64,",
+    );
     expect(session.turns[0]?.assistantMessages[0]?.rawEventIds).toHaveLength(2);
     expect(session.turns[0]?.activities.filter(({ kind }) => kind === "reasoning")).toEqual([
       expect.objectContaining({

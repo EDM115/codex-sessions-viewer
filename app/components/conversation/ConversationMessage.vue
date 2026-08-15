@@ -3,8 +3,11 @@ import { PhCaretDown, PhCheck, PhCopy, PhInfo } from "@phosphor-icons/vue";
 import { computed, onBeforeUnmount, ref } from "vue";
 
 import type { ConversationMessage } from "#shared/types/conversation.ts";
+import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type { PresentationSettings } from "#shared/types/settings.ts";
 
+import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
+import RichTextRenderer from "../content/RichTextRenderer.vue";
 import CopyIconButton from "./CopyIconButton.vue";
 import { formatDuration, formatTimestamp } from "./format.ts";
 
@@ -13,13 +16,16 @@ const props = withDefaults(
     agentWork?: string;
     durationMs?: number | null;
     message: ConversationMessage;
+    resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
+    resolveFavicon?: (origin: string) => Promise<string | null>;
     timestampFormat: PresentationSettings["timestampFormat"];
   }>(),
-  { agentWork: "", durationMs: null },
+  { agentWork: "", durationMs: null, resolveAsset: undefined, resolveFavicon: undefined },
 );
 
 const emit = defineEmits<{
   inspect: [messageId: string];
+  openMedia: [item: MediaViewerItem];
 }>();
 
 const menuOpen = ref(false);
@@ -57,7 +63,14 @@ onBeforeUnmount(() => {
     :data-message-id="message.id"
   >
     <p class="conversation-message__role">{{ isAssistant ? "Assistant" : "You" }}</p>
-    <div class="conversation-message__prose">{{ message.sourceMarkdown }}</div>
+    <div class="conversation-message__prose">
+      <RichTextRenderer
+        :document="message.body"
+        :resolve-asset="resolveAsset"
+        :resolve-favicon="resolveFavicon"
+        @open-media="emit('openMedia', $event)"
+      />
+    </div>
     <footer class="conversation-message__footer">
       <time :datetime="message.createdAt" data-allow-mismatch="text">{{ timestamp }}</time>
       <span v-if="duration !== null" class="tabular">{{ duration }}</span>

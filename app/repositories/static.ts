@@ -66,6 +66,15 @@ const inspectorChunkSchema = z.object({
 const assetManifestSchema = z.object({
   assets: z.array(resolvedAssetSchema),
 });
+const faviconManifestSchema = z.strictObject({
+  version: z.literal(1),
+  favicons: z.array(
+    z.strictObject({
+      origin: z.url(),
+      url: z.string().startsWith("/favicons/"),
+    }),
+  ),
+});
 
 async function browserRequest(
   path: string,
@@ -176,6 +185,7 @@ async function pagefindHit(
 export class StaticConversationRepository implements ConversationRepository {
   private indexPromise: Promise<ConversationSummary[]> | null = null;
   private pagefindPromise: Promise<PagefindBrowserApi> | null = null;
+  private faviconPromise: Promise<ReadonlyMap<string, string>> | null = null;
 
   constructor(
     private readonly requester: RepositoryRequester = browserRequest,
@@ -287,6 +297,10 @@ export class StaticConversationRepository implements ConversationRepository {
     return asset;
   }
 
+  async resolveFavicon(origin: string): Promise<string | null> {
+    return (await this.favicons()).get(origin) ?? null;
+  }
+
   subscribe(_listener: (event: ViewerInvalidation) => void): () => void {
     return () => undefined;
   }
@@ -310,5 +324,18 @@ export class StaticConversationRepository implements ConversationRepository {
   private pagefind(): Promise<PagefindBrowserApi> {
     this.pagefindPromise ??= this.pagefindLoader();
     return this.pagefindPromise;
+  }
+
+  private favicons(): Promise<ReadonlyMap<string, string>> {
+    this.faviconPromise ??= this.requester("/payloads/favicons.json")
+      .then((value) => {
+        const payload = faviconManifestSchema.parse(value);
+        return new Map(payload.favicons.map(({ origin, url }) => [origin, url]));
+      })
+      .catch((error: unknown) => {
+        this.faviconPromise = null;
+        throw error;
+      });
+    return this.faviconPromise;
   }
 }
