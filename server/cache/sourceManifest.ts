@@ -13,7 +13,7 @@ import {
   type ReadStableJsonlOptions,
   type StableJsonlResult,
 } from "../ingestion/jsonlStream.ts";
-import type { SourceIdentity } from "../ingestion/stableRead.ts";
+import { stableRead, type SourceIdentity } from "../ingestion/stableRead.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
 import {
@@ -173,6 +173,60 @@ function matchesFingerprint(
     entry.fingerprint.parserVersion === parserVersion &&
     sameIdentity(entry.identity, observed.identity)
   );
+}
+
+async function verifyTouchedSource(
+  entry: SourceManifestEntry,
+  observed: ObservedSource,
+  parserVersion: number,
+): Promise<SourceFingerprint | null> {
+  if (
+    entry.fingerprint.parserVersion !== parserVersion ||
+    entry.fingerprint.size !== observed.size ||
+    !sameIdentity(entry.identity, observed.identity)
+  ) {
+    return null;
+  }
+  const hash = createHash("sha256");
+  const read = await stableRead(entry.path, {
+    onChunk({ bytes }) {
+      hash.update(bytes);
+    },
+  });
+  if (
+    read.status !== "stable" ||
+    read.size !== entry.fingerprint.size ||
+    hash.digest("hex") !== entry.fingerprint.sha256
+  ) {
+    return null;
+  }
+  return {
+    ...entry.fingerprint,
+    mtimeMs: read.mtimeMs,
+  };
+}
+
+function storeTouchedSourceFingerprint(
+  database: DatabaseSync,
+  entry: SourceManifestEntry,
+  fingerprint: SourceFingerprint,
+): void {
+  const updated = database
+    .prepare(`
+      UPDATE source_files
+      SET mtime_ms = ?, updated_at = ?
+      WHERE path = ? AND sha256 = ? AND parser_version = ?
+    `)
+    .run(
+      fingerprint.mtimeMs,
+      new Date().toISOString(),
+      entry.path,
+      entry.fingerprint.sha256,
+      entry.fingerprint.parserVersion,
+    );
+  if (updated.changes !== 1) {
+    throw new Error("The cached source fingerprint changed while its mtime was being refreshed.");
+  }
 }
 
 function appendProbe(previous: Buffer, bytes: Uint8Array): Buffer {
@@ -445,6 +499,18 @@ export class SessionCacheUpdater {
           sessionId: persisted.sessionId,
           fingerprint: persisted.fingerprint,
         };
+      }
+      if (!context.force && persisted !== null) {
+        const fingerprint = await verifyTouchedSource(persisted, observed, this.#parserVersion);
+        if (fingerprint !== null) {
+          storeTouchedSourceFingerprint(this.#database, persisted, fingerprint);
+          clearSourceFailureDiagnostics(this.#database, source.path);
+          return {
+            status: "unchanged",
+            sessionId: persisted.sessionId,
+            fingerprint,
+          };
+        }
       }
       if (
         context.force &&

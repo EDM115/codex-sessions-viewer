@@ -40,7 +40,8 @@ const inspectorChunkSchema = z.object({
   records: z.array(
     z.object({
       target: z.object({ type: z.string(), id: z.string() }),
-      rawRecords: z.array(z.unknown()),
+      eventIds: z.array(z.string()),
+      rawRecords: z.array(z.object({ id: z.string() }).passthrough()),
     }),
   ),
 });
@@ -194,6 +195,16 @@ describe("static repository payloads", () => {
       ]),
     );
     expect(inspector.records.some(({ rawRecords }) => rawRecords.length > 0)).toBe(true);
+    const firstTurn = conversation.turns[0]!;
+    for (const message of [firstTurn.userMessage, ...firstTurn.assistantMessages].filter(
+      (candidate) => candidate !== null,
+    )) {
+      const record = inspector.records.find(
+        ({ target }) => target.type === "message" && target.id === message.id,
+      );
+      expect(record?.eventIds).toEqual(message.rawEventIds);
+      expect(record?.rawRecords.map(({ id }) => id)).toEqual(message.rawEventIds);
+    }
     expect(await readFile(join(publicRoot, "payloads", "sessions", "index.json"), "utf8")).toBe(
       await readFile(join(generatedRoot, "payloads", "sessions", "index.json"), "utf8"),
     );

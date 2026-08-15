@@ -326,6 +326,7 @@ function requiredText(row: Record<string, SQLOutputValue>, key: string): string 
 export function getCachedSession(
   database: DatabaseSync,
   sessionId: string,
+  options: { includeRawEvents?: boolean } = {},
 ): NormalizedSession | null {
   const summaryRow = database
     .prepare("SELECT summary_json FROM sessions WHERE id = ?")
@@ -338,23 +339,26 @@ export function getCachedSession(
     .prepare("SELECT payload_json FROM turns WHERE session_id = ? ORDER BY turn_index")
     .all(sessionId)
     .map((row) => conversationTurnSchema.parse(parsedJson(row["payload_json"])));
-  const rawEvents: NormalizedRawEvent[] = database
-    .prepare(`
-      SELECT id, turn_id, type, timestamp, payload_json
-      FROM raw_events
-      WHERE session_id = ?
-      ORDER BY source_order
-    `)
-    .all(sessionId)
-    .map((row) =>
-      rawEventSchema.parse({
-        id: requiredText(row, "id"),
-        turnId: row["turn_id"],
-        type: requiredText(row, "type"),
-        timestamp: row["timestamp"],
-        payload: parsedJson(row["payload_json"]),
-      }),
-    );
+  const rawEvents: NormalizedRawEvent[] =
+    options.includeRawEvents === false
+      ? []
+      : database
+          .prepare(`
+            SELECT id, turn_id, type, timestamp, payload_json
+            FROM raw_events
+            WHERE session_id = ?
+            ORDER BY source_order
+          `)
+          .all(sessionId)
+          .map((row) =>
+            rawEventSchema.parse({
+              id: requiredText(row, "id"),
+              turnId: row["turn_id"],
+              type: requiredText(row, "type"),
+              timestamp: row["timestamp"],
+              payload: parsedJson(row["payload_json"]),
+            }),
+          );
   return { summary, turns, rawEvents };
 }
 

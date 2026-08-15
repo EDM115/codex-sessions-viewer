@@ -7,9 +7,10 @@ const rootDir = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig<ConfigOptions>({
   testDir: "./tests/e2e",
-  fullyParallel: true,
+  fullyParallel: false,
   forbidOnly: true,
   reporter: "list",
+  workers: 1,
   use: {
     nuxt: {
       rootDir,

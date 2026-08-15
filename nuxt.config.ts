@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 const viewerMode = process.env.CODEX_VIEWER_MODE === "static" ? "static" : "live";
 const configuredOutput = process.env.CODEX_VIEWER_OUTPUT?.trim();
+const configuredPublicInput = process.env.CODEX_VIEWER_PUBLIC_INPUT?.trim();
 const configuredBuildOutput = process.env.CODEX_VIEWER_BUILD_OUTPUT?.trim();
 const routeManifest = process.env.CODEX_VIEWER_ROUTE_MANIFEST?.trim();
 const pagefindEnabled = process.env.CODEX_VIEWER_PAGEFIND !== "0";
@@ -31,7 +32,9 @@ function staticSessionRoutes(): string[] {
   ) {
     throw new Error("The static session route manifest has an unsupported shape.");
   }
-  return [...new Set(parsed.routes)].toSorted((left, right) => left.localeCompare(right));
+  return [...new Set(["/", "/about", "/settings", ...parsed.routes])].toSorted((left, right) =>
+    left.localeCompare(right),
+  );
 }
 
 export default defineNuxtConfig({
@@ -129,7 +132,7 @@ export default defineNuxtConfig({
     },
     minify: true,
     prerender: {
-      crawlLinks: viewerMode === "static",
+      crawlLinks: false,
       failOnError: true,
       ignore: ["/.netlify"],
     },
@@ -162,6 +165,7 @@ export default defineNuxtConfig({
     },
   },
   runtimeConfig: {
+    staticPublicInput: configuredPublicInput ?? "",
     viewerMode,
     public: {
       pagefindEnabled,

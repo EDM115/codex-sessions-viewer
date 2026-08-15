@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import type { ViewerRuntimeStatus } from "../../shared/types/repository.ts";
 import type { ServerViewerSettings } from "../../shared/types/settings.ts";
 import { listCachedSourcePaths } from "../cache/conversationStore.ts";
 import { openCacheDatabase } from "../cache/database.ts";
+import type { StableJsonlReader } from "../cache/sourceManifest.ts";
 import {
   saveServerViewerConfig,
   validateCodexHome,
@@ -23,8 +26,10 @@ interface RuntimeContext {
 }
 
 export interface LiveViewerRuntimeOptions {
+  initialReconciliation?: "blocking" | "background" | "deferred" | undefined;
   reconciliationIntervalMs?: number | undefined;
   debounceMs?: number | undefined;
+  readJsonl?: StableJsonlReader | undefined;
   onError?: ((error: unknown) => void) | undefined;
 }
 
@@ -61,6 +66,11 @@ export class LiveViewerRuntime {
   #context: RuntimeContext;
   #closed = false;
   #revision = 0;
+  #status: ViewerRuntimeStatus = { state: "preparing", message: null };
+  #initialReconciliation: Promise<void>;
+  #resolveInitialReconciliation!: () => void;
+  #rejectInitialReconciliation!: (reason: unknown) => void;
+  #initialReconciliationStarted = false;
 
   private constructor(
     config: LoadedServerViewerConfig,
@@ -74,6 +84,12 @@ export class LiveViewerRuntime {
     this.#diagnostics = [...config.diagnostics];
     this.#context = context;
     this.#options = options;
+    this.#initialReconciliation = new Promise<void>(
+      (resolveInitialReconciliation, rejectInitialReconciliation) => {
+        this.#resolveInitialReconciliation = resolveInitialReconciliation;
+        this.#rejectInitialReconciliation = rejectInitialReconciliation;
+      },
+    );
   }
 
   static async start(
@@ -98,15 +114,9 @@ export class LiveViewerRuntime {
       debounceMs: options.debounceMs,
       reconciliationIntervalMs: options.reconciliationIntervalMs,
       fetchFavicons: config.settings.fetchFavicons,
+      readJsonl: options.readJsonl,
       onError: options.onError,
     });
-    try {
-      await reconciler.start();
-    } catch (error) {
-      await reconciler.close();
-      database.close();
-      throw error;
-    }
     const runtime = new LiveViewerRuntime(
       config,
       {
@@ -117,7 +127,60 @@ export class LiveViewerRuntime {
       bus,
       options,
     );
+    if (options.initialReconciliation === "deferred") {
+      return runtime;
+    }
+    const initialReconciliation = runtime.startInitialReconciliation();
+    if (options.initialReconciliation !== "background") {
+      try {
+        await initialReconciliation;
+      } catch (error) {
+        await runtime.close();
+        throw error;
+      }
+    }
     return runtime;
+  }
+
+  startInitialReconciliation(): Promise<void> {
+    if (this.#initialReconciliationStarted) {
+      return this.#initialReconciliation;
+    }
+    if (this.#closed) {
+      this.#rejectInitialReconciliation(new Error("The live viewer runtime is closed."));
+      return this.#initialReconciliation;
+    }
+    this.#initialReconciliationStarted = true;
+    void yieldToEventLoop()
+      .then(() => this.#context.reconciler.start())
+      .then(
+        () => {
+          if (this.#closed) {
+            this.#resolveInitialReconciliation();
+            return undefined;
+          }
+          this.#status = { state: "ready", message: null };
+          this.#revision += 1;
+          this.#bus.publish({
+            type: "library.updated",
+            ids: [],
+            revision: `startup:${this.#revision}`,
+          });
+          this.#resolveInitialReconciliation();
+          return undefined;
+        },
+        (error: unknown) => {
+          if (!this.#closed) {
+            this.#status = {
+              state: "error",
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+          this.#rejectInitialReconciliation(error);
+          return undefined;
+        },
+      );
+    return this.#initialReconciliation;
   }
 
   get bus(): InvalidationBus {
@@ -144,6 +207,14 @@ export class LiveViewerRuntime {
     return [...this.#diagnostics];
   }
 
+  get status(): ViewerRuntimeStatus {
+    return { ...this.#status };
+  }
+
+  whenReady(): Promise<void> {
+    return this.#initialReconciliation;
+  }
+
   faviconOrigin(key: string): string | null {
     return this.#context.reconciler.faviconOrigin(key);
   }
@@ -157,6 +228,7 @@ export class LiveViewerRuntime {
       debounceMs: this.#options.debounceMs,
       reconciliationIntervalMs: this.#options.reconciliationIntervalMs,
       fetchFavicons: settings.fetchFavicons,
+      readJsonl: this.#options.readJsonl,
       onError: this.#options.onError,
     });
     return {
@@ -170,6 +242,7 @@ export class LiveViewerRuntime {
     if (this.#closed) {
       throw new Error("The live viewer runtime is closed.");
     }
+    await this.startInitialReconciliation();
     const diagnostic = await validateCodexHome(settings.codexHome);
     if (diagnostic !== null) {
       throw new Error(diagnostic.message);
@@ -220,6 +293,11 @@ export class LiveViewerRuntime {
     }
     this.#closed = true;
     await this.#context.reconciler.close();
+    if (this.#initialReconciliationStarted) {
+      await this.#initialReconciliation.catch(() => undefined);
+    } else {
+      this.#resolveInitialReconciliation();
+    }
     this.#context.database.close();
   }
 }

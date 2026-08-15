@@ -1,5 +1,6 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { ViewerInvalidation } from "../../shared/types/repository.ts";
@@ -22,6 +23,7 @@ import {
 } from "../ingestion/discoverSources.ts";
 import {
   watchSources,
+  type SourceChange,
   type SourceWatchBatch,
   type SourceWatcher,
   type WatchSourcesOptions,
@@ -33,6 +35,24 @@ import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 import { InvalidationBus } from "./invalidationBus.ts";
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 30_000;
+
+export function coalesceSourceWatchBatches(
+  batches: readonly SourceWatchBatch[],
+): SourceWatchBatch | null {
+  const changes = new Map<string, SourceChange>();
+  for (const batch of batches) {
+    for (const change of batch.changes) {
+      changes.set(`${change.source}\0${resolve(change.path)}`, change);
+    }
+  }
+  const observedAt = batches.at(-1)?.observedAt;
+  return observedAt === undefined
+    ? null
+    : {
+        changes: [...changes.values()],
+        observedAt,
+      };
+}
 
 interface LiveMetadata {
   sessionIndexEntries: SessionIndexEntry[];
@@ -180,6 +200,7 @@ export class LiveReconciler {
   #interval: NodeJS.Timeout | null = null;
   #queue = Promise.resolve();
   #pendingBatches: SourceWatchBatch[] = [];
+  #batchDrainScheduled = false;
   #started = false;
   #closed = false;
   #revisionSequence = 0;
@@ -199,7 +220,7 @@ export class LiveReconciler {
     this.#watch = options.watch ?? watchSources;
     this.#onError = options.onError;
     this.#updater = new SessionCacheUpdater(this.#database, {
-      retainLiveSources: true,
+      retainLiveSources: false,
       readJsonl: options.readJsonl,
     });
     for (const row of this.#database.prepare("SELECT origin FROM favicons").all()) {
@@ -267,9 +288,10 @@ export class LiveReconciler {
     announce: boolean,
   ): Promise<void> {
     const manifest = getSourceManifestEntry(this.#database, source.path);
-    const before = manifest?.sessionId
-      ? getCachedSession(this.#database, manifest.sessionId)
-      : null;
+    const before =
+      announce && manifest?.sessionId
+        ? getCachedSession(this.#database, manifest.sessionId, { includeRawEvents: false })
+        : null;
     const result = await this.#updater.update(source, {
       force,
       sessionIndexEntries: this.#metadata.sessionIndexEntries,
@@ -288,7 +310,7 @@ export class LiveReconciler {
     if (result.status === "unchanged") {
       return;
     }
-    let after = getCachedSession(this.#database, result.sessionId);
+    let after = getCachedSession(this.#database, result.sessionId, { includeRawEvents: false });
     if (after === null) {
       return;
     }
@@ -327,6 +349,9 @@ export class LiveReconciler {
         typeof sessionId === "string" && affected.has(sessionId),
         announce,
       );
+      // Give loopback requests and the loading shell a chance to progress between source transactions.
+      // oxlint-disable-next-line no-await-in-loop -- The explicit event-loop yield is part of the intentionally serialized source loop.
+      await yieldToEventLoop();
     }
     for (const sourcePath of listCachedSourcePaths(this.#database)) {
       if (!isWithinRoot(this.#codexHome, sourcePath) || expectedPaths.has(resolve(sourcePath))) {
@@ -373,6 +398,36 @@ export class LiveReconciler {
     return scheduled;
   }
 
+  #scheduleBatchDrain(): void {
+    if (
+      this.#closed ||
+      !this.#started ||
+      this.#batchDrainScheduled ||
+      this.#pendingBatches.length === 0
+    ) {
+      return;
+    }
+    this.#batchDrainScheduled = true;
+    const draining = this.#enqueue(async () => {
+      const batch = coalesceSourceWatchBatches(this.#pendingBatches.splice(0));
+      if (batch !== null) {
+        await this.#processBatch(batch);
+      }
+    });
+    void draining.then(
+      () => {
+        this.#batchDrainScheduled = false;
+        this.#scheduleBatchDrain();
+        return undefined;
+      },
+      () => {
+        this.#batchDrainScheduled = false;
+        this.#scheduleBatchDrain();
+        return undefined;
+      },
+    );
+  }
+
   reconcileNow(_reason = "manual"): Promise<void> {
     if (this.#closed) {
       return Promise.resolve();
@@ -391,11 +446,8 @@ export class LiveReconciler {
       codexHome: this.#codexHome,
       debounceMs: this.#debounceMs,
       onBatch: (batch) => {
-        if (!this.#started) {
-          this.#pendingBatches.push(batch);
-          return;
-        }
-        void this.#enqueue(() => this.#processBatch(batch));
+        this.#pendingBatches.push(batch);
+        this.#scheduleBatchDrain();
       },
       onError: (error) => {
         this.#onError?.(error);
@@ -406,12 +458,11 @@ export class LiveReconciler {
     });
     await this.#watcher.ready;
     await this.#reconcileAll(false);
-    this.#started = true;
-    const pending = this.#pendingBatches.splice(0);
-    for (const batch of pending) {
-      // oxlint-disable-next-line no-await-in-loop -- Startup events are replayed in observation order after the initial scan.
-      await this.#processBatch(batch);
+    if (this.#closed) {
+      return;
     }
+    this.#started = true;
+    this.#scheduleBatchDrain();
     this.#interval = setInterval(() => {
       void this.reconcileNow("periodic");
     }, this.#reconciliationIntervalMs);

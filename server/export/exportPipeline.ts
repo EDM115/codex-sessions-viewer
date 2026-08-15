@@ -51,6 +51,7 @@ import {
 
 export interface StaticGenerateInput {
   outputRoot: string;
+  publicInputRoot: string;
   buildRoot: string;
   routeManifest: string;
   searchIndex: boolean;
@@ -201,6 +202,7 @@ async function defaultGenerateRunner(cwd: string, input: StaticGenerateInput): P
         ...process.env,
         CODEX_VIEWER_MODE: "static",
         CODEX_VIEWER_OUTPUT: input.outputRoot,
+        CODEX_VIEWER_PUBLIC_INPUT: input.publicInputRoot,
         CODEX_VIEWER_BUILD_OUTPUT: input.buildRoot,
         CODEX_VIEWER_ROUTE_MANIFEST: input.routeManifest,
         CODEX_VIEWER_PAGEFIND: input.searchIndex ? "1" : "0",
@@ -456,11 +458,20 @@ export async function runStaticExport(
 
     const outputStaging = await createOutputStagingDirectories(outputRoot);
     try {
+      progress.status("Preparing isolated prerender data");
+      await publishGeneratedExportFiles(generatedRoot, outputStaging.publicInputRoot);
+      await publishCachedContent(database, {
+        generatedRoot,
+        publicRoot: outputStaging.publicInputRoot,
+        assetIds: prepared.assetIds,
+        faviconOrigins: prepared.faviconOrigins,
+      });
       progress.status("Generating the Nuxt static site in isolated staging");
       progress.suspend();
       try {
         await (options.generate ?? ((input) => defaultGenerateRunner(cwd, input)))({
           outputRoot: outputStaging.publicRoot,
+          publicInputRoot: outputStaging.publicInputRoot,
           buildRoot: outputStaging.buildRoot,
           routeManifest,
           searchIndex,

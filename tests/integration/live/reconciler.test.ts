@@ -8,7 +8,7 @@ import { getCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
 import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import { LiveReconciler } from "../../../server/live/reconciler.ts";
+import { coalesceSourceWatchBatches, LiveReconciler } from "../../../server/live/reconciler.ts";
 import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
 
 const temporaryRoots: string[] = [];
@@ -41,11 +41,38 @@ afterEach(async () => {
 });
 
 describe("live reconciliation", () => {
+  it("coalesces repeated pending source changes to their latest observation", () => {
+    expect(
+      coalesceSourceWatchBatches([
+        {
+          changes: [
+            { source: "rollout", scope: "active", path: "C:/sessions/a.jsonl", kind: "changed" },
+          ],
+          observedAt: "2026-08-14T10:00:00.000Z",
+        },
+        {
+          changes: [
+            { source: "rollout", scope: "active", path: "C:/sessions/a.jsonl", kind: "removed" },
+            { source: "session-index", path: "C:/session_index.jsonl", kind: "changed" },
+          ],
+          observedAt: "2026-08-14T10:00:01.000Z",
+        },
+      ]),
+    ).toEqual({
+      changes: [
+        { source: "rollout", scope: "active", path: "C:/sessions/a.jsonl", kind: "removed" },
+        { source: "session-index", path: "C:/session_index.jsonl", kind: "changed" },
+      ],
+      observedAt: "2026-08-14T10:00:01.000Z",
+    });
+  });
+
   it("updates only the appended session and publishes its changed turn IDs", async () => {
     const { codexHome, rollout, cacheDir } = await createCodexHome();
     const database = openCacheDatabase(":memory:");
     const bus = new InvalidationBus();
     const events: ViewerInvalidation[] = [];
+    const readOffsets: number[] = [];
     const reconciler = new LiveReconciler({
       bus,
       cacheDir,
@@ -53,6 +80,10 @@ describe("live reconciliation", () => {
       database,
       debounceMs: 25,
       reconciliationIntervalMs: 60_000,
+      async readJsonl(path, options) {
+        readOffsets.push(options.start ?? 0);
+        return readStableJsonl(path, options);
+      },
     });
 
     try {
@@ -88,6 +119,7 @@ describe("live reconciliation", () => {
       );
       const sessionEvent = events.find(({ type }) => type === "session.updated");
       expect(sessionEvent?.ids).toContain(getCachedSession(database, sessionId)?.turns.at(-1)?.id);
+      expect(readOffsets).toEqual([0, 0]);
     } finally {
       await reconciler.close();
       database.close();

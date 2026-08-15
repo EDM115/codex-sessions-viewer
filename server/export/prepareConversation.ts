@@ -6,7 +6,11 @@ import type {
   EmbeddedMediaSource,
 } from "../../shared/types/richText.ts";
 import { storeEmbeddedMedia, storeReferencedMedia } from "../content/extractMedia.ts";
-import { resolveFavicon, type FaviconResolution } from "../content/favicons.ts";
+import {
+  canonicalFaviconOrigin,
+  resolveFavicon,
+  type FaviconResolution,
+} from "../content/favicons.ts";
 import { parseRichText } from "../content/parseRichText.ts";
 import { discoverReferencedLocalMedia } from "../ingestion/discoverSources.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
@@ -54,19 +58,32 @@ function isNormalizerPlaceholder(document: RichTextDocument, source: string): bo
         document.children[0].text === source;
 }
 
+function cloneConversationForRichContent(source: NormalizedSession): NormalizedSession {
+  return {
+    summary: source.summary,
+    rawEvents: source.rawEvents,
+    turns: source.turns.map((turn) => ({
+      ...turn,
+      userMessage: turn.userMessage === null ? null : { ...turn.userMessage },
+      assistantMessages: turn.assistantMessages.map((message) => ({ ...message })),
+      activities: turn.activities.map((activity) => ({ ...activity })),
+    })),
+  };
+}
+
 export async function prepareConversationForExport(
   database: DatabaseSync,
   source: NormalizedSession,
   options: PrepareConversationExportOptions,
 ): Promise<PreparedConversationExport> {
-  const conversation = structuredClone(source);
+  const conversation = cloneConversationForRichContent(source);
   const mediaActivities = conversation.turns.flatMap(({ activities }) =>
     activities.filter((activity) => activity.kind === "media"),
   );
   const references = discoverReferencedLocalMedia(mediaActivities);
   const assetIdsByPath = new Map(references.map(({ path, assetId }) => [path, assetId]));
   const embeddedMedia: EmbeddedMediaSource[] = [];
-  const faviconOrigins = new Set<string>();
+  const discoveredFaviconOrigins = new Set<string>();
   const assetIds = new Set(references.map(({ assetId }) => assetId));
   for (const turn of conversation.turns) {
     const messages = [turn.userMessage, ...turn.assistantMessages].filter(
@@ -79,7 +96,7 @@ export async function prepareConversationForExport(
         message.body = parsed.document;
         embeddedMedia.push(...parsed.embeddedMedia);
       }
-      collectDocumentReferences(message.body, faviconOrigins, assetIds);
+      collectDocumentReferences(message.body, discoveredFaviconOrigins, assetIds);
     }
     for (const activity of turn.activities) {
       if (activity.kind !== "reasoning" || activity.summary === "") {
@@ -91,7 +108,7 @@ export async function prepareConversationForExport(
         activity.body = parsed.document;
         embeddedMedia.push(...parsed.embeddedMedia);
       }
-      collectDocumentReferences(activity.body, faviconOrigins, assetIds);
+      collectDocumentReferences(activity.body, discoveredFaviconOrigins, assetIds);
     }
   }
   await storeReferencedMedia(database, references, {
@@ -104,6 +121,14 @@ export async function prepareConversationForExport(
   });
   for (const media of embeddedMedia) {
     assetIds.add(media.assetId);
+  }
+  const faviconOrigins = new Set<string>();
+  for (const origin of discoveredFaviconOrigins) {
+    try {
+      faviconOrigins.add(canonicalFaviconOrigin(origin));
+    } catch {
+      // The conversation link remains visible, but unsafe origins never enter favicon I/O.
+    }
   }
   const faviconResults: FaviconResolution[] = [];
   for (const origin of [...faviconOrigins].toSorted()) {

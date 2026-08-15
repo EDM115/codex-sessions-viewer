@@ -264,7 +264,7 @@ function messageInspector(
       createdAt: message.createdAt,
       completedAt: turn.completedAt,
       durationMs: turn.durationMs,
-      eventIds: turnEventIds(turn),
+      eventIds: message.rawEventIds,
       activityIds: turn.activities.map(({ id }) => id),
     },
     rawEvents,

@@ -1,3 +1,5 @@
+import { getHeader, getMethod } from "h3";
+
 import { loadServerViewerConfig } from "../core/config.ts";
 import { attachLiveViewerRuntime } from "../live/requestContext.ts";
 import { LiveViewerRuntime } from "../live/viewerRuntime.ts";
@@ -23,15 +25,37 @@ export default defineNitroPlugin(async (nitroApp) => {
     },
   });
   const runtime = await LiveViewerRuntime.start(config, {
+    initialReconciliation: "deferred",
     onError(error) {
       console.error("[viewer] Live reconciliation failed:", error);
     },
   });
-  console.log(`[viewer] Watching ${runtime.settings.codexHome} without modifying Codex data.`);
   nitroApp.hooks.hook("request", (event) => {
     attachLiveViewerRuntime(event, runtime);
   });
   nitroApp.hooks.hook("close", async () => {
     await runtime.close();
+  });
+  let initialReconciliationStarted = false;
+  nitroApp.hooks.hook("afterResponse", (event) => {
+    if (
+      initialReconciliationStarted ||
+      getMethod(event) !== "GET" ||
+      !getHeader(event, "accept")?.includes("text/html")
+    ) {
+      return;
+    }
+    initialReconciliationStarted = true;
+    void runtime
+      .startInitialReconciliation()
+      .then(() => {
+        console.log(
+          `[viewer] Watching ${runtime.settings.codexHome} without modifying Codex data.`,
+        );
+        return undefined;
+      })
+      .catch((error: unknown) => {
+        console.error("[viewer] Initial live reconciliation failed:", error);
+      });
   });
 });

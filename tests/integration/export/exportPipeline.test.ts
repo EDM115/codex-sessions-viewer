@@ -65,8 +65,12 @@ describe("static export pipeline", () => {
     await copyFile(new URL("../../fixtures/rollouts/modern.jsonl", import.meta.url), source);
     const sourceBytes = await readFile(source);
     const sourceBefore = await lstat(source, { bigint: true });
-    const generateCalls: Array<{ outputRoot: string; buildRoot: string; routeManifest: string }> =
-      [];
+    const generateCalls: Array<{
+      outputRoot: string;
+      publicInputRoot: string;
+      buildRoot: string;
+      routeManifest: string;
+    }> = [];
     const progressOutput: string[] = [];
     const progress = new CliExportProgress({
       interactive: false,
@@ -75,10 +79,14 @@ describe("static export pipeline", () => {
     });
     const generate = async (input: {
       outputRoot: string;
+      publicInputRoot: string;
       buildRoot: string;
       routeManifest: string;
     }): Promise<void> => {
       generateCalls.push(input);
+      await expect(
+        readFile(join(input.publicInputRoot, "payloads", "sessions", "index.json"), "utf8"),
+      ).resolves.toContain('"version":1');
       await rm(input.outputRoot, { recursive: true, force: true });
       await mkdir(input.outputRoot, { recursive: true });
       await writeFile(join(input.outputRoot, "index.html"), "<!doctype html><title>Viewer</title>");
@@ -131,6 +139,8 @@ describe("static export pipeline", () => {
       expect(call).toMatchObject({ routeManifest: join(generatedRoot, "routes.json") });
       expect(call.outputRoot).not.toBe(outputRoot);
       expect(call.outputRoot).toContain(join(root, ".output", ".public."));
+      expect(call.publicInputRoot).toContain(join(root, ".output", ".public."));
+      expect(call.publicInputRoot).not.toBe(call.outputRoot);
       expect(call.buildRoot).toContain(join(root, ".output", ".public."));
     }
     expect(routeManifest.routes).toEqual([`/session/${sessionId}`]);

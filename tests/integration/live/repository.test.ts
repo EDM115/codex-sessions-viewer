@@ -112,7 +112,13 @@ describe("live repository payloads", () => {
         durationMs: firstTurn.durationMs,
         timeToFirstTokenMs: firstTurn.timeToFirstTokenMs,
         tokenDelta: firstTurn.tokenDelta,
+        eventIds: assistantMessage.rawEventIds,
       });
+      expect(
+        messageInspector.rawRecords.map((record) =>
+          typeof record === "object" && record !== null && "id" in record ? record["id"] : null,
+        ),
+      ).toEqual(assistantMessage.rawEventIds);
       expect(messageInspector).toEqual(
         staticInspectors.records.find(
           ({ target }) => target.type === "message" && target.id === assistantMessage.id,

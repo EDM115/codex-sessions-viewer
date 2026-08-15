@@ -2,6 +2,7 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 
 import LibraryEmptyState from "../../../app/components/library/LibraryEmptyState.vue";
+import LibraryPreparationState from "../../../app/components/library/LibraryPreparationState.vue";
 import LibrarySearchResults from "../../../app/components/library/LibrarySearchResults.vue";
 import LibrarySessionList from "../../../app/components/library/LibrarySessionList.vue";
 import type { ConversationSummary } from "../../../shared/types/conversation.ts";
@@ -36,6 +37,25 @@ function session(id: string, title: string): ConversationSummary {
 }
 
 describe("library presentation components", () => {
+  it("shows a session skeleton while the read-only live cache is preparing and a visible failure if preparation stops", async () => {
+    const wrapper = mount(LibraryPreparationState, {
+      props: { state: "preparing", message: null },
+    });
+
+    expect(wrapper.get('[role="status"]').text()).toContain("Preparing your local archive");
+    expect(wrapper.text()).toContain("Codex source files remain read-only");
+    expect(wrapper.findAll(".library-skeleton__row")).toHaveLength(4);
+
+    await wrapper.setProps({
+      state: "error",
+      message: "The local session cache could not be prepared.",
+    });
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "The local session cache could not be prepared.",
+    );
+    expect(wrapper.find(".library-skeleton").exists()).toBe(false);
+  });
+
   it("renders safe highlighted excerpts with exact turn destinations", () => {
     const wrapper = mount(LibrarySearchResults, {
       props: {

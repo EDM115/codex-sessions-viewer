@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -69,6 +69,36 @@ describe("incremental session cache", () => {
       expect(await readFile(sourcePath, "utf8")).toBe(source);
     } finally {
       restartedDatabase.close();
+    }
+  });
+
+  it("reuses normalized content when only the source mtime changed", async () => {
+    const root = await temporaryRoot();
+    const sourcePath = join(root, "modern.jsonl");
+    await writeFile(sourcePath, await fixture("modern.jsonl"), "utf8");
+    const database = openCacheDatabase(":memory:");
+    const readJsonl = vi.fn<typeof readStableJsonl>(readStableJsonl);
+    const normalize = vi.fn<typeof normalizeSession>(normalizeSession);
+    const updater = new SessionCacheUpdater(database, { normalize, readJsonl });
+
+    try {
+      const first = await updater.update({ path: sourcePath, scope: "active" });
+      expect(first).toMatchObject({ status: "updated", mode: "full" });
+      readJsonl.mockClear();
+      normalize.mockClear();
+      const touchedAt = new Date(Date.now() + 5_000);
+      await utimes(sourcePath, touchedAt, touchedAt);
+
+      const touched = await updater.update({ path: sourcePath, scope: "active" });
+      expect(touched).toMatchObject({ status: "unchanged" });
+      if (touched.status !== "unchanged") {
+        throw new Error("Expected an mtime-only source touch to reuse the cached session");
+      }
+      expect(touched.fingerprint.mtimeMs).toBeCloseTo((await stat(sourcePath)).mtimeMs, 3);
+      expect(readJsonl).not.toHaveBeenCalled();
+      expect(normalize).not.toHaveBeenCalled();
+    } finally {
+      database.close();
     }
   });
 

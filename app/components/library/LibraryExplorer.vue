@@ -9,11 +9,14 @@ import type {
   SearchHit,
   SearchQuery,
   SessionListQuery,
+  ViewerRuntimeStatus,
 } from "#shared/types/repository.ts";
+import { viewerRuntimeStatusSchema } from "#shared/types/repository.ts";
 
 import { createConversationRepository } from "../../repositories/index.ts";
 import type { RepositoryRequester } from "../../repositories/live.ts";
 import UiIconButton from "../ui/UiIconButton.vue";
+import LibraryPreparationState from "./LibraryPreparationState.vue";
 import LibrarySidebar from "./LibrarySidebar.vue";
 
 interface LibraryPayload {
@@ -21,6 +24,7 @@ interface LibraryPayload {
   hits: SearchHit[];
   items: ConversationSummary[];
   nextCursor: string | null;
+  runtimeStatus: ViewerRuntimeStatus;
   total: number;
 }
 
@@ -74,23 +78,30 @@ async function loadPayload(
   cursor?: string,
 ): Promise<LibraryPayload> {
   const searching = query.value.trim() !== "";
-  const [active, archived, result] = await Promise.all([
+  const [active, archived, result, runtimeStatus] = await Promise.all([
     repository.listSessions({ scope: "active", limit: 1 }, options),
     repository.listSessions({ scope: "archived", limit: 1 }, options),
     searching && searchExactTurns
       ? repository.search(searchQuery(cursor), options)
       : repository.listSessions(listQuery(cursor), options),
+    mode === "live"
+      ? requester("/api/status", options).then((value) => viewerRuntimeStatusSchema.parse(value))
+      : Promise.resolve<ViewerRuntimeStatus>({ state: "ready", message: null }),
   ]);
   return {
     counts: { active: active.total, archived: archived.total },
     hits: searching && searchExactTurns ? (result.items as SearchHit[]) : [],
     items: searching && searchExactTurns ? [] : (result.items as ConversationSummary[]),
     nextCursor: result.nextCursor,
+    runtimeStatus,
     total: result.total,
   };
 }
 
-const initial = await useAsyncData("library-initial", () => loadPayload());
+const initial = await useAsyncData("library-initial", () => loadPayload(), {
+  server: mode === "static",
+  immediate: mode === "static",
+});
 const counts = reactive<Record<ConversationScope, number>>(
   initial.data.value?.counts ?? { active: 0, archived: 0 },
 );
@@ -98,11 +109,23 @@ const items = ref(initial.data.value?.items ?? []);
 const hits = ref(initial.data.value?.hits ?? []);
 const settledTotal = ref(initial.data.value?.total ?? 0);
 const nextCursor = ref(initial.data.value?.nextCursor ?? null);
-const loading = ref(initial.status.value === "pending");
-const error = ref<string | null>(initial.error.value?.message ?? null);
+const runtimeStatus = ref<ViewerRuntimeStatus>(
+  initial.data.value?.runtimeStatus ??
+    (mode === "live" ? { state: "preparing", message: null } : { state: "ready", message: null }),
+);
+const loading = ref(mode === "live" || initial.status.value === "pending");
+const error = ref<string | null>(
+  runtimeStatus.value.state === "error"
+    ? runtimeStatus.value.message
+    : (initial.error.value?.message ?? null),
+);
 const sidebarOpen = ref(false);
 const workbench = ref<HTMLElement | null>(null);
+const hasSettledContent = computed(
+  () => counts.active + counts.archived > 0 || items.value.length > 0 || hits.value.length > 0,
+);
 let timer: ReturnType<typeof setTimeout> | null = null;
+let readinessTimer: ReturnType<typeof setTimeout> | null = null;
 let controller: AbortController | null = null;
 let unsubscribe: () => void = () => undefined;
 
@@ -112,7 +135,11 @@ function applyPayload(payload: LibraryPayload, append = false): void {
   items.value = append ? [...items.value, ...payload.items] : payload.items;
   hits.value = append ? [...hits.value, ...payload.hits] : payload.hits;
   nextCursor.value = payload.nextCursor;
+  runtimeStatus.value = payload.runtimeStatus;
   settledTotal.value = payload.total;
+  if (payload.runtimeStatus.state === "error") {
+    error.value = payload.runtimeStatus.message ?? "The local session cache could not be prepared.";
+  }
 }
 
 function errorMessage(reason: unknown): string {
@@ -151,6 +178,27 @@ async function closeSidebar(): Promise<void> {
   workbench.value?.querySelector<HTMLButtonElement>(".library-workbench__opener button")?.focus();
 }
 
+async function pollReadiness(): Promise<void> {
+  if (mode !== "live" || runtimeStatus.value.state !== "preparing") {
+    return;
+  }
+  try {
+    runtimeStatus.value = viewerRuntimeStatusSchema.parse(await requester("/api/status"));
+    if (runtimeStatus.value.state === "ready") {
+      await refresh();
+      return;
+    }
+    if (runtimeStatus.value.state === "error") {
+      error.value = runtimeStatus.value.message ?? "The local session cache could not be prepared.";
+      return;
+    }
+  } catch (reason) {
+    error.value = errorMessage(reason);
+    return;
+  }
+  readinessTimer = setTimeout(() => void pollReadiness(), 750);
+}
+
 function scheduleRefresh(): void {
   if (timer !== null) {
     clearTimeout(timer);
@@ -177,6 +225,10 @@ onMounted(() => {
       scheduleRefresh();
     }
   });
+  if (mode === "live") {
+    void refresh();
+  }
+  void pollReadiness();
 });
 
 onBeforeUnmount(() => {
@@ -184,6 +236,9 @@ onBeforeUnmount(() => {
   controller?.abort();
   if (timer !== null) {
     clearTimeout(timer);
+  }
+  if (readinessTimer !== null) {
+    clearTimeout(readinessTimer);
   }
 });
 </script>
@@ -221,7 +276,7 @@ onBeforeUnmount(() => {
         :has-media="hasMedia"
         :items="items"
         :hits="hits"
-        :loading="loading"
+        :loading="loading || (runtimeStatus.state === 'preparing' && !hasSettledContent)"
         :error="error"
         :settled-total="settledTotal"
         :next-cursor="nextCursor"
@@ -241,7 +296,28 @@ onBeforeUnmount(() => {
     </div>
 
     <main class="library-workbench__canvas">
-      <section class="library-intro" aria-labelledby="library-heading">
+      <LibraryPreparationState
+        v-if="runtimeStatus.state !== 'ready' && !hasSettledContent"
+        :state="runtimeStatus.state"
+        :message="runtimeStatus.message"
+      />
+      <section v-else class="library-intro" aria-labelledby="library-heading">
+        <p
+          v-if="runtimeStatus.state === 'preparing'"
+          class="library-preparation-note"
+          role="status"
+        >
+          <span class="mode-indicator is-live" aria-hidden="true" /> Refreshing the local archive in
+          the background…
+        </p>
+        <p
+          v-else-if="runtimeStatus.state === 'error'"
+          class="library-preparation-note is-error"
+          role="alert"
+        >
+          <PhLockKey :size="17" weight="regular" aria-hidden="true" />
+          {{ runtimeStatus.message ?? "The local session cache could not be prepared." }}
+        </p>
         <p class="library-intro__kicker">A private instrument for your local work</p>
         <h1 id="library-heading" class="library-intro__title theme-display">
           Find the exact conversation, then return to the exact turn.

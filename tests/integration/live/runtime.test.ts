@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import type { LoadedServerViewerConfig } from "../../../server/core/config.ts";
+import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
 import { LiveViewerRuntime } from "../../../server/live/viewerRuntime.ts";
 
 const temporaryRoots: string[] = [];
@@ -31,6 +32,156 @@ afterEach(async () => {
 });
 
 describe("live Codex-home switching", () => {
+  it("can defer initial reconciliation until the live page shell has been served", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-viewer-live-runtime-"));
+    temporaryRoots.push(root);
+    const codexHome = await createHome(root, "modern.jsonl");
+    const configDir = join(root, "config");
+    const cacheDir = join(root, "cache");
+    const config: LoadedServerViewerConfig = {
+      settings: { codexHome, port: 3_000, fetchFavicons: false },
+      paths: {
+        configDir,
+        cacheDir,
+        generatedDir: join(cacheDir, "generated"),
+        configFile: join(configDir, "config.json"),
+        cacheDatabase: join(cacheDir, "viewer.sqlite"),
+      },
+      codexHomeSource: "cli",
+      onboardingRequired: false,
+      diagnostics: [],
+    };
+    const runtime = await LiveViewerRuntime.start(config, {
+      initialReconciliation: "deferred",
+      reconciliationIntervalMs: 60_000,
+    });
+
+    try {
+      expect(runtime.status).toEqual({ state: "preparing", message: null });
+      await expect(
+        runtime.repository.listSessions({ scope: "active", limit: 10 }),
+      ).resolves.toMatchObject({ items: [], total: 0 });
+      await runtime.startInitialReconciliation();
+      expect(runtime.status).toEqual({ state: "ready", message: null });
+      await expect(
+        runtime.repository.listSessions({ scope: "active", limit: 10 }),
+      ).resolves.toMatchObject({ total: 1 });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("returns a queryable runtime while initial reconciliation continues in the background", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-viewer-live-runtime-"));
+    temporaryRoots.push(root);
+    const codexHome = await createHome(root, "modern.jsonl");
+    const configDir = join(root, "config");
+    const cacheDir = join(root, "cache");
+    const config: LoadedServerViewerConfig = {
+      settings: { codexHome, port: 3_000, fetchFavicons: false },
+      paths: {
+        configDir,
+        cacheDir,
+        generatedDir: join(cacheDir, "generated"),
+        configFile: join(configDir, "config.json"),
+        cacheDatabase: join(cacheDir, "viewer.sqlite"),
+      },
+      codexHomeSource: "cli",
+      onboardingRequired: false,
+      diagnostics: [],
+    };
+    let releaseRead!: () => void;
+    let markReadStarted!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    const starting = LiveViewerRuntime.start(config, {
+      initialReconciliation: "background",
+      reconciliationIntervalMs: 60_000,
+      async readJsonl(path, options) {
+        markReadStarted();
+        await readGate;
+        return readStableJsonl(path, options);
+      },
+    });
+    let runtime: LiveViewerRuntime | null = null;
+
+    try {
+      await readStarted;
+      runtime = await Promise.race([
+        starting,
+        new Promise<null>((resolve) => setImmediate(() => resolve(null))),
+      ]);
+      expect(runtime).not.toBeNull();
+      if (runtime === null) {
+        throw new Error("The live runtime remained blocked on initial reconciliation.");
+      }
+      expect(runtime.status).toEqual({ state: "preparing", message: null });
+      await expect(
+        runtime.repository.listSessions({ scope: "active", limit: 10 }),
+      ).resolves.toMatchObject({ items: [], total: 0 });
+
+      releaseRead();
+      await runtime.whenReady();
+      expect(runtime.status).toEqual({ state: "ready", message: null });
+      await expect(
+        runtime.repository.listSessions({ scope: "active", limit: 10 }),
+      ).resolves.toMatchObject({ total: 1 });
+    } finally {
+      releaseRead();
+      runtime ??= await starting;
+      await runtime.close();
+    }
+  });
+
+  it("does not materialize unchanged cached conversations during startup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-viewer-live-runtime-"));
+    temporaryRoots.push(root);
+    const codexHome = await createHome(root, "modern.jsonl");
+    const configDir = join(root, "config");
+    const cacheDir = join(root, "cache");
+    const config: LoadedServerViewerConfig = {
+      settings: { codexHome, port: 3_000, fetchFavicons: false },
+      paths: {
+        configDir,
+        cacheDir,
+        generatedDir: join(cacheDir, "generated"),
+        configFile: join(configDir, "config.json"),
+        cacheDatabase: join(cacheDir, "viewer.sqlite"),
+      },
+      codexHomeSource: "cli",
+      onboardingRequired: false,
+      diagnostics: [],
+    };
+    const firstRuntime = await LiveViewerRuntime.start(config, {
+      reconciliationIntervalMs: 60_000,
+    });
+    await firstRuntime.close();
+    const cache = openCacheDatabase(config.paths.cacheDatabase);
+    try {
+      cache.prepare("UPDATE turns SET payload_json = '{}'").run();
+    } finally {
+      cache.close();
+    }
+    const runtime = await LiveViewerRuntime.start(config, {
+      initialReconciliation: "deferred",
+      reconciliationIntervalMs: 60_000,
+    });
+
+    try {
+      await expect(runtime.startInitialReconciliation()).resolves.toBeUndefined();
+      expect(runtime.status).toEqual({ state: "ready", message: null });
+      await expect(
+        runtime.repository.listSessions({ scope: "active", limit: 10 }),
+      ).resolves.toMatchObject({ total: 1 });
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("prepares the new context separately and preserves the previous cache", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-viewer-live-runtime-"));
     temporaryRoots.push(root);

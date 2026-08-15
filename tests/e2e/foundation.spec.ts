@@ -12,8 +12,10 @@ test("serves rendered HTML", async ({ request }) => {
   const response = await request.get("/");
 
   expect(response.ok()).toBe(true);
-  await expect(response.text()).resolves.toContain(
-    "Find the exact conversation, then return to the exact turn.",
+  const html = await response.text();
+  expect(html).toContain("Preparing your local archive…");
+  expect(html).toContain(
+    "The page is ready while the viewer reconciles session metadata and cached conversation payloads in the background.",
   );
 });
 

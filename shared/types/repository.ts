@@ -121,6 +121,11 @@ export interface ViewerInvalidation {
   revision: string;
 }
 
+export interface ViewerRuntimeStatus {
+  state: "preparing" | "ready" | "error";
+  message: string | null;
+}
+
 export interface ConversationRepository {
   capabilities(): RepositoryCapabilities;
   listSessions(
@@ -141,6 +146,11 @@ export const repositoryCapabilitiesSchema = z.strictObject({
   liveUpdates: z.boolean(),
   serverSettings: z.boolean(),
   backgroundFaviconFetch: z.boolean(),
+});
+
+export const viewerRuntimeStatusSchema = z.strictObject({
+  state: z.enum(["preparing", "ready", "error"]),
+  message: z.string().nullable(),
 });
 
 export function repositoryCapabilitiesForMode(mode: RepositoryMode): RepositoryCapabilities {

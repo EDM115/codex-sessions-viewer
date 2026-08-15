@@ -7,6 +7,7 @@ export type OutputWriteDisposition = "written" | "reused";
 
 export interface OutputStagingDirectories {
   publicRoot: string;
+  publicInputRoot: string;
   buildRoot: string;
 }
 
@@ -65,10 +66,12 @@ export async function createOutputStagingDirectories(
   const name = basename(outputRoot);
   const staging = {
     publicRoot: join(parent, `.${name}.${token}.tmp`),
+    publicInputRoot: join(parent, `.${name}.${token}.input.tmp`),
     buildRoot: join(parent, `.${name}.${token}.nitro.tmp`),
   };
   await Promise.all([
     ensureUnlinkedDirectory(staging.publicRoot),
+    ensureUnlinkedDirectory(staging.publicInputRoot),
     ensureUnlinkedDirectory(staging.buildRoot),
   ]);
   return staging;
@@ -79,6 +82,7 @@ export async function discardOutputStagingDirectories(
 ): Promise<void> {
   await Promise.all([
     rm(staging.publicRoot, { recursive: true, force: true }),
+    rm(staging.publicInputRoot, { recursive: true, force: true }),
     rm(staging.buildRoot, { recursive: true, force: true }),
   ]);
 }

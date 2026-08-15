@@ -95,4 +95,52 @@ describe("conversation export preparation", () => {
       database.close();
     }
   });
+
+  it("retains IP-literal links while excluding them from favicon enrichment", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-viewer-prepare-export-"));
+    temporaryDirectories.push(root);
+    const conversation = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: join(root, "modern.jsonl"),
+      scope: "active",
+      revision: "sha256:fixture",
+    });
+    const assistant = conversation.turns[0]!.assistantMessages[0]!;
+    assistant.sourceMarkdown = "Open the [local viewer](http://127.0.0.1:3000/session/example).";
+    assistant.body = {
+      type: "document",
+      children: [{ type: "text", text: assistant.sourceMarkdown }],
+    };
+    const database = openCacheDatabase(":memory:");
+    replaceCachedSession(database, {
+      session: conversation,
+      diagnostics: [],
+      source: cachedSource(conversation),
+    });
+
+    try {
+      const prepared = await prepareConversationForExport(database, conversation, {
+        mediaRoot: join(root, "media-cache"),
+        faviconRoot: join(root, "favicon-cache"),
+        offline: true,
+      });
+      const nodes = descendants(
+        prepared.conversation.turns[0]!.assistantMessages[0]!.body.children,
+      );
+
+      expect(nodes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "link",
+            url: "http://127.0.0.1:3000/session/example",
+            origin: "http://127.0.0.1:3000",
+          }),
+        ]),
+      );
+      expect(prepared.faviconOrigins).toEqual(new Set());
+      expect(prepared.faviconResults).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
 });
