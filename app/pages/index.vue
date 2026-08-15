@@ -1,7 +1,9 @@
+<script setup lang="ts">
+import LibraryExplorer from "../components/library/LibraryExplorer.vue";
+
+useHead({ title: "Library · Codex Sessions Viewer" });
+</script>
+
 <template>
-  <main>
-    <h1>Codex Sessions Viewer</h1>
-    <p>Read local Codex conversations without changing their source files.</p>
-    <NuxtLink to="/about"> About this viewer </NuxtLink>
-  </main>
+  <LibraryExplorer />
 </template>

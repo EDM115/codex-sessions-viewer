@@ -40,3 +40,8 @@ Information already present elsewhere (README, AGENTS, PLAN, PROGRESS, plans fol
 ## 2026-08-14 — Unknown model — Codex Desktop — "Implement Plan Task 8 live SSR"
 
 - Nuxt 4.5.2 currently resolves server event-stream imports to installed H3 1.15.11, whose cleanup API is `createEventStream(event)`, `stream.onClosed(callback)`, and `stream.send()`; H3 v2 documentation instead shows `new EventStream()` and `onDispose`, so live SSE code must follow the installed type/runtime contract until the dependency actually changes.
+
+## 2026-08-15 — GPT-5 — Codex Desktop — "Implement Plan Task 9 application shell"
+
+- Import application-used shared modules through Nuxt's `#shared` alias rather than deep relative paths: Nitro can preserve a deep relative specifier from a generated application chunk and then fail to resolve it during final production tracing even when development and focused tests pass.
+- Keep `tsconfig.custom.json` non-composite and invoke it separately after `nuxt typecheck`: Nuxt already owns `server/**/*` and `shared/**/*`, while a composite custom project importing those sources raises TS6307 unless their broad globs are duplicated into the custom project.

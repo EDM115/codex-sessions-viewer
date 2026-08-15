@@ -4,10 +4,7 @@
     "allowImportingTsExtensions": true,
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,
-    "composite": true,
-    "declaration": true,
     "disableSizeLimit": true,
-    "emitDeclarationOnly": true,
     "emitDecoratorMetadata": true,
     "erasableSyntaxOnly": true,
     "esModuleInterop": true,
@@ -27,6 +24,7 @@
     "noUncheckedSideEffectImports": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
+    "noEmit": true,
     "preserveWatchOutput": true,
     "removeComments": true,
     "resolveJsonModule": true,
@@ -37,15 +35,13 @@
     "types": ["node"],
     "verbatimModuleSyntax": true
   },
-  "include": ["./scripts/**/*.ts", "./server/**/*.ts", "./shared/**/*.ts", "./tests/**/*.ts"],
+  "include": ["./scripts/**/*.ts", "./tests/**/*.ts"],
   "exclude": [
     "./.data",
     "./.output",
     "./app/**/*",
     "./dist",
     "./node_modules/**/*",
-    "./server/api/**/*",
-    "./server/middleware/**/*",
-    "./server/plugins/**/*"
+    "./tests/unit/ui/**/*"
   ]
 }

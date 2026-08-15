@@ -24,9 +24,6 @@
     },
     {
       "path": "./.nuxt/tsconfig.node.json"
-    },
-    {
-      "path": "./tsconfig.custom.json"
     }
   ]
 }

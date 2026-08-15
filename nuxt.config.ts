@@ -37,6 +37,12 @@ function staticSessionRoutes(): string[] {
 export default defineNuxtConfig({
   compatibilityDate: "2026-08-01",
   ssr: true,
+  css: [
+    "~/assets/css/tokens.css",
+    "~/assets/css/themes.css",
+    "~/assets/css/base.css",
+    "~/assets/css/components.css",
+  ],
   devtools: {
     enabled: false,
   },
@@ -159,6 +165,7 @@ export default defineNuxtConfig({
     viewerMode,
     public: {
       pagefindEnabled,
+      viewerMode,
     },
   },
   routeRules: {

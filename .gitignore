@@ -19,3 +19,4 @@ blob-report/
 *.local
 .DS_Store
 .pnpm-store
+.hallmark

@@ -45,6 +45,10 @@ export interface SearchQuery extends SessionListQuery {
   query: string;
 }
 
+export interface RepositoryRequestOptions {
+  signal?: AbortSignal;
+}
+
 export interface SearchHit {
   sessionId: string;
   turnId: string;
@@ -119,8 +123,11 @@ export interface ViewerInvalidation {
 
 export interface ConversationRepository {
   capabilities(): RepositoryCapabilities;
-  listSessions(query: SessionListQuery): Promise<CursorPage<ConversationSummary>>;
-  search(query: SearchQuery): Promise<CursorPage<SearchHit>>;
+  listSessions(
+    query: SessionListQuery,
+    options?: RepositoryRequestOptions,
+  ): Promise<CursorPage<ConversationSummary>>;
+  search(query: SearchQuery, options?: RepositoryRequestOptions): Promise<CursorPage<SearchHit>>;
   getSession(id: string): Promise<ConversationSummary>;
   getTurnNavigator(id: string): Promise<TurnNavigatorItem[]>;
   getTurns(id: string, query: TurnChunkQuery): Promise<TurnChunk>;
