@@ -235,9 +235,10 @@ export class StaticConversationRepository implements ConversationRepository {
     if (query.targetTurnId !== undefined) {
       const navigator = await this.navigator(id);
       const target = navigator.items.find((item) => item.turnId === query.targetTurnId);
-      if (target !== undefined) {
-        cursor = String(Math.floor(target.index / navigator.chunkSize));
+      if (target === undefined) {
+        throw new Error("Turn target not found in the static payloads.");
       }
+      cursor = String(Math.floor(target.index / navigator.chunkSize));
     }
     return turnChunkSchema.parse(
       await this.requester(

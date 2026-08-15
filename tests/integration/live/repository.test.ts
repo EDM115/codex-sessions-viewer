@@ -80,6 +80,10 @@ describe("live repository payloads", () => {
         })
         .parse(inspectorsJson);
       const firstTurn = session.turns[0]!;
+      const assistantMessage = firstTurn.assistantMessages.at(-1);
+      if (assistantMessage === undefined) {
+        throw new Error("Expected the fixture's first turn to contain an assistant message.");
+      }
 
       await expect(repository.getSession(session.summary.id)).resolves.toEqual(
         staticSummary.summary,
@@ -96,6 +100,22 @@ describe("live repository payloads", () => {
         staticInspectors.records.find(
           ({ target }: { target: { type: string; id: string } }) =>
             target.type === "turn" && target.id === firstTurn.id,
+        ),
+      );
+      const messageInspector = await repository.getInspector(session.summary.id, {
+        type: "message",
+        id: assistantMessage.id,
+      });
+      expect(messageInspector).toMatchObject({
+        target: { type: "message", id: assistantMessage.id },
+        phase: assistantMessage.phase,
+        durationMs: firstTurn.durationMs,
+        timeToFirstTokenMs: firstTurn.timeToFirstTokenMs,
+        tokenDelta: firstTurn.tokenDelta,
+      });
+      expect(messageInspector).toEqual(
+        staticInspectors.records.find(
+          ({ target }) => target.type === "message" && target.id === assistantMessage.id,
         ),
       );
     } finally {

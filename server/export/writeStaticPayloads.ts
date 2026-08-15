@@ -127,14 +127,24 @@ function targetRecord(
     createdAt: input.createdAt,
     completedAt: input.completedAt,
     durationMs: input.durationMs,
-    timeToFirstTokenMs: target.type === "turn" ? turn.timeToFirstTokenMs : null,
-    tokenDelta: target.type === "turn" ? turn.tokenDelta : null,
+    timeToFirstTokenMs: target.type === "activity" ? null : turn.timeToFirstTokenMs,
+    tokenDelta: target.type === "activity" ? null : turn.tokenDelta,
     toolCounts: turn.toolCounts,
     activityIds: input.activityIds,
     eventIds: input.eventIds,
     diagnosticIds: turn.diagnosticIds,
     rawRecords: relatedRawRecords(input.eventIds, rawEvents),
   };
+}
+
+function turnEventIds(turn: ConversationTurn): string[] {
+  return [
+    ...new Set([
+      ...(turn.userMessage?.rawEventIds ?? []),
+      ...turn.assistantMessages.flatMap(({ rawEventIds }) => rawEventIds),
+      ...turn.activities.flatMap(({ rawEventIds }) => rawEventIds),
+    ]),
+  ];
 }
 
 function messageInspector(
@@ -148,9 +158,9 @@ function messageInspector(
     {
       phase: message.phase,
       createdAt: message.createdAt,
-      completedAt: null,
-      durationMs: null,
-      eventIds: message.rawEventIds,
+      completedAt: turn.completedAt,
+      durationMs: turn.durationMs,
+      eventIds: turnEventIds(turn),
       activityIds: turn.activities.map(({ id }) => id),
     },
     rawEvents,
@@ -170,13 +180,6 @@ function inspectorsForTurn(
   turn: ConversationTurn,
   rawEvents: ReadonlyMap<string, NormalizedRawEvent>,
 ): InspectorRecord[] {
-  const turnEventIds = [
-    ...new Set([
-      ...(turn.userMessage?.rawEventIds ?? []),
-      ...turn.assistantMessages.flatMap(({ rawEventIds }) => rawEventIds),
-      ...turn.activities.flatMap(({ rawEventIds }) => rawEventIds),
-    ]),
-  ];
   return [
     targetRecord(
       turn,
@@ -186,7 +189,7 @@ function inspectorsForTurn(
         createdAt: turn.startedAt,
         completedAt: turn.completedAt,
         durationMs: turn.durationMs,
-        eventIds: turnEventIds,
+        eventIds: turnEventIds(turn),
         activityIds: turn.activities.map(({ id }) => id),
       },
       rawEvents,

@@ -6,6 +6,14 @@ import { usePresentationSettings } from "../composables/usePresentationSettings.
 
 const route = useRoute();
 const { settings } = usePresentationSettings();
+
+const context = computed(() =>
+  route.path === "/settings"
+    ? "Settings"
+    : route.path.startsWith("/session/")
+      ? "Conversation"
+      : "Library",
+);
 </script>
 
 <template>
@@ -21,7 +29,7 @@ const { settings } = usePresentationSettings();
         <span class="app-chrome__sigil" aria-hidden="true">C</span>
         <span>Codex Sessions Viewer</span>
       </a>
-      <p class="app-chrome__context">{{ route.path === "/settings" ? "Settings" : "Library" }}</p>
+      <p class="app-chrome__context">{{ context }}</p>
       <nav class="app-chrome__actions" aria-label="Application">
         <UiIconLink v-if="route.path !== '/'" href="/" label="Open session library">
           <PhHouse :size="20" weight="regular" aria-hidden="true" />

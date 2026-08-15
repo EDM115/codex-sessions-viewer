@@ -45,3 +45,9 @@ Information already present elsewhere (README, AGENTS, PLAN, PROGRESS, plans fol
 
 - Import application-used shared modules through Nuxt's `#shared` alias rather than deep relative paths: Nitro can preserve a deep relative specifier from a generated application chunk and then fail to resolve it during final production tracing even when development and focused tests pass.
 - Keep `tsconfig.custom.json` non-composite and invoke it separately after `nuxt typecheck`: Nuxt already owns `server/**/*` and `shared/**/*`, while a composite custom project importing those sources raises TS6307 unless their broad globs are duplicated into the custom project.
+
+## 2026-08-15 — GPT-5 — Codex Desktop — "Implement Plan Task 10 conversation timeline"
+
+- Preserve the assistant message as the Info target, but enrich its inspector record with the owning turn's TTFT, token delta, duration, related work, and raw protocol evidence: using only a turn target drops the selected message phase, while the default message record is too narrow for the Task 10 inspector contract.
+- Keep custom-tsconfig timeline tests on pure algorithms under `shared/` and put Vue composable integration tests under the existing UI-test boundary; importing `app/composables` from a custom-included test makes TypeScript follow Nuxt-owned application modules and defeats the custom config's non-default-files-only ownership.
+- Treat local repository reads as asynchronous UI work: use explicit latest-wins ownership for target, direction, refresh, and inspector requests, and capture prepend anchors only when the fetched chunk is about to be applied. Local speed does not prevent response-order races or stale pre-request scroll snapshots.

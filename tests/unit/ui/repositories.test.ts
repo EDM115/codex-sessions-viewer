@@ -41,6 +41,40 @@ function summary(overrides: Partial<ConversationSummary> = {}): ConversationSumm
 }
 
 describe("conversation repository adapters", () => {
+  it("rejects an absent exact-turn target consistently in static and live modes", async () => {
+    const staticRequest = vi.fn<RepositoryRequester>(async (path) => {
+      if (path.endsWith("/navigator.json")) {
+        return {
+          sessionId: "session-1",
+          revision: "revision-1",
+          chunkSize: 20,
+          items: [],
+        };
+      }
+      throw new Error(`Unexpected static request: ${path}`);
+    });
+    const liveRequest = vi
+      .fn<RepositoryRequester>()
+      .mockRejectedValue(new Error("Viewer API request failed with HTTP 404."));
+
+    await expect(
+      new StaticConversationRepository(staticRequest).getTurns("session-1", {
+        targetTurnId: "missing-turn",
+        limit: 20,
+      }),
+    ).rejects.toThrow("Turn target not found");
+    await expect(
+      new LiveApiConversationRepository(liveRequest).getTurns("session-1", {
+        targetTurnId: "missing-turn",
+        limit: 20,
+      }),
+    ).rejects.toThrow("HTTP 404");
+    expect(staticRequest).toHaveBeenCalledOnce();
+    expect(liveRequest).toHaveBeenCalledWith(
+      "/api/sessions/session-1/turns?targetTurnId=missing-turn&limit=20",
+    );
+  });
+
   it("paginates and filters the static session index without mutating its source", async () => {
     const sessions = [
       summary(),

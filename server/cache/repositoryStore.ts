@@ -228,8 +228,8 @@ function targetRecord(
     createdAt: input.createdAt,
     completedAt: input.completedAt,
     durationMs: input.durationMs,
-    timeToFirstTokenMs: target.type === "turn" ? turn.timeToFirstTokenMs : null,
-    tokenDelta: target.type === "turn" ? turn.tokenDelta : null,
+    timeToFirstTokenMs: target.type === "activity" ? null : turn.timeToFirstTokenMs,
+    tokenDelta: target.type === "activity" ? null : turn.tokenDelta,
     toolCounts: turn.toolCounts,
     activityIds: input.activityIds,
     eventIds: input.eventIds,
@@ -239,6 +239,16 @@ function targetRecord(
       .filter((event): event is NormalizedRawEvent => event !== undefined)
       .map(rawRecord),
   });
+}
+
+function turnEventIds(turn: ConversationTurn): string[] {
+  return [
+    ...new Set([
+      ...(turn.userMessage?.rawEventIds ?? []),
+      ...turn.assistantMessages.flatMap(({ rawEventIds }) => rawEventIds),
+      ...turn.activities.flatMap(({ rawEventIds }) => rawEventIds),
+    ]),
+  ];
 }
 
 function messageInspector(
@@ -252,9 +262,9 @@ function messageInspector(
     {
       phase: message.phase,
       createdAt: message.createdAt,
-      completedAt: null,
-      durationMs: null,
-      eventIds: message.rawEventIds,
+      completedAt: turn.completedAt,
+      durationMs: turn.durationMs,
+      eventIds: turnEventIds(turn),
       activityIds: turn.activities.map(({ id }) => id),
     },
     rawEvents,
@@ -294,13 +304,6 @@ export function getCachedInspector(
   const rawEvents = new Map(session.rawEvents.map((event) => [event.id, event]));
   for (const turn of session.turns) {
     if (target.type === "turn" && turn.id === target.id) {
-      const eventIds = [
-        ...new Set([
-          ...(turn.userMessage?.rawEventIds ?? []),
-          ...turn.assistantMessages.flatMap(({ rawEventIds }) => rawEventIds),
-          ...turn.activities.flatMap(({ rawEventIds }) => rawEventIds),
-        ]),
-      ];
       return targetRecord(
         turn,
         target,
@@ -309,7 +312,7 @@ export function getCachedInspector(
           createdAt: turn.startedAt,
           completedAt: turn.completedAt,
           durationMs: turn.durationMs,
-          eventIds,
+          eventIds: turnEventIds(turn),
           activityIds: turn.activities.map(({ id }) => id),
         },
         rawEvents,
