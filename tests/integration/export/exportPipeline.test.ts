@@ -20,14 +20,15 @@ import type { ViewerPaths } from "../../../server/core/paths.ts";
 import { collectDoctorReport } from "../../../server/export/doctorReport.ts";
 import { runStaticExport } from "../../../server/export/exportPipeline.ts";
 import { CliExportProgress } from "../../../server/export/exportProgress.ts";
+import {
+  hydrateStaticInspectorRecords,
+  staticInspectorChunkSchema,
+} from "../../../shared/types/staticPayloads.ts";
 
 const temporaryDirectories: string[] = [];
 const routeManifestSchema = z.object({ routes: z.array(z.string()) });
 const sessionIndexSchema = z.object({ sessions: z.array(z.object({ id: z.string() })) });
 const exportManifestSchema = z.object({ version: z.literal(1), pagefind: z.boolean() });
-const inspectorPayloadSchema = z.object({
-  records: z.array(z.object({ rawRecords: z.array(z.unknown()) })),
-});
 
 async function temporaryRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "codex-viewer-pipeline-"));
@@ -337,7 +338,7 @@ describe("static export pipeline", () => {
       "/session/11111111-1111-4111-8111-111111111111#turn-turn-1",
       "/session/11111111-1111-4111-8111-111111111111#turn-turn-2",
     ]);
-    const inspector = inspectorPayloadSchema.parse(
+    const inspector = staticInspectorChunkSchema.parse(
       JSON.parse(
         await readFile(
           join(
@@ -351,7 +352,9 @@ describe("static export pipeline", () => {
         ),
       ),
     );
-    expect(inspector.records.some(({ rawRecords }) => rawRecords.length > 0)).toBe(true);
+    expect(
+      hydrateStaticInspectorRecords(inspector).some(({ rawRecords }) => rawRecords.length > 0),
+    ).toBe(true);
   });
 
   it("keeps doctor read-only while reporting discovery and viewer-cache state", async () => {

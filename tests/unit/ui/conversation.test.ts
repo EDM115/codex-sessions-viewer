@@ -1,12 +1,19 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 
+import ConversationActivityList from "../../../app/components/conversation/ConversationActivityList.vue";
 import ConversationInspector from "../../../app/components/conversation/ConversationInspector.vue";
 import ConversationMessage from "../../../app/components/conversation/ConversationMessage.vue";
 import ConversationTurn from "../../../app/components/conversation/ConversationTurn.vue";
-import { formatDuration } from "../../../app/components/conversation/format.ts";
+import {
+  agentWorkText,
+  formatDuration,
+  formattedJson,
+  formatTimestamp,
+} from "../../../app/components/conversation/format.ts";
 import TurnMinimap from "../../../app/components/conversation/TurnMinimap.vue";
 import type {
+  ConversationActivity,
   ConversationMessage as Message,
   ConversationTurn as Turn,
   TurnNavigatorItem,
@@ -85,12 +92,188 @@ function turn(): Turn {
   };
 }
 
+function activityVariants(): ConversationActivity[] {
+  const base = { turnId: "turn-1", createdAt: null, rawEventIds: [] } as const;
+  return [
+    { ...base, id: "reasoning-empty", kind: "reasoning", summary: "", body: null, encrypted: true },
+    {
+      ...base,
+      id: "web",
+      kind: "web_search",
+      query: "Nuxt tracing",
+      status: "succeeded",
+      resultCount: 2,
+    },
+    { ...base, id: "patch", kind: "patch", status: "failed", patch: "diff", affectedPaths: [] },
+    {
+      ...base,
+      id: "plan",
+      kind: "plan",
+      status: "running",
+      title: null,
+      items: [{ step: "Verify", status: "in_progress" }],
+    },
+    {
+      ...base,
+      id: "agent",
+      kind: "subagent",
+      status: "failed",
+      agentId: null,
+      parentThreadId: null,
+      childThreadId: null,
+      description: "Review performance",
+    },
+    { ...base, id: "status", kind: "status", status: "succeeded", message: "Cache ready" },
+    { ...base, id: "compact", kind: "compaction", summary: null },
+    {
+      ...base,
+      id: "media",
+      kind: "media",
+      assetId: "asset-1",
+      mediaType: "image",
+      sourcePath: null,
+    },
+    { ...base, id: "unknown", kind: "unknown", eventType: "future", payload: null },
+  ];
+}
+
 describe("conversation presentation", () => {
   it("carries rounded seconds into the next minute", () => {
+    expect(formatDuration(null)).toBeNull();
+    expect(formatDuration(999.4)).toBe("999 ms");
+    expect(formatDuration(9_500)).toBe("9.5 s");
+    expect(formatDuration(10_500)).toBe("11 s");
     expect(formatDuration(3_599_600)).toBe("60m 0s");
   });
 
-  it("separates user and assistant prose while keeping protocol-only events out of the timeline", () => {
+  it("formats absolute, relative, unavailable, and JSON values deterministically", () => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-15T12:00:00.000Z"));
+    const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+    expect(formatTimestamp(null, "both")).toBe("Time unavailable");
+    expect(formatTimestamp("2026-08-15T11:59:40.000Z", "absolute")).not.toContain("ago");
+    expect(formatTimestamp("2026-08-15T11:59:40.000Z", "relative")).toBe(
+      relative.format(-20, "second"),
+    );
+    expect(formatTimestamp("2026-08-15T11:30:00.000Z", "relative")).toBe(
+      relative.format(-30, "minute"),
+    );
+    expect(formatTimestamp("2026-08-15T09:00:00.000Z", "relative")).toBe(
+      relative.format(-3, "hour"),
+    );
+    expect(formatTimestamp("2026-08-13T12:00:00.000Z", "relative")).toBe(
+      relative.format(-2, "day"),
+    );
+    expect(formatTimestamp("2026-08-15T12:00:20.000Z", "both")).toContain(
+      `${relative.format(20, "second")} ·`,
+    );
+    expect(formattedJson("plain")).toBe("plain");
+    expect(formattedJson({ nested: true })).toBe('{\n  "nested": true\n}');
+  });
+
+  it("renders every known work activity, its fallbacks, statuses, and resize events", async () => {
+    const activities = activityVariants();
+    const wrapper = mount(ConversationActivityList, {
+      props: { activities, reasoningDefault: "expanded", toolCallsDefault: "expanded" },
+    });
+
+    expect(wrapper.text()).toContain("Reasoning details unavailable");
+    expect(wrapper.text()).toContain("Encrypted source retained");
+    expect(wrapper.text()).toContain("Web search · Nuxt tracing");
+    expect(wrapper.text()).toContain("Patch · no paths");
+    expect(wrapper.text()).toContain("Plan update");
+    expect(wrapper.text()).toContain("Agent · Review performance");
+    expect(wrapper.text()).toContain("Cache ready");
+    expect(wrapper.text()).toContain("Conversation compacted");
+    expect(wrapper.text()).toContain("image · asset-1");
+    expect(wrapper.text()).not.toContain("future");
+    expect(wrapper.findAll(".conversation-work-row.is-failed")).toHaveLength(2);
+
+    const summaries = wrapper.findAll("summary");
+    await summaries[0].trigger("pointerdown");
+    await summaries[1].trigger("keydown", { key: "Enter" });
+    await summaries[1].trigger("toggle");
+    expect(wrapper.emitted("beforeResize")).toHaveLength(2);
+    expect(wrapper.emitted("resized")).toHaveLength(1);
+
+    const enriched: ConversationActivity[] = activities.map((activity) => {
+      if (activity.kind === "patch") {
+        return { ...activity, affectedPaths: ["app.vue"] };
+      }
+      if (activity.kind === "plan") {
+        return { ...activity, title: "Release" };
+      }
+      if (activity.kind === "compaction") {
+        return { ...activity, summary: "Earlier context" };
+      }
+      if (activity.kind === "media") {
+        return { ...activity, sourcePath: "diagram.png" };
+      }
+      return activity;
+    });
+    await wrapper.setProps({ activities: enriched });
+    expect(wrapper.text()).toContain("Patch · app.vue");
+    expect(wrapper.text()).toContain("Release");
+    expect(wrapper.text()).toContain("Earlier context");
+    expect(wrapper.text()).toContain("diagram.png");
+  });
+
+  it("serializes all agent-work variants while omitting unknown and blank reasoning records", () => {
+    const value = turn();
+    value.activities = [
+      ...activityVariants(),
+      {
+        id: "tool-2",
+        turnId: value.id,
+        kind: "tool",
+        createdAt: null,
+        rawEventIds: [],
+        namespace: null,
+        name: "read",
+        callId: null,
+        status: "failed",
+        startedAt: null,
+        completedAt: null,
+        durationMs: null,
+        input: "README.md",
+        output: { ok: false },
+        error: "denied",
+      },
+      {
+        id: "compact-2",
+        turnId: value.id,
+        kind: "compaction",
+        createdAt: null,
+        rawEventIds: [],
+        summary: "Earlier context",
+      },
+      {
+        id: "media-2",
+        turnId: value.id,
+        kind: "media",
+        createdAt: null,
+        rawEventIds: [],
+        assetId: "asset-2",
+        mediaType: "file",
+        sourcePath: "report.txt",
+      },
+    ];
+    const text = agentWorkText(value);
+    expect(text).toContain("tool/read · failed");
+    expect(text).toContain("Input\nREADME.md");
+    expect(text).toContain('Output\n{\n  "ok": false\n}');
+    expect(text).toContain("Error\ndenied");
+    expect(text).toContain("Web search · succeeded");
+    expect(text).toContain("Patch · failed");
+    expect(text).toContain("Plan\n[in_progress] Verify");
+    expect(text).toContain("Agent · failed");
+    expect(text).toContain("Status · succeeded");
+    expect(text).toContain("Conversation compacted\nEarlier context");
+    expect(text).toContain("Media · file\nreport.txt");
+    expect(text).toContain("The parser is ready.");
+    expect(text).not.toContain("future");
+  });
+
+  it("separates user and assistant prose while keeping protocol-only events out of the timeline", async () => {
     const wrapper = mount(ConversationTurn, {
       props: {
         turn: turn(),
@@ -108,9 +291,15 @@ describe("conversation presentation", () => {
     );
     expect(wrapper.get('[data-activity-group="reasoning"]').attributes()).toHaveProperty("open");
     expect(wrapper.get('[data-activity-group="work"]').attributes()).not.toHaveProperty("open");
+    expect(wrapper.text()).not.toContain("filesystem/read_file");
+    expect(wrapper.text()).not.toContain("Access denied");
+    expect(wrapper.text()).not.toContain("protocol-only");
+
+    const work = wrapper.get('[data-activity-group="work"]');
+    (work.element as HTMLDetailsElement).open = true;
+    await work.trigger("toggle");
     expect(wrapper.text()).toContain("filesystem/read_file");
     expect(wrapper.text()).toContain("Access denied");
-    expect(wrapper.text()).not.toContain("protocol-only");
   });
 
   it("preserves the selected assistant message as the Info target", async () => {
@@ -220,5 +409,41 @@ describe("conversation presentation", () => {
     await wrapper.get('[role="dialog"]').trigger("keydown", { key: "Escape" });
     expect(wrapper.emitted("close")).toHaveLength(1);
     wrapper.unmount();
+  });
+
+  it("renders inspector failure recovery and unavailable metadata fallbacks", async () => {
+    const wrapper = mount(ConversationInspector, {
+      props: { record: null, loading: false, error: "Metadata read failed" },
+    });
+    expect(wrapper.text()).toContain("Metadata read failed");
+    await wrapper.get("button:not(.ui-icon-button)").trigger("click");
+    expect(wrapper.emitted("retry")).toHaveLength(1);
+    await wrapper.get('[aria-label="Close message info"]').trigger("click");
+    expect(wrapper.emitted("close")).toHaveLength(1);
+
+    await wrapper.setProps({
+      error: null,
+      record: {
+        sessionId: "session-1",
+        target: { type: "turn", id: "turn-1" },
+        models: [],
+        reasoningEfforts: [],
+        phase: null,
+        createdAt: null,
+        completedAt: null,
+        durationMs: null,
+        timeToFirstTokenMs: null,
+        tokenDelta: null,
+        toolCounts: {},
+        activityIds: [],
+        eventIds: [],
+        diagnosticIds: [],
+        rawRecords: [],
+      },
+    });
+    expect(wrapper.text()).toContain("Unavailable");
+    expect(wrapper.text()).toContain("No tool calls.");
+    expect(wrapper.text()).toContain("None");
+    expect(wrapper.get("pre").text()).toBe("[]");
   });
 });

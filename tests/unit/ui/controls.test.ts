@@ -103,6 +103,36 @@ describe("Task 9 UI controls", () => {
     expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["archived"]);
   });
 
+  it("wraps every tab-navigation key while skipping disabled items and ignoring unrelated keys", async () => {
+    const wrapper = mount(UiTabs, {
+      attachTo: document.body,
+      props: {
+        label: "Views",
+        modelValue: "first",
+        items: [
+          { value: "first", label: "First" },
+          { value: "disabled", label: "Disabled", disabled: true },
+          { value: "last", label: "Last" },
+        ],
+      },
+    });
+    const tabs = wrapper.findAll('[role="tab"]');
+    await tabs[0].trigger("keydown", { key: "ArrowLeft" });
+    expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["last"]);
+    expect(document.activeElement).toBe(tabs[2].element);
+    await tabs[2].trigger("keydown", { key: "ArrowDown" });
+    expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["first"]);
+    await tabs[0].trigger("keydown", { key: "End" });
+    expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["last"]);
+    await tabs[2].trigger("keydown", { key: "Home" });
+    expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["first"]);
+    const count = wrapper.emitted("update:modelValue")!.length;
+    await tabs[0].trigger("keydown", { key: "Escape" });
+    await tabs[1].trigger("keydown", { key: "ArrowRight" });
+    expect(wrapper.emitted("update:modelValue")).toHaveLength(count);
+    wrapper.unmount();
+  });
+
   it("provides keyboard-dismissible disclosure and menu surfaces", async () => {
     const disclosure = mount(UiDisclosure, {
       props: { label: "Cache diagnostics" },

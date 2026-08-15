@@ -177,4 +177,172 @@ describe("Task 11 Mermaid and inline media", () => {
       download: "note.wav",
     });
   });
+
+  it("renders cached files, missing sources, unavailable assets, and resolver failures without remote fetches", async () => {
+    const resolveAsset = vi.fn(async (assetId: string): Promise<ResolvedAsset> => {
+      if (assetId === "asset-reject") {
+        throw new Error("cache unavailable");
+      }
+      return {
+        id: assetId,
+        url: assetId === "asset-file" ? "/api/assets/asset-file/content" : null,
+        mimeType: assetId === "asset-file" ? "image/svg+xml" : null,
+        byteSize: assetId === "asset-file" ? 42 : null,
+        sha256: assetId === "asset-file" ? "c".repeat(64) : null,
+        width: null,
+        height: null,
+        status: assetId === "asset-file" ? "available" : "missing",
+        originalPath: null,
+      };
+    });
+    const wrapper = mount(RichTextRenderer, {
+      props: {
+        document: document([
+          {
+            type: "media",
+            mediaType: "file",
+            source: "asset",
+            assetId: "asset-file",
+            originalSource: "data:image/svg+xml;base64,AA==",
+            alt: "",
+            title: null,
+          },
+          {
+            type: "media",
+            mediaType: "video",
+            source: "missing",
+            assetId: null,
+            originalSource: "C:\\lost\\clip.mp4",
+            alt: "",
+            title: null,
+          },
+          {
+            type: "media",
+            mediaType: "image",
+            source: "asset",
+            assetId: null,
+            originalSource: "",
+            alt: "",
+            title: null,
+          },
+          {
+            type: "media",
+            mediaType: "image",
+            source: "asset",
+            assetId: "asset-missing",
+            originalSource: "missing.png",
+            alt: "Missing image",
+            title: null,
+          },
+          {
+            type: "media",
+            mediaType: "audio",
+            source: "asset",
+            assetId: "asset-reject",
+            originalSource: "broken",
+            alt: "Broken audio",
+            title: null,
+          },
+        ]),
+        resolveAsset,
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.get('a[download="attachment.svg"]').attributes("href")).toBe(
+      "/api/assets/asset-file/content",
+    );
+    expect(wrapper.text()).toContain("Download cached file");
+    expect(wrapper.text()).toContain("clip.mp4");
+    expect(wrapper.text()).toContain("attachment.bin");
+    expect(wrapper.text()).toContain("Missing image");
+    expect(wrapper.text()).toContain("Broken audio");
+    expect(wrapper.findAll("[role=status]")).toHaveLength(4);
+    expect(resolveAsset).toHaveBeenCalledTimes(3);
+  });
+
+  it("uses image fallbacks and marks an available image unavailable after a decode error", async () => {
+    const wrapper = mount(RichTextRenderer, {
+      props: {
+        document: document([
+          {
+            type: "media",
+            mediaType: "image",
+            source: "asset",
+            assetId: "asset-photo",
+            originalSource: "C:\\work\\photo",
+            alt: "",
+            title: null,
+          },
+        ]),
+        resolveAsset: async () => ({
+          id: "asset-photo",
+          url: "/api/assets/asset-photo/content",
+          mimeType: null,
+          byteSize: 12,
+          sha256: "d".repeat(64),
+          width: null,
+          height: null,
+          status: "available",
+          originalPath: null,
+        }),
+      },
+    });
+    await flushPromises();
+
+    const open = wrapper.get('button[aria-label="Open image: photo"]');
+    await open.trigger("click");
+    expect(wrapper.emitted("openMedia")?.at(-1)?.[0]).toMatchObject({
+      alt: "photo",
+      filename: "photo",
+      mimeType: "image/png",
+      width: null,
+      height: null,
+    });
+    await wrapper.get("img").trigger("error");
+    expect(wrapper.find('button[aria-label="Open image: photo"]').exists()).toBe(false);
+    expect(wrapper.get("[role=status]").text()).toContain("Cached media is unavailable");
+  });
+
+  it("supports Mermaid keyboard tabs, sanitizes URL attributes, and renders at most once", async () => {
+    globalThis.document.documentElement.style.colorScheme = "dark";
+    mermaidMocks.render.mockResolvedValueOnce({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" onclick="bad()"><a href="javascript:bad()"><text onmouseover="bad()">Safe</text></a></svg>',
+    });
+    const wrapper = mount(RichTextRenderer, {
+      props: { document: document([{ type: "mermaid", source: "graph TD; A-->B" }]) },
+    });
+    const tabs = wrapper.get('[role="tablist"]');
+    await tabs.trigger("keydown", { key: "PageDown" });
+    expect(mermaidMocks.render).not.toHaveBeenCalled();
+    await tabs.trigger("keydown", { key: "Home" });
+    await flushPromises();
+
+    expect(mermaidMocks.initialize).toHaveBeenCalledWith(
+      expect.objectContaining({ theme: "dark" }),
+    );
+    expect(wrapper.get("[data-mermaid-preview] svg").attributes("onclick")).toBeUndefined();
+    expect(wrapper.get("[data-mermaid-preview] a").attributes("href")).toBeUndefined();
+    expect(wrapper.get("[data-mermaid-preview] text").attributes("onmouseover")).toBeUndefined();
+    await wrapper.get('[role="tab"][aria-label="Preview Mermaid diagram"]').trigger("click");
+    await flushPromises();
+    expect(mermaidMocks.render).toHaveBeenCalledTimes(1);
+    await tabs.trigger("keydown", { key: "End" });
+    await flushPromises();
+    expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe("Code");
+    globalThis.document.documentElement.style.colorScheme = "";
+  });
+
+  it("rejects non-SVG Mermaid output and does not open an idle preview", async () => {
+    mermaidMocks.render.mockResolvedValueOnce({ svg: "<html><body>not svg</body></html>" });
+    const wrapper = mount(RichTextRenderer, {
+      props: { document: document([{ type: "mermaid", source: "invalid" }]) },
+    });
+
+    await wrapper.get('button[aria-label="Open Mermaid diagram"]').trigger("click");
+    expect(wrapper.emitted("openMedia")).toBeUndefined();
+    await wrapper.get('[role="tab"][aria-label="Preview Mermaid diagram"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[role="status"]').text()).toContain("Mermaid preview failed");
+  });
 });

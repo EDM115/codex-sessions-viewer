@@ -215,6 +215,48 @@ function inspectorsForTurn(
   ];
 }
 
+function inspectorTargetKeys(turn: ConversationTurn): string[] {
+  return [
+    `turn:${turn.id}`,
+    ...(turn.userMessage === null ? [] : [`message:${turn.userMessage.id}`]),
+    ...turn.assistantMessages.map((message) => `message:${message.id}`),
+    ...turn.activities.map((activity) => `activity:${activity.id}`),
+  ];
+}
+
+function inspectorChunkIndex(
+  turns: readonly ConversationTurn[],
+  chunkSize: number,
+): Record<string, number> {
+  return Object.fromEntries(
+    turns.flatMap((turn, index) =>
+      inspectorTargetKeys(turn).map((target) => [target, Math.floor(index / chunkSize)]),
+    ),
+  );
+}
+
+function compactInspectorChunk(
+  sessionId: string,
+  revision: string,
+  records: readonly InspectorRecord[],
+  rawEvents: ReadonlyMap<string, NormalizedRawEvent>,
+) {
+  const pooledRawRecords: Record<string, JsonValue> = {};
+  for (const eventId of new Set(records.flatMap(({ eventIds }) => eventIds))) {
+    const event = rawEvents.get(eventId);
+    if (event !== undefined) {
+      pooledRawRecords[eventId] = rawRecord(event);
+    }
+  }
+  return {
+    version: 2,
+    sessionId,
+    revision,
+    records: records.map(({ rawRecords: _rawRecords, ...record }) => record),
+    rawRecords: pooledRawRecords,
+  } as const;
+}
+
 function chunks<T>(items: readonly T[], size: number): T[][] {
   const result: T[][] = [];
   for (let index = 0; index < items.length; index += size) {
@@ -298,6 +340,7 @@ export async function writeStaticPayloads(
       revision: conversation.summary.revision,
       chunkSize,
       items: conversation.turns.map(navigatorItem),
+      inspectorChunks: inspectorChunkIndex(conversation.turns, chunkSize),
     });
     dispositions.push(...navigatorDispositions);
     const turnChunks = chunks(conversation.turns, chunkSize);
@@ -321,11 +364,12 @@ export async function writeStaticPayloads(
       const inspectorDispositions = await writePayload(
         options,
         ["sessions", id, `inspector-${index}.json`],
-        {
-          sessionId: id,
-          revision: conversation.summary.revision,
-          records: turns.flatMap((turn) => inspectorsForTurn(turn, rawEvents)),
-        },
+        compactInspectorChunk(
+          id,
+          conversation.summary.revision,
+          turns.flatMap((turn) => inspectorsForTurn(turn, rawEvents)),
+          rawEvents,
+        ),
       );
       dispositions.push(...inspectorDispositions);
       turnChunkCount += 1;

@@ -7,7 +7,6 @@ import {
   type TurnNavigatorItem,
 } from "#shared/types/conversation.ts";
 import {
-  inspectorRecordSchema,
   repositoryCapabilitiesForMode,
   resolvedAssetSchema,
   turnChunkSchema,
@@ -23,6 +22,10 @@ import {
   type TurnChunkQuery,
   type ViewerInvalidation,
 } from "#shared/types/repository.ts";
+import {
+  hydrateStaticInspectorRecord,
+  staticInspectorChunkSchema,
+} from "#shared/types/staticPayloads.ts";
 
 import type { RepositoryRequester } from "./live.ts";
 
@@ -59,9 +62,7 @@ const navigatorPayloadSchema = z.object({
   revision: z.string().min(1),
   chunkSize: z.int().positive(),
   items: z.array(turnNavigatorItemSchema),
-});
-const inspectorChunkSchema = z.object({
-  records: z.array(inspectorRecordSchema),
+  inspectorChunks: z.record(z.string(), z.int().nonnegative()).optional().default({}),
 });
 const assetManifestSchema = z.object({
   assets: z.array(resolvedAssetSchema),
@@ -72,6 +73,10 @@ const faviconManifestSchema = z.strictObject({
     z.strictObject({
       origin: z.url(),
       url: z.string().startsWith("/favicons/"),
+      sourceUrl: z.url().nullable(),
+      mimeType: z.string().nullable(),
+      byteSize: z.int().nonnegative().nullable(),
+      sha256: z.string().regex(/^[a-f\d]{64}$/u),
     }),
   ),
 });
@@ -147,7 +152,7 @@ function pagefindFilters(query: SearchQuery): Record<string, string> {
   return {
     scope: query.scope,
     ...(query.model === undefined ? {} : { model: query.model }),
-    ...(query.cwd === undefined ? {} : { cwd: query.cwd }),
+    ...(query.cwd === undefined ? {} : { cwd: encodeURIComponent(query.cwd) }),
     ...(query.tool === undefined ? {} : { tool: query.tool }),
     ...(query.hasMedia === undefined ? {} : { media: String(query.hasMedia) }),
   };
@@ -168,13 +173,17 @@ async function pagefindHit(
   const sessionId = meta?.["sessionId"];
   const turnId = meta?.["turnId"];
   const title = meta?.["title"];
+  const messageId = meta?.["messageId"];
   if (typeof sessionId !== "string" || typeof turnId !== "string" || typeof title !== "string") {
+    return null;
+  }
+  if (messageId !== undefined && (typeof messageId !== "string" || messageId === "")) {
     return null;
   }
   return {
     sessionId,
     turnId,
-    messageId: null,
+    messageId: messageId ?? null,
     scope,
     title,
     excerpt: typeof data.excerpt === "string" ? data.excerpt : "",
@@ -216,17 +225,18 @@ export class StaticConversationRepository implements ConversationRepository {
     options.signal?.throwIfAborted();
     const pagefind = await this.pagefind();
     const response = await pagefind.search(query.query, { filters: pagefindFilters(query) });
-    const hits = (
-      await Promise.all(response.results.map((result) => pagefindHit(result, query.scope)))
-    ).filter((hit): hit is SearchHit => hit !== null);
-    options.signal?.throwIfAborted();
     const offset = cursorOffset(query.cursor);
     const limit = query.limit ?? 50;
-    const items = hits.slice(offset, offset + limit);
+    const page = response.results.slice(offset, offset + limit);
+    const hits = (await Promise.all(page.map((result) => pagefindHit(result, query.scope)))).filter(
+      (hit): hit is SearchHit => hit !== null,
+    );
+    options.signal?.throwIfAborted();
     return {
-      items,
-      nextCursor: offset + items.length < hits.length ? String(offset + items.length) : null,
-      total: hits.length,
+      items: hits,
+      nextCursor:
+        offset + page.length < response.results.length ? String(offset + page.length) : null,
+      total: response.results.length,
     };
   }
 
@@ -259,20 +269,23 @@ export class StaticConversationRepository implements ConversationRepository {
 
   async getInspector(id: string, target: InspectorTarget): Promise<InspectorRecord> {
     const navigator = await this.navigator(id);
+    const indexedChunk = navigator.inspectorChunks[`${target.type}:${target.id}`];
     const likelyTurn =
       target.type === "turn"
         ? navigator.items.find((item) => item.turnId === target.id)
         : undefined;
     const chunkIndexes =
-      likelyTurn === undefined
-        ? Array.from(
-            { length: Math.ceil(navigator.items.length / navigator.chunkSize) },
-            (_, index) => index,
-          )
-        : [Math.floor(likelyTurn.index / navigator.chunkSize)];
+      indexedChunk !== undefined
+        ? [indexedChunk]
+        : likelyTurn === undefined
+          ? Array.from(
+              { length: Math.ceil(navigator.items.length / navigator.chunkSize) },
+              (_, index) => index,
+            )
+          : [Math.floor(likelyTurn.index / navigator.chunkSize)];
     // oxlint-disable no-await-in-loop -- Static inspector chunks are searched in order and stop as soon as the requested record is found.
     for (const chunkIndex of chunkIndexes) {
-      const chunk = inspectorChunkSchema.parse(
+      const chunk = staticInspectorChunkSchema.parse(
         await this.requester(
           `/payloads/sessions/${encodeURIComponent(id)}/inspector-${chunkIndex}.json`,
         ),
@@ -281,7 +294,7 @@ export class StaticConversationRepository implements ConversationRepository {
         (candidate) => candidate.target.type === target.type && candidate.target.id === target.id,
       );
       if (found !== undefined) {
-        return found;
+        return hydrateStaticInspectorRecord(chunk, found);
       }
     }
     // oxlint-enable no-await-in-loop

@@ -31,6 +31,49 @@ test("hydrates and performs client-side navigation", async ({ page, goto }) => {
   await expect(page).toHaveURL(/\/$/);
 });
 
+test("keeps active and archived search scoped in the URL and opens exact turns", async ({
+  page,
+  goto,
+}) => {
+  await goto("/", { waitUntil: "hydration" });
+  const search = page.getByRole("searchbox", { name: "Search sessions" });
+  await expect(search).toBeVisible();
+  await search.fill("Handle cancellation");
+  await expect(page).toHaveURL(/\?q=Handle\+cancellation$/u);
+  await expect(page.getByText("1 result for “Handle cancellation”")).toBeAttached();
+  const activeResult = page
+    .locator('[aria-label="Search results"]')
+    .getByRole("link", { name: /Build the parser/u });
+  await expect(activeResult).toHaveAttribute(
+    "href",
+    "/session/11111111-1111-4111-8111-111111111111?turn=turn-2#turn-turn-2",
+  );
+  await activeResult.click();
+  await expect(page).toHaveURL(/\/session\/11111111-1111-4111-8111-111111111111\?turn=turn-2/u);
+  await expect(page.getByText("Handle cancellation", { exact: true })).toBeVisible();
+
+  await goto("/?scope=archived&q=Legacy+prompt", { waitUntil: "hydration" });
+  await expect(page.getByRole("tab", { name: /Archived/u })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.getByText("1 result for “Legacy prompt”")).toBeAttached();
+  const archivedResult = page
+    .locator('[aria-label="Search results"]')
+    .getByRole("link", { name: /Legacy prompt/u });
+  await expect(archivedResult).toHaveAttribute(
+    "href",
+    "/session/33333333-3333-4333-8333-333333333333?turn=legacy-turn#turn-legacy-turn",
+  );
+  await archivedResult.click();
+  await expect(page).toHaveURL(
+    /\/session\/33333333-3333-4333-8333-333333333333\?turn=legacy-turn/u,
+  );
+  await expect(
+    page.getByLabel("Conversation timeline").getByText("Legacy prompt", { exact: true }),
+  ).toBeVisible();
+});
+
 test("opens an exact turn with the virtualized timeline, minimap, and inspector", async ({
   page,
   goto,
@@ -200,4 +243,7 @@ test("coalesces bursty live invalidations without console errors", async ({ page
 
   await expect.poll(() => summaryRequests.length).toBe(2);
   expect(consoleErrors).toEqual([]);
+  await page.getByRole("link", { name: "Open Settings" }).click();
+  await expect(page).toHaveURL(/\/settings$/u);
+  await expect.poll(() => page.evaluate(() => window.viewerEventListenerCount())).toBe(0);
 });

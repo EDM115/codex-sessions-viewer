@@ -106,6 +106,46 @@ describe("library presentation components", () => {
     wrapper.unmount();
   });
 
+  it("groups dated sessions, clamps focus movement, ignores unrelated keys, and virtualizes large archives", async () => {
+    const dated = [
+      session("session-1", "First"),
+      session("session-2", "Second"),
+      session("session-3", "Third"),
+    ];
+    dated[0].sectionName = null;
+    dated[1].sectionName = null;
+    dated[2].sectionName = null;
+    dated[2].updatedAt = "2026-08-14T09:00:00.000Z";
+    const wrapper = mount(LibrarySessionList, {
+      attachTo: document.body,
+      props: { items: dated },
+    });
+    const links = wrapper.findAll("a");
+    expect(wrapper.findAll(".library-session-group").map((group) => group.text())).toEqual([
+      "2026-08-15",
+      "2026-08-14",
+    ]);
+    await links[0].trigger("keydown", { key: "Escape" });
+    expect(document.activeElement).not.toBe(links[1].element);
+    await links[0].trigger("keydown", { key: "ArrowUp" });
+    expect(document.activeElement).toBe(links[0].element);
+    await links[2].trigger("keydown", { key: "ArrowDown" });
+    expect(document.activeElement).toBe(links[2].element);
+    wrapper.unmount();
+
+    const virtual = mount(LibrarySessionList, {
+      attachTo: document.body,
+      props: {
+        items: Array.from({ length: 41 }, (_, index) =>
+          session(`session-${index}`, `Session ${index}`),
+        ),
+      },
+    });
+    expect(virtual.find(".library-session-list__virtual").exists()).toBe(true);
+    expect(virtual.findAll(".library-session-list__virtual-row").length).toBeGreaterThan(0);
+    virtual.unmount();
+  });
+
   it("offers retry only when an empty state is recoverable", async () => {
     const wrapper = mount(LibraryEmptyState, {
       props: {

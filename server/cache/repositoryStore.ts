@@ -1,7 +1,9 @@
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
 
 import {
   conversationSummarySchema,
+  conversationTurnSchema,
+  jsonValueSchema,
   type ConversationActivity,
   type ConversationMessage,
   type ConversationTurn,
@@ -24,15 +26,36 @@ import {
   type TurnChunkQuery,
 } from "../../shared/types/repository.ts";
 import type { NormalizedRawEvent, NormalizedSession } from "../normalization/normalizeSession.ts";
-import { getCachedSession } from "./conversationStore.ts";
 
 const DEFAULT_PAGE_SIZE = 20;
+const RAW_EVENT_QUERY_SIZE = 400;
 
 function parsedJson(value: unknown): unknown {
   if (typeof value !== "string") {
     throw new Error("The viewer cache contains non-text JSON.");
   }
   return JSON.parse(value) as unknown;
+}
+
+function requiredText(value: SQLOutputValue | undefined, column: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`The viewer cache column ${column} is not text.`);
+  }
+  return value;
+}
+
+function nullableText(value: SQLOutputValue | undefined, column: string): string | null {
+  if (value === null) {
+    return null;
+  }
+  return requiredText(value, column);
+}
+
+function requiredInteger(value: SQLOutputValue | undefined, column: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`The viewer cache column ${column} is not a non-negative integer.`);
+  }
+  return value;
 }
 
 function cursorIndex(cursor: string | undefined): number {
@@ -125,10 +148,7 @@ function preview(value: string, maximum: number): string {
   return compact.length <= maximum ? compact : `${compact.slice(0, maximum - 1).trimEnd()}…`;
 }
 
-function proseLengthBucket(turn: ConversationTurn): 1 | 2 | 3 | 4 {
-  const length =
-    (turn.userMessage?.sourceMarkdown.length ?? 0) +
-    turn.assistantMessages.reduce((total, message) => total + message.sourceMarkdown.length, 0);
+function proseLengthBucketFromLength(length: number): 1 | 2 | 3 | 4 {
   if (length <= 280) {
     return 1;
   }
@@ -139,6 +159,13 @@ function proseLengthBucket(turn: ConversationTurn): 1 | 2 | 3 | 4 {
     return 3;
   }
   return 4;
+}
+
+function proseLengthBucket(turn: ConversationTurn): 1 | 2 | 3 | 4 {
+  return proseLengthBucketFromLength(
+    (turn.userMessage?.sourceMarkdown.length ?? 0) +
+      turn.assistantMessages.reduce((total, message) => total + message.sourceMarkdown.length, 0),
+  );
 }
 
 export function createTurnNavigatorItem(turn: ConversationTurn): TurnNavigatorItem {
@@ -157,10 +184,81 @@ export function getCachedTurnNavigator(
   database: DatabaseSync,
   sessionId: string,
 ): TurnNavigatorItem[] | null {
-  const session = getCachedSession(database, sessionId);
-  return session === null
-    ? null
-    : turnNavigatorResponseSchema.parse(session.turns.map(createTurnNavigatorItem));
+  if (database.prepare("SELECT 1 FROM sessions WHERE id = ?").get(sessionId) === undefined) {
+    return null;
+  }
+  const rows = database
+    .prepare(`
+      SELECT
+        turns.id AS turn_id,
+        turns.turn_index,
+        turns.started_at,
+        messages.id AS message_id,
+        messages.role,
+        messages.created_at,
+        messages.source_markdown
+      FROM turns
+      LEFT JOIN messages
+        ON messages.session_id = turns.session_id
+        AND messages.turn_id = turns.id
+      WHERE turns.session_id = ?
+      ORDER BY turns.turn_index, messages.rowid
+    `)
+    .all(sessionId);
+  const drafts = new Map<
+    string,
+    {
+      turnId: string;
+      index: number;
+      startedAt: string | null;
+      userMessageId: string | null;
+      userCreatedAt: string | null;
+      prompt: string;
+      assistant: string;
+      proseLength: number;
+    }
+  >();
+  for (const row of rows) {
+    const turnId = requiredText(row["turn_id"], "turn_id");
+    let draft = drafts.get(turnId);
+    if (draft === undefined) {
+      draft = {
+        turnId,
+        index: requiredInteger(row["turn_index"], "turn_index"),
+        startedAt: nullableText(row["started_at"], "started_at"),
+        userMessageId: null,
+        userCreatedAt: null,
+        prompt: "",
+        assistant: "",
+        proseLength: 0,
+      };
+      drafts.set(turnId, draft);
+    }
+    if (row["message_id"] === null) {
+      continue;
+    }
+    const role = requiredText(row["role"], "role");
+    const markdown = requiredText(row["source_markdown"], "source_markdown");
+    draft.proseLength += markdown.length;
+    if (role === "user") {
+      draft.userMessageId ??= requiredText(row["message_id"], "message_id");
+      draft.userCreatedAt ??= requiredText(row["created_at"], "created_at");
+      draft.prompt ||= markdown;
+    } else if (draft.assistant === "") {
+      draft.assistant = markdown;
+    }
+  }
+  return turnNavigatorResponseSchema.parse(
+    [...drafts.values()].map((draft) => ({
+      turnId: draft.turnId,
+      index: draft.index,
+      userMessageId: draft.userMessageId,
+      promptPreview: preview(draft.prompt, 160),
+      assistantPreview: preview(draft.assistant, 320),
+      proseLengthBucket: proseLengthBucketFromLength(draft.proseLength),
+      createdAt: draft.userCreatedAt ?? draft.startedAt,
+    })),
+  );
 }
 
 export function getCachedTurnChunk(
@@ -169,19 +267,24 @@ export function getCachedTurnChunk(
   input: TurnChunkQuery,
 ): TurnChunk | null {
   const query = turnChunkQuerySchema.parse(input);
-  const session = getCachedSession(database, sessionId);
-  if (session === null) {
+  const session = database
+    .prepare("SELECT turn_count, revision FROM sessions WHERE id = ?")
+    .get(sessionId);
+  if (session === undefined) {
     return null;
   }
   const limit = query.limit ?? DEFAULT_PAGE_SIZE;
-  const chunkCount = Math.ceil(session.turns.length / limit);
+  const turnCount = requiredInteger(session["turn_count"], "turn_count");
+  const chunkCount = Math.ceil(turnCount / limit);
   let chunk = cursorIndex(query.cursor);
   if (query.targetTurnId !== undefined) {
-    const target = session.turns.findIndex(({ id }) => id === query.targetTurnId);
-    if (target < 0) {
+    const target = database
+      .prepare("SELECT turn_index FROM turns WHERE session_id = ? AND id = ?")
+      .get(sessionId, query.targetTurnId);
+    if (target === undefined) {
       return null;
     }
-    chunk = Math.floor(target / limit);
+    chunk = Math.floor(requiredInteger(target["turn_index"], "turn_index") / limit);
   }
   if (chunk < 0 || (chunkCount > 0 && chunk >= chunkCount)) {
     return null;
@@ -189,10 +292,19 @@ export function getCachedTurnChunk(
   const start = chunk * limit;
   return turnChunkSchema.parse({
     sessionId,
-    turns: session.turns.slice(start, start + limit),
+    turns: database
+      .prepare(`
+        SELECT payload_json
+        FROM turns
+        WHERE session_id = ?
+        ORDER BY turn_index
+        LIMIT ? OFFSET ?
+      `)
+      .all(sessionId, limit, start)
+      .map((row) => conversationTurnSchema.parse(parsedJson(row["payload_json"]))),
     previousCursor: chunk > 0 ? String(chunk - 1) : null,
     nextCursor: chunk + 1 < chunkCount ? String(chunk + 1) : null,
-    revision: session.summary.revision,
+    revision: requiredText(session["revision"], "revision"),
   });
 }
 
@@ -251,6 +363,36 @@ function turnEventIds(turn: ConversationTurn): string[] {
   ];
 }
 
+function rawEventsById(
+  database: DatabaseSync,
+  sessionId: string,
+  eventIds: readonly string[],
+): ReadonlyMap<string, NormalizedRawEvent> {
+  const uniqueIds = [...new Set(eventIds)];
+  const events = new Map<string, NormalizedRawEvent>();
+  for (let offset = 0; offset < uniqueIds.length; offset += RAW_EVENT_QUERY_SIZE) {
+    const ids = uniqueIds.slice(offset, offset + RAW_EVENT_QUERY_SIZE);
+    const placeholders = ids.map(() => "?").join(", ");
+    for (const row of database
+      .prepare(`
+        SELECT id, turn_id, type, timestamp, payload_json
+        FROM raw_events
+        WHERE session_id = ? AND id IN (${placeholders})
+      `)
+      .all(sessionId, ...ids)) {
+      const id = requiredText(row["id"], "id");
+      events.set(id, {
+        id,
+        turnId: nullableText(row["turn_id"], "turn_id"),
+        type: requiredText(row["type"], "type"),
+        timestamp: nullableText(row["timestamp"], "timestamp"),
+        payload: jsonValueSchema.parse(parsedJson(row["payload_json"])),
+      });
+    }
+  }
+  return events;
+}
+
 function messageInspector(
   turn: ConversationTurn,
   message: ConversationMessage,
@@ -297,41 +439,53 @@ export function getCachedInspector(
   input: InspectorTarget,
 ): InspectorRecord | null {
   const target = inspectorTargetSchema.parse(input);
-  const session = getCachedSession(database, sessionId);
-  if (session === null) {
+  const targetRow =
+    target.type === "turn"
+      ? database
+          .prepare("SELECT id AS turn_id FROM turns WHERE session_id = ? AND id = ?")
+          .get(sessionId, target.id)
+      : database
+          .prepare(
+            `SELECT turn_id FROM ${target.type === "message" ? "messages" : "activities"} WHERE session_id = ? AND id = ?`,
+          )
+          .get(sessionId, target.id);
+  if (targetRow === undefined) {
     return null;
   }
-  const rawEvents = new Map(session.rawEvents.map((event) => [event.id, event]));
-  for (const turn of session.turns) {
-    if (target.type === "turn" && turn.id === target.id) {
-      return targetRecord(
-        turn,
-        target,
-        {
-          phase: null,
-          createdAt: turn.startedAt,
-          completedAt: turn.completedAt,
-          durationMs: turn.durationMs,
-          eventIds: turnEventIds(turn),
-          activityIds: turn.activities.map(({ id }) => id),
-        },
-        rawEvents,
-      );
-    }
-    if (target.type === "message") {
-      const message = [turn.userMessage, ...turn.assistantMessages].find(
-        (candidate) => candidate?.id === target.id,
-      );
-      if (message !== undefined && message !== null) {
-        return messageInspector(turn, message, rawEvents);
-      }
-    }
-    if (target.type === "activity") {
-      const activity = turn.activities.find(({ id }) => id === target.id);
-      if (activity !== undefined) {
-        return activityInspector(turn, activity, rawEvents);
-      }
-    }
+  const turnId = requiredText(targetRow["turn_id"], "turn_id");
+  const turnRow = database
+    .prepare("SELECT payload_json FROM turns WHERE session_id = ? AND id = ?")
+    .get(sessionId, turnId);
+  if (turnRow === undefined) {
+    return null;
   }
-  return null;
+  const turn = conversationTurnSchema.parse(parsedJson(turnRow["payload_json"]));
+  if (target.type === "turn") {
+    const eventIds = turnEventIds(turn);
+    return targetRecord(
+      turn,
+      target,
+      {
+        phase: null,
+        createdAt: turn.startedAt,
+        completedAt: turn.completedAt,
+        durationMs: turn.durationMs,
+        eventIds,
+        activityIds: turn.activities.map(({ id }) => id),
+      },
+      rawEventsById(database, sessionId, eventIds),
+    );
+  }
+  if (target.type === "message") {
+    const message = [turn.userMessage, ...turn.assistantMessages].find(
+      (candidate) => candidate?.id === target.id,
+    );
+    return message === undefined || message === null
+      ? null
+      : messageInspector(turn, message, rawEventsById(database, sessionId, message.rawEventIds));
+  }
+  const activity = turn.activities.find(({ id }) => id === target.id);
+  return activity === undefined
+    ? null
+    : activityInspector(turn, activity, rawEventsById(database, sessionId, activity.rawEventIds));
 }

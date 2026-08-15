@@ -49,6 +49,7 @@ afterEach(async () => {
 describe("favicon URL security", () => {
   it("canonicalizes HTTP origins and rejects credentials, non-HTTP schemes, and IP literals", () => {
     expect(canonicalFaviconOrigin("https://Example.COM:443/path?q=1")).toBe("https://example.com");
+    expect(canonicalFaviconOrigin("http://Example.COM:80/path")).toBe("http://example.com");
     expect(() => canonicalFaviconOrigin("https://user:secret@example.com")).toThrow("credentials");
     expect(() => canonicalFaviconOrigin("file:///C:/secret")).toThrow("HTTP");
     expect(() => canonicalFaviconOrigin("https://127.0.0.1/icon")).toThrow("IP literal");
@@ -56,6 +57,11 @@ describe("favicon URL security", () => {
   });
 
   it("rejects a hostname when any resolved address is private or link-local", async () => {
+    await expect(
+      assertSafeRemoteUrl(new URL("https://example.test/icon"), {
+        lookup: async () => [],
+      }),
+    ).rejects.toThrow("did not resolve");
     await expect(
       assertSafeRemoteUrl(new URL("https://example.test/icon"), {
         lookup: async () => [
@@ -74,6 +80,14 @@ describe("favicon URL security", () => {
         lookup: async () => [{ address: "93.184.216.34", family: 4 }],
       }),
     ).resolves.toMatchObject({ address: "93.184.216.34", family: 4 });
+    await expect(
+      assertSafeRemoteUrl(new URL("https://example.test/icon"), {
+        lookup: async () => [{ address: "2606:4700:4700::1111", family: 6 }],
+      }),
+    ).resolves.toMatchObject({ address: "2606:4700:4700::1111", family: 6 });
+    await expect(assertSafeRemoteUrl(new URL("http://localhost/icon"))).rejects.toThrow(
+      "non-public",
+    );
   });
 });
 
@@ -247,6 +261,119 @@ describe("favicon resolution", () => {
         failureTtlMs: 60_000,
       });
       expect(client.mock.calls.length).toBeGreaterThan(afterFirst);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("sanitizes an SVG provider response and accepts it when the placeholder probe is invalid", async () => {
+    const root = await temporaryRoot();
+    const providerSvg =
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><script>alert(1)</script><rect width="16" height="16" fill="red"/></svg>';
+    const client: FaviconHttpClient = async (url) =>
+      url.hostname === "www.google.com" && !url.href.includes(".invalid")
+        ? response(url, { type: "image/svg+xml", body: providerSvg })
+        : response(url, { status: 404, body: "missing" });
+    const database = openCacheDatabase(":memory:");
+
+    try {
+      const result = await resolveFavicon(database, "https://svg.example", {
+        mode: "export",
+        faviconRoot: root,
+        client,
+      });
+
+      expect(result).toMatchObject({
+        status: "available",
+        source: "google",
+        mimeType: "image/svg+xml",
+      });
+      const cachedSvg = await readFile(result.cachePath!, "utf8");
+      expect(cachedSvg).toContain("<rect");
+      expect(cachedSvg).not.toContain("<script");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("deduplicates declared icons, ignores unsafe declarations, and accepts precomposed icons", async () => {
+    const root = await temporaryRoot();
+    const calls: string[] = [];
+    const client: FaviconHttpClient = async (url) => {
+      calls.push(url.href);
+      if (url.hostname !== "icons.example") {
+        return response(url, { status: 404, body: "missing" });
+      }
+      if (url.href === "https://icons.example/") {
+        return response(url, {
+          type: "text/html",
+          body: '<link rel="ICON" href="/duplicate.png"><link rel="icon" href="/duplicate.png"><link rel="icon" href="file:///secret"><link rel="apple-touch-icon-precomposed" href="/brand.png">',
+        });
+      }
+      if (url.href === "https://icons.example/brand.png") {
+        return response(url, { body: pixel });
+      }
+      return response(url, { type: "text/plain", body: "invalid" });
+    };
+    const database = openCacheDatabase(":memory:");
+
+    try {
+      const result = await resolveFavicon(database, "https://icons.example/docs", {
+        mode: "export",
+        faviconRoot: root,
+        client,
+      });
+
+      expect(result).toMatchObject({
+        status: "available",
+        source: "origin",
+        sourceUrl: "https://icons.example/brand.png",
+      });
+      expect(calls.filter((url) => url === "https://icons.example/duplicate.png")).toHaveLength(1);
+      expect(calls).not.toContain("file:///secret");
+    } finally {
+      database.close();
+    }
+  });
+
+  it("contains complete client failures and refreshes stale cache rows with no timestamp or file", async () => {
+    const root = await temporaryRoot();
+    const database = openCacheDatabase(":memory:");
+    try {
+      const failed = await resolveFavicon(database, "https://throws.example", {
+        mode: "export",
+        faviconRoot: root,
+        client: async () => {
+          throw new Error("network unavailable");
+        },
+      });
+      expect(failed).toMatchObject({ status: "fallback", pending: false });
+
+      database
+        .prepare("UPDATE favicons SET fetched_at = NULL, status = 'missing' WHERE origin = ?")
+        .run("https://throws.example");
+      const refreshed = vi.fn<FaviconHttpClient>(async (url) =>
+        url.href === "https://throws.example/favicon.ico"
+          ? response(url, { body: pixel })
+          : response(url, { status: 404, body: "missing" }),
+      );
+      await expect(
+        resolveFavicon(database, "https://throws.example/again", {
+          mode: "export",
+          faviconRoot: root,
+          client: refreshed,
+        }),
+      ).resolves.toMatchObject({ status: "available", source: "origin" });
+      expect(refreshed).toHaveBeenCalled();
+
+      await rm(root, { recursive: true, force: true });
+      await expect(
+        resolveFavicon(database, "https://throws.example/file-gone", {
+          mode: "export",
+          faviconRoot: root,
+          client: refreshed,
+        }),
+      ).resolves.toMatchObject({ status: "available" });
     } finally {
       database.close();
     }

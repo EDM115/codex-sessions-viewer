@@ -42,6 +42,7 @@
     "./app/**/*",
     "./dist",
     "./node_modules/**/*",
+    "./tests/integration/export/pagefind.test.ts",
     "./tests/unit/content-rendering/**/*",
     "./tests/unit/ui/**/*"
   ]

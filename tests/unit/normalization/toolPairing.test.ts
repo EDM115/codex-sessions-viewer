@@ -12,8 +12,9 @@ function event(
   lineNumber: number,
   timestamp: string,
   payload: Record<string, unknown>,
+  type: "event_msg" | "response_item" = "response_item",
 ): CodexEvent {
-  const value = jsonValueSchema.parse({ timestamp, type: "response_item", payload });
+  const value = jsonValueSchema.parse({ timestamp, type, payload });
   const parsed = parseCodexEvent({
     lineNumber,
     byteStart: lineNumber * 100,
@@ -192,5 +193,144 @@ describe("tool call pairing", () => {
       output: [{ name: "calendar.search" }],
       durationMs: 100,
     });
+  });
+
+  it.each([
+    ["completed", "succeeded"],
+    ["complete", "succeeded"],
+    ["ok", "succeeded"],
+    ["success", "succeeded"],
+    ["succeeded", "succeeded"],
+    ["cancelled", "cancelled"],
+    ["canceled", "cancelled"],
+    ["aborted", "cancelled"],
+    ["failed", "failed"],
+    ["error", "failed"],
+    ["in_progress", "running"],
+    ["running", "running"],
+    ["pending", "pending"],
+    ["future_status", "unknown"],
+  ] as const)("maps the explicit %s tool status", (status, expected) => {
+    const result = pairToolCalls(
+      scoped(
+        event(1, "2026-01-01T10:00:00.000Z", {
+          type: "custom_tool_call",
+          call_id: `status-${status}`,
+          name: "exec",
+          input: { command: "test" },
+          status,
+        }),
+      ),
+    );
+
+    expect(result.activities[0]?.status).toBe(expected);
+  });
+
+  it.each([
+    [{ Err: "plain failure" }, "failed", "plain failure"],
+    [{ Err: { code: 500 } }, "failed", null],
+    [{ Ok: { value: 1 } }, "succeeded", null],
+    [{ Ok: { isError: true, error: "reported failure" } }, "failed", "reported failure"],
+    [{ Ok: { isError: true } }, "failed", "Tool returned an error"],
+    [{ isError: true, error: "bare error" }, "failed", "bare error"],
+    [{ isError: true, message: "bare message" }, "failed", "bare message"],
+    [{ isError: true }, "failed", "Tool returned an error"],
+    [{ value: "ok" }, "succeeded", null],
+    ["primitive", "unknown", null],
+  ] as const)("normalizes MCP result variant %#", (resultValue, expectedStatus, expectedError) => {
+    const result = pairToolCalls(
+      scoped(
+        event(
+          10,
+          "2026-01-01T10:00:02.000Z",
+          {
+            type: "mcp_tool_call_end",
+            call_id: `mcp-result-${JSON.stringify(resultValue)}`,
+            duration: { secs: 0, nanos: 500_000_000 },
+            invocation: { server: "test", tool: "run", arguments: [1, 2] },
+            result: resultValue,
+          },
+          "event_msg",
+        ),
+      ),
+    );
+
+    expect(result.activities[0]).toMatchObject({
+      status: expectedStatus,
+      error: expectedError,
+      durationMs: 500,
+      input: [1, 2],
+    });
+  });
+
+  it("handles output-first, anonymous, invalid-duration, and reversed-time records deterministically", () => {
+    const result = pairToolCalls(
+      scoped(
+        event(3, "2026-01-01T10:00:01.000Z", {
+          type: "tool_search_output",
+          call_id: "output-first",
+          tools: null,
+        }),
+        event(2, "2026-01-01T10:00:02.000Z", {
+          type: "function_call_output",
+          call_id: "reverse-time",
+          output: "not-json",
+        }),
+        event(1, "2026-01-01T10:00:03.000Z", {
+          type: "function_call",
+          call_id: "reverse-time",
+          name: "late",
+          arguments: ["already-decoded"],
+        }),
+        event(4, "2026-01-01T10:00:04.000Z", {
+          type: "custom_tool_call",
+          name: "anonymous",
+        }),
+        event(
+          5,
+          "invalid-date",
+          {
+            type: "mcp_tool_call_end",
+            duration: { secs: -1, nanos: 0 },
+            invocation: null,
+            result: null,
+          },
+          "event_msg",
+        ),
+        event(6, "2026-01-01T10:00:05.000Z", {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "ignored" }],
+        }),
+      ),
+    );
+
+    expect(result.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          callId: "output-first",
+          namespace: "codex",
+          name: "tool_search",
+          output: null,
+          status: "succeeded",
+        }),
+        expect.objectContaining({
+          callId: "reverse-time",
+          name: "late",
+          input: ["already-decoded"],
+          output: "not-json",
+          durationMs: null,
+        }),
+        expect.objectContaining({ callId: null, name: "anonymous", input: null, output: null }),
+        expect.objectContaining({
+          callId: null,
+          namespace: null,
+          name: "unknown_tool",
+          durationMs: null,
+          status: "unknown",
+        }),
+      ]),
+    );
+    expect(result.consumedEventIds).toHaveLength(5);
   });
 });

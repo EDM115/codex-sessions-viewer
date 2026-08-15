@@ -10,6 +10,7 @@ import {
 } from "../../../server/export/serializeMarkdown.ts";
 import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
 import type {
+  ConversationActivity,
   ConversationMessage,
   ConversationTurn,
   MediaActivity,
@@ -197,5 +198,184 @@ describe("Markdown copy serializers", () => {
     expect(markdown).toContain("### User prompt");
     expect(markdown).toContain("### Agent work");
     expect(markdown).toContain("Inspect `src/index.ts`.");
+  });
+
+  it("serializes every visible activity variant while omitting empty and protocol-only work", () => {
+    const value = turn();
+    const base: { turnId: string; rawEventIds: string[] } = {
+      turnId: value.id,
+      rawEventIds: [],
+    };
+    value.activities = [
+      {
+        ...base,
+        id: "reasoning-empty",
+        createdAt: null,
+        kind: "reasoning",
+        summary: "",
+        body: null,
+        encrypted: false,
+      },
+      {
+        ...base,
+        id: "search",
+        createdAt: "2026-08-13T10:00:01.000Z",
+        kind: "web_search",
+        query: "viewer performance",
+        status: "running",
+        resultCount: null,
+      },
+      {
+        ...base,
+        id: "patch-empty",
+        createdAt: "2026-08-13T10:00:01.000Z",
+        kind: "patch",
+        status: "pending",
+        patch: "",
+        affectedPaths: [],
+      },
+      {
+        ...base,
+        id: "patch",
+        createdAt: "2026-08-13T10:00:02.000Z",
+        kind: "patch",
+        status: "succeeded",
+        patch: "diff --git a/`file` b/`file`",
+        affectedPaths: ["src/`file`.ts"],
+      },
+      {
+        ...base,
+        id: "plan",
+        createdAt: "2026-08-13T10:00:03.000Z",
+        kind: "plan",
+        status: "running",
+        title: null,
+        items: [
+          { step: "Done", status: "completed" },
+          { step: "Next", status: "in_progress" },
+        ],
+      },
+      {
+        ...base,
+        id: "subagent",
+        createdAt: "2026-08-13T10:00:04.000Z",
+        kind: "subagent",
+        status: "succeeded",
+        agentId: null,
+        parentThreadId: null,
+        childThreadId: null,
+        description: "Reviewed the cache.",
+      },
+      { ...base, id: "compaction-empty", createdAt: null, kind: "compaction", summary: null },
+      {
+        ...base,
+        id: "compaction",
+        createdAt: "2026-08-13T10:00:05.000Z",
+        kind: "compaction",
+        summary: "Earlier context.",
+      },
+      {
+        ...base,
+        id: "media-empty",
+        createdAt: null,
+        kind: "media",
+        assetId: "asset",
+        mediaType: "file",
+        sourcePath: null,
+      },
+      {
+        ...base,
+        id: "media",
+        createdAt: "2026-08-13T10:00:06.000Z",
+        kind: "media",
+        assetId: "asset",
+        mediaType: "image",
+        sourcePath: "file:///C:/images/a%20b.png",
+      },
+      {
+        ...base,
+        id: "unknown",
+        createdAt: null,
+        kind: "unknown",
+        eventType: "future",
+        payload: null,
+      },
+    ] satisfies ConversationActivity[];
+    value.assistantMessages = [
+      {
+        ...message("assistant", "Same timestamp response."),
+        createdAt: "2026-08-13T10:00:01.000Z",
+      },
+      {
+        ...message("assistant", "Untimed response."),
+        id: "assistant-untimed",
+        createdAt: null as unknown as string,
+      },
+    ];
+
+    const markdown = serializeAgentWork(value);
+    expect(markdown).toContain("Web search — running");
+    expect(markdown).toContain("#### Patch — pending");
+    expect(markdown).toContain("src/\\`file\\`.ts");
+    expect(markdown).toContain("```diff");
+    expect(markdown).toContain("- [x] Done");
+    expect(markdown).toContain("- [ ] Next");
+    expect(markdown).toContain("Reviewed the cache.");
+    expect(markdown).toContain("Earlier context.");
+    expect(markdown).toContain("file:///C:/images/a%20b.png");
+    expect(markdown).toContain("Untimed response.");
+    expect(markdown).not.toContain("reasoning-empty");
+    expect(markdown).not.toContain("future");
+  });
+
+  it("formats short and fractional tool durations, unqualified names, errors, and missing prompts", () => {
+    const short = serializeToolActivity({
+      ...tool,
+      namespace: null,
+      durationMs: 250,
+      error: "Denied <unsafe>",
+      input: null,
+      output: "line without newline",
+    });
+    const fractional = serializeToolActivity({ ...tool, durationMs: 1_500 });
+    const untimed = serializeToolActivity({ ...tool, durationMs: null });
+    expect(short).toContain("shell_command — succeeded — 250ms");
+    expect(short).toContain("#### Error\n\nDenied <unsafe>");
+    expect(fractional).toContain("1.5s");
+    expect(untimed).toContain("functions.shell_command — succeeded</summary>");
+
+    const conversation: NormalizedSession = {
+      summary: {
+        id: "session",
+        title: "No prompt",
+        scope: "active",
+        sourcePath: "C:/source",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        cwd: null,
+        gitBranch: null,
+        gitSha: null,
+        gitOriginUrl: null,
+        models: [],
+        reasoningEfforts: [],
+        turnCount: 1,
+        assistantMessageCount: 0,
+        toolCallCount: 0,
+        toolCounts: {},
+        preview: "",
+        pinned: false,
+        sectionName: null,
+        parentThreadId: null,
+        childThreadIds: [],
+        hasMedia: false,
+        diagnosticCount: 0,
+        revision: "revision",
+      },
+      turns: [{ ...turn(), userMessage: null, assistantMessages: [], activities: [] }],
+      rawEvents: [],
+    };
+    const markdown = serializeConversation(conversation);
+    expect(markdown).toContain("cwd: null");
+    expect(markdown).not.toContain("### User prompt");
   });
 });

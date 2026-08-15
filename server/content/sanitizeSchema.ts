@@ -1,16 +1,18 @@
 import { defaultSchema, type Options } from "rehype-sanitize";
 
+const defaultAttributes = defaultSchema.attributes!;
+const defaultTagNames = defaultSchema.tagNames!;
+const defaultStrip = defaultSchema.strip!;
+
 function attributesFor(name: string): NonNullable<Options["attributes"]>[string] {
-  return [...(defaultSchema.attributes?.[name] ?? [])];
+  return [...(defaultAttributes[name] ?? [])];
 }
 
 export const richTextSanitizeSchema: Options = {
   ...defaultSchema,
-  tagNames: [
-    ...new Set([...(defaultSchema.tagNames ?? []), "details", "summary", "kbd", "section"]),
-  ],
+  tagNames: [...new Set([...defaultTagNames, "details", "summary", "kbd", "section"])],
   attributes: {
-    ...defaultSchema.attributes,
+    ...defaultAttributes,
     a: [...attributesFor("a"), "dataOriginalHref"],
     code: [...attributesFor("code"), "dataLanguage", "dataMeta"],
     details: [...attributesFor("details"), "open"],
@@ -23,7 +25,7 @@ export const richTextSanitizeSchema: Options = {
   },
   strip: [
     ...new Set([
-      ...(defaultSchema.strip ?? []),
+      ...defaultStrip,
       "script",
       "style",
       "iframe",

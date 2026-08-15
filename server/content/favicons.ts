@@ -1,9 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lookup as dnsLookup } from "node:dns/promises";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { BlockList, isIP } from "node:net";
 import { join } from "node:path";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
@@ -12,7 +10,20 @@ import type { Properties, Root, RootContent } from "hast";
 import rehypeRaw from "rehype-raw";
 import { unified } from "unified";
 
+import {
+  assertHttpUrl,
+  assertSafeRemoteUrl,
+  canonicalFaviconOrigin,
+  type RemoteLookupAddress,
+} from "./faviconSecurity.ts";
 import { sanitizeSvg } from "./sanitizeSvg.ts";
+
+export {
+  assertSafeRemoteUrl,
+  canonicalFaviconOrigin,
+  type AssertSafeRemoteUrlOptions,
+  type RemoteLookupAddress,
+} from "./faviconSecurity.ts";
 
 const MAX_HTML_BYTES = 512 * 1024;
 const MAX_ICON_BYTES = 512 * 1024;
@@ -21,39 +32,6 @@ const DEFAULT_TOTAL_TIMEOUT_MS = 5_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 2_000;
 const DEFAULT_REDIRECT_LIMIT = 3;
 const MAX_DECLARED_ICONS = 16;
-
-const blockedIpv4 = new BlockList();
-for (const [network, prefix] of [
-  ["0.0.0.0", 8],
-  ["10.0.0.0", 8],
-  ["100.64.0.0", 10],
-  ["127.0.0.0", 8],
-  ["169.254.0.0", 16],
-  ["172.16.0.0", 12],
-  ["192.0.0.0", 24],
-  ["192.0.2.0", 24],
-  ["192.168.0.0", 16],
-  ["198.18.0.0", 15],
-  ["198.51.100.0", 24],
-  ["203.0.113.0", 24],
-  ["224.0.0.0", 4],
-  ["240.0.0.0", 4],
-] as const) {
-  blockedIpv4.addSubnet(network, prefix, "ipv4");
-}
-const blockedIpv6 = new BlockList();
-for (const [network, prefix] of [
-  ["::", 128],
-  ["::1", 128],
-  ["::ffff:0:0", 96],
-  ["100::", 64],
-  ["2001:db8::", 32],
-  ["fc00::", 7],
-  ["fe80::", 10],
-  ["ff00::", 8],
-] as const) {
-  blockedIpv6.addSubnet(network, prefix, "ipv6");
-}
 
 export interface FaviconHttpResponse {
   url: URL;
@@ -72,15 +50,6 @@ export type FaviconHttpClient = (
   url: URL,
   options: FaviconHttpOptions,
 ) => Promise<FaviconHttpResponse>;
-
-export interface RemoteLookupAddress {
-  address: string;
-  family: 4 | 6;
-}
-
-export interface AssertSafeRemoteUrlOptions {
-  lookup?: ((hostname: string) => Promise<RemoteLookupAddress[]>) | undefined;
-}
 
 export type FaviconSource = "google" | "duckduckgo" | "yandex" | "favicon-im" | "origin";
 
@@ -139,58 +108,6 @@ const providerPlaceholders = new WeakMap<
   FaviconHttpClient,
   Map<FaviconSource, Promise<ValidatedImage | null>>
 >();
-
-function hostnameWithoutBrackets(hostname: string): string {
-  return hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
-}
-
-function assertHttpUrl(url: URL): void {
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new Error("Favicon URLs must use HTTP or HTTPS.");
-  }
-  if (url.username !== "" || url.password !== "") {
-    throw new Error("Favicon URLs must not contain credentials.");
-  }
-  if (isIP(hostnameWithoutBrackets(url.hostname)) !== 0) {
-    throw new Error("Favicon URLs must not use an IP literal.");
-  }
-}
-
-export function canonicalFaviconOrigin(input: string): string {
-  const url = new URL(input);
-  assertHttpUrl(url);
-  return url.origin;
-}
-
-function isBlockedAddress(address: RemoteLookupAddress): boolean {
-  return address.family === 4
-    ? blockedIpv4.check(address.address, "ipv4")
-    : blockedIpv6.check(address.address, "ipv6");
-}
-
-async function systemLookup(hostname: string): Promise<RemoteLookupAddress[]> {
-  const addresses = await dnsLookup(hostname, { all: true, order: "verbatim" });
-  return addresses
-    .filter(
-      (address): address is RemoteLookupAddress => address.family === 4 || address.family === 6,
-    )
-    .map(({ address, family }) => ({ address, family }));
-}
-
-export async function assertSafeRemoteUrl(
-  url: URL,
-  options: AssertSafeRemoteUrlOptions = {},
-): Promise<RemoteLookupAddress> {
-  assertHttpUrl(url);
-  const addresses = await (options.lookup ?? systemLookup)(url.hostname);
-  if (addresses.length === 0) {
-    throw new Error("The favicon hostname did not resolve.");
-  }
-  if (addresses.some(isBlockedAddress)) {
-    throw new Error("The favicon hostname resolved to a non-public address.");
-  }
-  return addresses[0]!;
-}
 
 async function requestOnce(
   url: URL,

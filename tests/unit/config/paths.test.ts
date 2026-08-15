@@ -64,6 +64,19 @@ describe("viewer-owned paths", () => {
     expect(paths.configDir).toBe("/home/dev/.config/codex-sessions-viewer");
     expect(paths.cacheDir).toBe("/home/dev/.cache/codex-sessions-viewer");
   });
+
+  it("uses process defaults and treats whitespace-only Windows roots as absent", () => {
+    const defaults = resolveViewerPaths();
+    expect(defaults.configDir).not.toBe("");
+    expect(defaults.cacheDatabase).toContain("viewer.sqlite");
+    expect(
+      resolveViewerPaths({
+        platform: "win32",
+        homeDir: "C:\\Users\\dev",
+        env: { LOCALAPPDATA: "   " },
+      }).configDir,
+    ).toBe("C:\\Users\\dev\\AppData\\Local\\codex-sessions-viewer");
+  });
 });
 
 describe("Codex-home precedence", () => {
@@ -107,5 +120,13 @@ describe("Codex-home precedence", () => {
       path: "/home/dev/.codex",
       source: "default",
     });
+  });
+
+  it("expands a bare home marker and can resolve from process defaults", () => {
+    expect(resolveCodexHome({ ...baseOptions, configuredCodexHome: "~" })).toEqual({
+      path: "/home/dev",
+      source: "config",
+    });
+    expect(resolveCodexHome().path).not.toBe("");
   });
 });

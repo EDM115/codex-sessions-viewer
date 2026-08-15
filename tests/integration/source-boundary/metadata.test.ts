@@ -1,4 +1,4 @@
-import { stat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, stat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -173,5 +173,65 @@ describe("state database snapshots", () => {
     expect(JSON.parse(await readFile(join(snapshotRoot, "current.json"), "utf8"))).toEqual({
       generationPath: first.generationPath,
     });
+  });
+
+  it("creates a validated snapshot when the optional WAL is absent", async () => {
+    const root = await createFixtureRoot();
+    const sourceDatabase = join(root, "state_5.sqlite");
+    const sourceWal = `${sourceDatabase}-wal`;
+    const snapshotRoot = join(root, "viewer-cache", "state-snapshots");
+    const writer = createStateDatabase(sourceDatabase);
+    writer.close();
+    await rm(sourceWal, { force: true });
+
+    const result = await snapshotStateDatabase({ sourceDatabase, sourceWal, snapshotRoot });
+
+    expect(result).toMatchObject({ status: "created", diagnostics: [] });
+    expect(result.metadata?.threads).toHaveLength(1);
+  });
+
+  it.each(["missing", "directory"])(
+    "returns an unavailable diagnostic for a %s source database",
+    async (variant) => {
+      const root = await createFixtureRoot();
+      const sourceDatabase = join(root, "state_5.sqlite");
+      const snapshotRoot = join(root, "viewer-cache", "state-snapshots");
+      if (variant === "directory") {
+        await mkdir(sourceDatabase);
+      }
+
+      const result = await snapshotStateDatabase({
+        sourceDatabase,
+        sourceWal: `${sourceDatabase}-wal`,
+        snapshotRoot,
+      });
+
+      expect(result).toMatchObject({
+        status: "unavailable",
+        generationPath: null,
+        metadata: null,
+        diagnostics: [expect.objectContaining({ code: "metadata.snapshot_invalid" })],
+      });
+    },
+  );
+
+  it("refuses a retained generation path outside the viewer-owned snapshot root", async () => {
+    const root = await createFixtureRoot();
+    const sourceDatabase = join(root, "state_5.sqlite");
+    const snapshotRoot = join(root, "viewer-cache", "state-snapshots");
+    await writeFile(sourceDatabase, "not a database", "utf8");
+    await mkdir(snapshotRoot, { recursive: true });
+    await writeFile(
+      join(snapshotRoot, "current.json"),
+      `${JSON.stringify({ generationPath: root })}\n`,
+    );
+
+    const result = await snapshotStateDatabase({
+      sourceDatabase,
+      sourceWal: `${sourceDatabase}-wal`,
+      snapshotRoot,
+    });
+
+    expect(result).toMatchObject({ status: "unavailable", generationPath: null, metadata: null });
   });
 });

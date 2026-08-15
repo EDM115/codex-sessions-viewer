@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { PhCaretRight, PhRobot, PhWarning } from "@phosphor-icons/vue";
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 
 import type {
   ConversationActivity,
@@ -31,6 +31,31 @@ const work = computed(() =>
     (activity) => activity.kind !== "reasoning" && activity.kind !== "unknown",
   ),
 );
+const reasoningOpen = ref(props.reasoningDefault === "expanded");
+const workOpen = ref(props.toolCallsDefault === "expanded");
+
+watch(
+  () => props.reasoningDefault,
+  (value) => {
+    reasoningOpen.value = value === "expanded";
+  },
+);
+watch(
+  () => props.toolCallsDefault,
+  (value) => {
+    workOpen.value = value === "expanded";
+  },
+);
+
+function disclosureToggled(group: "reasoning" | "work", event: Event): void {
+  const open = (event.currentTarget as HTMLDetailsElement).open;
+  if (group === "reasoning") {
+    reasoningOpen.value = open;
+  } else {
+    workOpen.value = open;
+  }
+  emit("resized");
+}
 
 function workLabel(activity: Exclude<ConversationActivity, ReasoningActivity>): string {
   if (activity.kind === "web_search") {
@@ -67,8 +92,8 @@ function activityStatus(activity: ConversationActivity): string | null {
     <details
       class="conversation-activity-disclosure"
       data-activity-group="reasoning"
-      :open="reasoningDefault === 'expanded'"
-      @toggle="emit('resized')"
+      :open="reasoningOpen"
+      @toggle="disclosureToggled('reasoning', $event)"
     >
       <summary @pointerdown="emit('beforeResize')" @keydown.enter="emit('beforeResize')">
         <PhCaretRight
@@ -79,7 +104,7 @@ function activityStatus(activity: ConversationActivity): string | null {
         />
         Reasoning <span>{{ reasoning.length }}</span>
       </summary>
-      <div class="conversation-reasoning-list">
+      <div v-if="reasoningOpen" class="conversation-reasoning-list">
         <article v-for="activity in reasoning" :key="activity.id">
           <p>{{ activity.summary || "Reasoning details unavailable" }}</p>
           <span v-if="activity.encrypted">Encrypted source retained</span>
@@ -91,8 +116,8 @@ function activityStatus(activity: ConversationActivity): string | null {
     <details
       class="conversation-activity-disclosure"
       data-activity-group="work"
-      :open="toolCallsDefault === 'expanded'"
-      @toggle="emit('resized')"
+      :open="workOpen"
+      @toggle="disclosureToggled('work', $event)"
     >
       <summary @pointerdown="emit('beforeResize')" @keydown.enter="emit('beforeResize')">
         <PhCaretRight
@@ -103,7 +128,7 @@ function activityStatus(activity: ConversationActivity): string | null {
         />
         Agent work <span>{{ work.length }}</span>
       </summary>
-      <div class="conversation-work-list">
+      <div v-if="workOpen" class="conversation-work-list">
         <template v-for="activity in work" :key="activity.id">
           <ConversationToolRow v-if="activity.kind === 'tool'" :activity="activity" />
           <article

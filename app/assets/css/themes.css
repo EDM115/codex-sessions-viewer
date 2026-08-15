@@ -85,7 +85,7 @@
   --color-text: oklch(22% 0.026 52);
   --color-text-muted: oklch(39% 0.032 55);
   --color-text-subtle: oklch(47% 0.032 58);
-  --color-accent: oklch(55% 0.16 35);
+  --color-accent: oklch(51% 0.16 35);
   --color-accent-strong: oklch(47% 0.17 35);
   --color-accent-ink: oklch(98% 0.018 75);
   --color-focus: oklch(51% 0.2 35);

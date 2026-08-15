@@ -1,62 +1,170 @@
 # Codex Sessions Viewer
 
-Read local Codex conversations in a polished Nuxt interface without modifying, renaming, locking, or deleting Codex-owned files. The project is local-only, SSR-capable, and designed to export a fully offline static archive.
+Codex Sessions Viewer is a local, read-only Nuxt application for browsing Codex conversations. It discovers active and archived JSONL rollouts, preserves unknown protocol records for inspection, enriches them with optional Codex metadata, and presents the same repository contract through a live loopback server or a fully generated static archive.
+
+The viewer never writes, renames, locks, migrates, or deletes anything under the selected Codex home. Its SQLite cache, configuration, generated Markdown, copied media, favicons, and static output are viewer-owned derivatives stored elsewhere.
 
 ## Requirements
 
 - Node.js 26.7 or newer on the Node 26 release line
 - PNPM 11.21.0
+- Windows, macOS, or Linux; Windows is the primary acceptance platform
 
-## Setup
+Install the exact locked dependencies:
 
 ```powershell
-pnpm install
+pnpm install --frozen-lockfile
 ```
 
-PNPM resolves the declared Node runtime when the active Node installation does not satisfy the project contract.
+PNPM can provision the Node runtime declared by the package when the active system Node does not satisfy the project contract.
 
-## Commands
+## Quick start
 
-### Live
+Start the live viewer on the loopback interface:
 
 ```powershell
 pnpm live
 ```
 
-Starts the Nuxt SSR development server on `127.0.0.1`. Source ingestion and refresh are added by later implementation tasks.
+Then open `http://127.0.0.1:3000`. The page shell and loading skeleton render while the read-only session cache reconciles in the background; the library becomes queryable as cached or newly transformed sessions are ready.
 
-### Export
-
-```powershell
-pnpm export
-```
-
-Generates the static Nuxt output in `.output/public`. Session ingestion, Markdown generation, media copying, and offline search are added by later implementation tasks.
-
-### Offline
+Build an offline archive without making favicon requests:
 
 ```powershell
+pnpm export --offline
+pnpm verify:output
 pnpm offline
 ```
 
-Serves the generated static output on `127.0.0.1` without live data updates or network fetching.
+Then open `http://127.0.0.1:3000`. Static output requires this local HTTP server; direct `file://` loading is not supported because payload chunks and Pagefind are fetched from the local origin.
 
-### Doctor
+## Commands
+
+### Live viewer
 
 ```powershell
-pnpm run doctor
+pnpm live [--codex-home <path>] [--port <number>]
 ```
 
-Reports the current Nuxt environment. Codex-home discovery and read-only cache diagnostics are added by the next foundation tasks.
+The server binds only to `127.0.0.1`. It uses cached data immediately when possible, watches active and archived rollouts, coalesces changes, and broadcasts local invalidations over SSE. A Codex JSONL file may be mid-append; only complete stable records are exposed.
 
-## Development checks
+The Codex-home precedence is the explicit CLI argument, viewer configuration, `CODEX_HOME`, then the platform default `~/.codex`.
+
+### Static export
 
 ```powershell
+pnpm export [--codex-home <path>] [--output <path>] [--offline] [--force] [--no-index]
+```
+
+The default output is `.output/public`. Export writes into isolated staging directories and atomically publishes the completed site so a failed generation does not replace the previous good archive.
+
+- `--offline` disables all remote favicon attempts. Conversations, links, local media, and cached content still export.
+- `--no-index` skips Pagefind and disables full-text search in the static site. Metadata browsing remains available.
+- `--force` retransforms every discovered rollout instead of reusing a matching source fingerprint.
+- `--output <path>` selects another viewer-owned publication directory.
+
+Pagefind creates one flat search record per turn and can require substantial memory for very large archives. Use `--no-index` when full-text search is unnecessary or when first validating a large collection, then test indexed export on a representative Codex home before scaling it up.
+
+### Offline server
+
+```powershell
+pnpm offline [--port <number>]
+```
+
+This server reads `.output/public`, binds only to `127.0.0.1`, accepts `GET` and `HEAD`, prevents path escape after real-path resolution, and applies no-index and content-type safety headers. It never starts live ingestion or favicon fetching.
+
+### Diagnostics
+
+```powershell
+pnpm run doctor [--codex-home <path>]
+```
+
+Doctor is read-only. It reports discovered active and archived sources, optional metadata, cache availability and parser diagnostics, state-snapshot availability, static-output completeness, and whether Pagefind is present or disabled.
+
+### Generated-output verification
+
+```powershell
+pnpm verify:output [--output <path>]
+```
+
+The verifier checks the publication boundary independently of the exporter. It rejects linked or non-regular files, invalid manifests and schemas, mismatched session summaries, navigators, turn chunks, inspector targets, missing Markdown or prerendered routes, broken asset/favicon hashes and sizes, incomplete Pagefind runtimes, and external automatic resources referenced by generated HTML or CSS. It scans one session or content file at a time so verification remains bounded on large archives.
+
+## Data and privacy boundaries
+
+Codex rollouts and metadata are immutable inputs. JSONL conversation content is authoritative; `session_index.jsonl`, global state, and the Codex SQLite database are optional enrichment and never gate a readable rollout. SQLite enrichment is copied into a stable viewer-owned snapshot before it is read.
+
+The viewer cache and generated output contain conversation text, local paths, git metadata, raw protocol evidence, copied local media, and downloadable Markdown. Treat both with the same sensitivity as the original Codex home. Do not publish, synchronize, or serve them on a non-loopback interface unless you have independently reviewed and intentionally accepted that exposure.
+
+There is no telemetry, account integration, remote sharing, session editing, or source mutation. Generated pages and the offline server carry `noindex, nofollow, noarchive`, but those directives are not access control.
+
+## Favicon and network behavior
+
+Favicon enrichment is the only automatic feature allowed to use the network. Live mode may fill missing viewer-cache favicons in the background, and export may fetch them unless `--offline` is present. Requests are bounded by type, size, timeout, redirect, DNS, and public-address checks; loopback, private, link-local, reserved, and redirect-pivot targets are rejected. A favicon failure degrades to a local fallback and never makes its conversation unavailable.
+
+The generated site performs no external automatic runtime requests. Fonts, application bundles, Pagefind, exported media, and resolved favicons are local. Remote links and uncached remote-media placeholders remain inert links that require an explicit user action.
+
+## Locations
+
+Viewer configuration and cache locations follow the platform conventions below:
+
+| Platform | Configuration                                                     | Cache                                                             |
+| -------- | ----------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Windows  | `%LOCALAPPDATA%\codex-sessions-viewer\config.json`                | `%LOCALAPPDATA%\codex-sessions-viewer\cache\viewer.sqlite`        |
+| macOS    | `~/Library/Application Support/codex-sessions-viewer/config.json` | `~/Library/Caches/codex-sessions-viewer/viewer.sqlite`            |
+| Linux    | `${XDG_CONFIG_HOME:-~/.config}/codex-sessions-viewer/config.json` | `${XDG_CACHE_HOME:-~/.cache}/codex-sessions-viewer/viewer.sqlite` |
+
+Generated state snapshots, cached media, cached favicons, and private export staging live below the same viewer cache root. Repository-local `.generated`, `.output`, and `.output-live` directories are viewer-owned build products and are ignored by Git.
+
+Presentation preferences such as theme, disclosure defaults, timestamps, code wrapping, live follow, and minimap visibility are stored only in browser local storage under `codex-sessions-viewer:presentation:v1`.
+
+## Development and verification
+
+The source follows Nuxt 4 ownership boundaries: browser code in `app/`, server-only code in `server/`, universal contracts and algorithms in `shared/`, Jiti command entrypoints in `scripts/`, and verification in `tests/`.
+
+Run the release checks with:
+
+```powershell
+pnpm exec nuxt prepare
 pnpm test
+pnpm test:integration
+pnpm test:performance
+pnpm coverage
 pnpm typecheck
 pnpm lint
 pnpm build
 pnpm test:e2e
 ```
 
-The source directories follow Nuxt 4 ownership boundaries: browser code in `app/`, server-only code in `server/`, universal code in `shared/`, command entrypoints in `scripts/`, and verification in `tests/`.
+Vitest separates Node, Pagefind, performance, UI, and Nuxt-owned suites. Pagefind integration is intentionally isolated from parallel files on Windows because its own atomic index rename can collide across workers. `tsconfig.custom.json` type-checks non-default entrypoints and tests; Nuxt remains the owner of application, server, and shared source typing.
+
+## Troubleshooting
+
+### The live page is preparing for a long time
+
+The initial HTML should still show the application shell and loaders. Run `pnpm run doctor` in another terminal and inspect the live terminal for a reconciliation diagnostic. A malformed or changing source is isolated; a single favicon or optional metadata failure should not stop the library.
+
+If the selected Codex home is wrong, start with `pnpm live --codex-home <path>` or update it from Settings. The server validates the new directory before changing watcher context.
+
+### Windows reports `node:sqlite` as external
+
+Nuxt may print a build-time warning that the `node:sqlite` built-in is external. Node 26 supplies that built-in at runtime; the warning alone is not a cache failure. Confirm the active runtime with `pnpm node --version` and use `pnpm run doctor` to inspect the actual cache state.
+
+### Windows tests abort in `fs-event.c` or show short TEMP paths
+
+Some Windows profiles expose `%TEMP%` through an 8.3 alias while file watchers report the long path. Point `TEMP` and `TMP` to an existing long-form directory such as the repository `.nuxt` directory for that shell, rerun `pnpm exec nuxt prepare`, and retry the failing command. Keep Pagefind tests isolated rather than disabling parallelism for the complete suite.
+
+### Build or prerender fails on `readlink` under the user profile
+
+A managed sandbox can deny symlink inspection outside the repository during Nitro tracing even though the repository is valid. Re-run the exact build in a normal elevated shell before diagnosing source code from that error.
+
+### Export uses excessive memory or reports `Invalid string length`
+
+Update to the current implementation first: message inspectors retain only their own raw-event evidence while turn inspectors retain the complete turn evidence. For a very large collection, validate `pnpm export --offline --no-index` first. Indexed Pagefind export is a separate resource boundary; use a representative Codex home and monitor memory before attempting the complete archive.
+
+### Offline search is unavailable
+
+Run `pnpm run doctor`. Search is intentionally disabled after `--no-index`; otherwise the output must contain a complete `pagefind/` runtime. Run `pnpm verify:output` to distinguish a missing index from a broader publication inconsistency.
+
+### Cached or generated data must be removed
+
+Stop the live/offline process first, confirm the exact viewer-owned path from the table above or the command output, and remove only that cache or generated-output directory. Never target the Codex home. The viewer can rebuild its own cache and export, but deleted derived data is not recoverable unless backed up.

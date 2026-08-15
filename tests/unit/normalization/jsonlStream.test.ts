@@ -9,6 +9,7 @@ import {
   readStableJsonl,
   type JsonlRecord,
 } from "../../../server/ingestion/jsonlStream.ts";
+import { stableRead } from "../../../server/ingestion/stableRead.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -66,6 +67,19 @@ describe("JSONL byte streaming", () => {
     expect(errors).toEqual([{ lineNumber: 2, reason: "invalid-json" }]);
     expect(records).toHaveLength(2);
     expect(records[1]?.value).toEqual({ huge: hugeText });
+  });
+
+  it("counts blank physical lines without emitting records and rejects non-contiguous chunks", () => {
+    const records: JsonlRecord[] = [];
+    const parser = new JsonlStreamParser({ onRecord: (record) => records.push(record) });
+    const input = Buffer.from('\n{"id":1}\n', "utf8");
+
+    parser.write(input, 0);
+
+    expect(records).toEqual([expect.objectContaining({ lineNumber: 2, value: { id: 1 } })]);
+    expect(() => parser.write(Buffer.from("{}\n"), input.byteLength + 1)).toThrow(
+      "must be contiguous",
+    );
   });
 
   it("preserves and resumes an incomplete final record without changing its byte origin", () => {
@@ -131,5 +145,47 @@ describe("JSONL byte streaming", () => {
 
     expect(result.read).toMatchObject({ status: "full-reparse", reason: "truncated" });
     expect(result.records).toEqual([]);
+  });
+
+  it("rejects parser state that does not end at the requested offset", async () => {
+    const path = await temporaryFile('{"id":1}\n');
+
+    await expect(
+      readStableJsonl(path, {
+        start: 0,
+        state: {
+          pending: Buffer.alloc(0),
+          pendingStart: 1,
+          nextLineNumber: 2,
+          nextOffset: 1,
+        },
+      }),
+    ).rejects.toThrow("must end at the requested read offset");
+  });
+
+  it("validates stable-read ranges and persisted prefixes before streaming", async () => {
+    const path = await temporaryFile("abcdef");
+
+    await expect(stableRead(path, { start: -1 })).rejects.toThrow("start must be");
+    await expect(stableRead(path, { chunkSize: 0 })).rejects.toThrow(
+      "chunkSize must be greater than zero",
+    );
+    await expect(stableRead(path, { start: 4, endExclusive: 3 })).rejects.toThrow(
+      "must not be less than start",
+    );
+    await expect(stableRead(path, { endExclusive: 7 })).resolves.toMatchObject({
+      status: "full-reparse",
+      reason: "truncated",
+    });
+    await expect(
+      stableRead(path, {
+        expectedPrefix: { offset: 4, bytes: Buffer.from("def") },
+      }),
+    ).resolves.toMatchObject({ status: "full-reparse", reason: "truncated" });
+    await expect(
+      stableRead(path, {
+        expectedPrefix: { offset: 0, bytes: Buffer.from("ABC") },
+      }),
+    ).resolves.toMatchObject({ status: "full-reparse", reason: "prefix-mismatch" });
   });
 });

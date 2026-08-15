@@ -12,12 +12,13 @@ import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
 import { LiveConversationRepository } from "../../../server/live/repository.ts";
 import { conversationSummarySchema } from "../../../shared/types/conversation.ts";
 import { viewerDiagnosticSchema } from "../../../shared/types/diagnostics.ts";
+import { turnChunkSchema, turnNavigatorResponseSchema } from "../../../shared/types/repository.ts";
 import {
-  inspectorRecordSchema,
-  turnChunkSchema,
-  turnNavigatorResponseSchema,
-} from "../../../shared/types/repository.ts";
+  hydrateStaticInspectorRecords,
+  staticInspectorChunkSchema,
+} from "../../../shared/types/staticPayloads.ts";
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
+import { representativeLargeSession } from "../../performance/fixtures.ts";
 
 const temporaryRoots: string[] = [];
 
@@ -69,16 +70,16 @@ describe("live repository payloads", () => {
           revision: z.string(),
           chunkSize: z.int().positive(),
           items: turnNavigatorResponseSchema,
+          inspectorChunks: z.record(z.string(), z.int().nonnegative()),
         })
         .parse(navigatorJson);
       const staticTurns = turnChunkSchema.parse(turnsJson);
-      const staticInspectors = z
-        .strictObject({
-          sessionId: z.string(),
-          revision: z.string(),
-          records: z.array(inspectorRecordSchema),
-        })
-        .parse(inspectorsJson);
+      const staticInspectorChunk = staticInspectorChunkSchema.parse(inspectorsJson);
+      const staticInspectors = {
+        sessionId: staticInspectorChunk.sessionId,
+        revision: staticInspectorChunk.revision,
+        records: hydrateStaticInspectorRecords(staticInspectorChunk),
+      };
       const firstTurn = session.turns[0]!;
       const assistantMessage = firstTurn.assistantMessages.at(-1);
       if (assistantMessage === undefined) {
@@ -124,6 +125,47 @@ describe("live repository payloads", () => {
           ({ target }) => target.type === "message" && target.id === assistantMessage.id,
         ),
       );
+    } finally {
+      database.close();
+    }
+  });
+
+  it("reads only the requested live rows instead of reconstructing unrelated turns", async () => {
+    const source = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: "C:/fixtures/bounded-live.jsonl",
+      scope: "active",
+      revision: "sha256:bounded-source",
+    });
+    const session = representativeLargeSession(source, 41);
+    const database = openCacheDatabase(":memory:");
+    try {
+      replaceCachedSession(database, {
+        session,
+        diagnostics: [],
+        source: cachedSource(session),
+      });
+      database
+        .prepare("UPDATE turns SET payload_json = ? WHERE session_id = ? AND turn_index = ?")
+        .run("unrelated invalid JSON", session.summary.id, 40);
+      const repository = new LiveConversationRepository(database, new InvalidationBus());
+      const firstTurn = session.turns[0]!;
+      const messageId = firstTurn.assistantMessages[0]!.id;
+
+      await expect(
+        repository.getTurns(session.summary.id, { cursor: "0", limit: 20 }),
+      ).resolves.toMatchObject({
+        turns: session.turns.slice(0, 20),
+        previousCursor: null,
+        nextCursor: "1",
+      });
+      await expect(repository.getTurnNavigator(session.summary.id)).resolves.toHaveLength(41);
+      await expect(
+        repository.getInspector(session.summary.id, { type: "message", id: messageId }),
+      ).resolves.toMatchObject({ target: { type: "message", id: messageId } });
+      await expect(
+        repository.getTurns(session.summary.id, { cursor: "2", limit: 20 }),
+      ).rejects.toThrow("JSON");
     } finally {
       database.close();
     }

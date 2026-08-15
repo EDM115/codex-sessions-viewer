@@ -30,6 +30,7 @@ const navigatorSchema = z.object({
     }),
   ),
   chunkSize: z.number(),
+  inspectorChunks: z.record(z.string(), z.number()),
 });
 const turnChunkSchema = z.object({
   turns: z.array(z.object({ id: z.string() })),
@@ -37,13 +38,14 @@ const turnChunkSchema = z.object({
   nextCursor: z.string().nullable(),
 });
 const inspectorChunkSchema = z.object({
+  version: z.literal(2),
   records: z.array(
     z.object({
       target: z.object({ type: z.string(), id: z.string() }),
       eventIds: z.array(z.string()),
-      rawRecords: z.array(z.object({ id: z.string() }).passthrough()),
     }),
   ),
+  rawRecords: z.record(z.string(), z.object({ id: z.string() }).passthrough()),
 });
 const assetManifestSchema = z.object({
   assets: z.array(z.object({ id: z.string(), url: z.string().nullable() })),
@@ -163,9 +165,8 @@ describe("static repository payloads", () => {
     const firstChunk = turnChunkSchema.parse(
       JSON.parse(await readFile(join(sessionRoot, "turn-0.json"), "utf8")),
     );
-    const inspector = inspectorChunkSchema.parse(
-      JSON.parse(await readFile(join(sessionRoot, "inspector-0.json"), "utf8")),
-    );
+    const inspectorText = await readFile(join(sessionRoot, "inspector-0.json"), "utf8");
+    const inspector = inspectorChunkSchema.parse(JSON.parse(inspectorText));
 
     expect(result).toMatchObject({ sessionCount: 1, turnChunkCount: 2, published: true });
     expect(index).toEqual({
@@ -182,6 +183,12 @@ describe("static repository payloads", () => {
     expect(
       navigator.items.every(({ proseLengthBucket }) => [1, 2, 3, 4].includes(proseLengthBucket)),
     ).toBe(true);
+    expect(navigator.inspectorChunks).toMatchObject({
+      "turn:turn-1": 0,
+      "message:message-raw-870": 0,
+      "activity:reasoning-raw-1093": 0,
+      "turn:turn-2": 1,
+    });
     expect(firstChunk).toMatchObject({
       turns: [{ id: "turn-1" }],
       previousCursor: null,
@@ -194,7 +201,8 @@ describe("static repository payloads", () => {
         expect.objectContaining({ target: { type: "activity", id: "reasoning-raw-1093" } }),
       ]),
     );
-    expect(inspector.records.some(({ rawRecords }) => rawRecords.length > 0)).toBe(true);
+    expect(Object.keys(inspector.rawRecords).length).toBeGreaterThan(0);
+    expect(inspectorText.match(/"rawRecords"/gu)).toHaveLength(1);
     const firstTurn = conversation.turns[0]!;
     for (const message of [firstTurn.userMessage, ...firstTurn.assistantMessages].filter(
       (candidate) => candidate !== null,
@@ -203,7 +211,9 @@ describe("static repository payloads", () => {
         ({ target }) => target.type === "message" && target.id === message.id,
       );
       expect(record?.eventIds).toEqual(message.rawEventIds);
-      expect(record?.rawRecords.map(({ id }) => id)).toEqual(message.rawEventIds);
+      expect(record?.eventIds.map((id) => inspector.rawRecords[id]?.id)).toEqual(
+        message.rawEventIds,
+      );
     }
     expect(await readFile(join(publicRoot, "payloads", "sessions", "index.json"), "utf8")).toBe(
       await readFile(join(generatedRoot, "payloads", "sessions", "index.json"), "utf8"),

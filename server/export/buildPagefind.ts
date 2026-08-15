@@ -7,7 +7,7 @@ import { StringDecoder } from "node:string_decoder";
 import * as pagefind from "pagefind";
 import type { CustomRecord } from "pagefind";
 
-import type { ConversationTurn } from "../../shared/types/conversation.ts";
+import type { ConversationSummary, ConversationTurn } from "../../shared/types/conversation.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 import { serializeAgentWork, serializeUserPrompt } from "./serializeMarkdown.ts";
 
@@ -119,10 +119,6 @@ function turnDate(turn: ConversationTurn, fallback: string): string {
   return (turn.userMessage?.createdAt ?? turn.startedAt ?? fallback).slice(0, 10);
 }
 
-function hasMedia(turn: ConversationTurn): boolean {
-  return turn.activities.some(({ kind }) => kind === "media");
-}
-
 function projectFromCwd(cwd: string | null): string | null {
   if (cwd === null) {
     return null;
@@ -143,21 +139,40 @@ function turnContent(turn: ConversationTurn): string {
   return [prompt, serializeAgentWork(turn)].filter(Boolean).join("\n\n");
 }
 
+function sessionSearchContent(summary: ConversationSummary): string {
+  return [
+    summary.title,
+    summary.cwd,
+    summary.gitBranch,
+    summary.gitSha,
+    summary.gitOriginUrl,
+    ...summary.models,
+    ...summary.reasoningEfforts,
+    ...Object.keys(summary.toolCounts).toSorted(),
+    summary.sectionName,
+    summary.parentThreadId,
+    ...summary.childThreadIds,
+  ]
+    .filter((value): value is string => value !== null && value !== "")
+    .join("\n");
+}
+
 export function createPagefindTurnRecords(
   conversations: readonly NormalizedSession[],
 ): CustomRecord[] {
   return conversations.flatMap((conversation) =>
-    conversation.turns.map((turn) => {
+    conversation.turns.map((turn, turnIndex) => {
       const date = turnDate(turn, conversation.summary.updatedAt);
+      const messageId = turn.userMessage?.id ?? turn.assistantMessages[0]?.id ?? null;
       const filters: Record<string, string[]> = {
         scope: [conversation.summary.scope],
-        model: turn.models,
-        tool: Object.keys(turn.toolCounts).toSorted(),
-        media: [String(hasMedia(turn))],
+        model: conversation.summary.models,
+        tool: Object.keys(conversation.summary.toolCounts).toSorted(),
+        media: [String(conversation.summary.hasMedia)],
         date: [date],
       };
       if (conversation.summary.cwd !== null) {
-        filters["cwd"] = [conversation.summary.cwd];
+        filters["cwd"] = [encodeURIComponent(conversation.summary.cwd)];
       }
       const project = projectFromCwd(conversation.summary.cwd);
       if (project !== null && project !== "") {
@@ -165,12 +180,18 @@ export function createPagefindTurnRecords(
       }
       return {
         url: `/session/${encodeURIComponent(conversation.summary.id)}#turn-${encodeURIComponent(turn.id)}`,
-        content: turnContent(turn),
+        content: [
+          turnIndex === 0 ? sessionSearchContent(conversation.summary) : "",
+          turnContent(turn),
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
         language: "en",
         meta: {
-          title: `${conversation.summary.title} — Turn ${turn.index + 1}`,
+          title: conversation.summary.title,
           sessionId: conversation.summary.id,
           turnId: turn.id,
+          ...(messageId === null ? {} : { messageId }),
           date,
         },
         filters,
