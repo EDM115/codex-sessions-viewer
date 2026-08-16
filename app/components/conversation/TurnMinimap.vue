@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import type { TurnNavigatorItem } from "#shared/types/conversation.ts";
 
@@ -11,7 +11,9 @@ import {
 
 const props = defineProps<{
   currentTurnId: string | null;
+  errorTurnId?: string | null;
   items: TurnNavigatorItem[];
+  pendingTurnId?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -20,10 +22,33 @@ const emit = defineEmits<{
 
 const activeTurnId = ref<string | null>(null);
 const buttons = ref<Array<HTMLButtonElement | null>>([]);
+const minimap = ref<HTMLElement | null>(null);
+const minimapScroll = ref<HTMLElement | null>(null);
+const previewCenter = ref<number | null>(null);
+let resizeObserver: ResizeObserver | null = null;
 const activeItem = computed(() => props.items.find(({ turnId }) => turnId === activeTurnId.value));
+const previewStyle = computed<Record<string, string> | undefined>(() =>
+  previewCenter.value === null
+    ? undefined
+    : { "--turn-preview-center": `${previewCenter.value}px` },
+);
+
+function updatePreviewCenter(): void {
+  const container = minimap.value;
+  const index = props.items.findIndex(({ turnId }) => turnId === activeTurnId.value);
+  const marker = buttons.value[index]?.querySelector<HTMLElement>(".turn-minimap__marker");
+  if (container === null || marker === undefined || marker === null) {
+    previewCenter.value = null;
+    return;
+  }
+  const containerRect = container.getBoundingClientRect();
+  const markerRect = marker.getBoundingClientRect();
+  previewCenter.value = markerRect.top - containerRect.top + markerRect.height / 2;
+}
 
 function activate(item: TurnNavigatorItem): void {
   activeTurnId.value = item.turnId;
+  void nextTick().then(updatePreviewCenter);
 }
 
 function select(item: TurnNavigatorItem): void {
@@ -50,30 +75,66 @@ watch(
   () => props.currentTurnId,
   async (turnId) => {
     if (turnId === null || activeTurnId.value !== null) {
+      await nextTick();
+      updatePreviewCenter();
       return;
     }
     await nextTick();
     const index = props.items.findIndex((item) => item.turnId === turnId);
     buttons.value[index]?.scrollIntoView({ block: "center" });
+    updatePreviewCenter();
   },
   { immediate: true },
 );
+
+watch(
+  () => props.items,
+  () => void nextTick().then(updatePreviewCenter),
+  { deep: false },
+);
+
+onMounted(() => {
+  if (typeof ResizeObserver !== "undefined") {
+    resizeObserver = new ResizeObserver(updatePreviewCenter);
+    if (minimap.value !== null) {
+      resizeObserver.observe(minimap.value);
+    }
+    if (minimapScroll.value !== null) {
+      resizeObserver.observe(minimapScroll.value);
+    }
+  }
+});
+
+onBeforeUnmount(() => resizeObserver?.disconnect());
 </script>
 
 <template>
-  <nav class="turn-minimap" aria-label="Conversation turns">
+  <nav ref="minimap" class="turn-minimap" aria-label="Conversation turns">
     <div class="turn-minimap__fade turn-minimap__fade--start" aria-hidden="true" />
-    <div class="turn-minimap__scroll">
+    <div ref="minimapScroll" class="turn-minimap__scroll" @scroll.passive="updatePreviewCenter">
       <button
         v-for="(item, index) in items"
         :key="item.turnId"
         :ref="(element) => (buttons[index] = element as HTMLButtonElement | null)"
         type="button"
         class="turn-minimap__target"
-        :class="item.turnId === currentTurnId || item.turnId === activeTurnId ? 'is-active' : null"
+        :class="{
+          'is-active': item.turnId === currentTurnId || item.turnId === activeTurnId,
+          'is-pending': item.turnId === pendingTurnId,
+          'is-error': item.turnId === errorTurnId,
+        }"
         :data-turn-id="item.turnId"
-        :aria-label="`Turn ${item.index + 1}: ${minimapPreview(item).prompt || 'Prompt unavailable'}`"
+        :data-jump-state="
+          item.turnId === pendingTurnId
+            ? 'pending'
+            : item.turnId === errorTurnId
+              ? 'error'
+              : undefined
+        "
+        :aria-label="`Turn ${item.index + 1}: ${minimapPreview(item).prompt || 'Prompt unavailable'}${item.turnId === pendingTurnId ? ' · loading' : item.turnId === errorTurnId ? ' · load failed' : ''}`"
         :aria-current="item.turnId === currentTurnId ? 'true' : undefined"
+        :aria-busy="item.turnId === pendingTurnId ? 'true' : undefined"
+        :disabled="item.turnId === pendingTurnId"
         :tabindex="
           item.turnId === currentTurnId || (currentTurnId === null && index === 0) ? 0 : -1
         "
@@ -92,7 +153,12 @@ watch(
       </button>
     </div>
     <div class="turn-minimap__fade turn-minimap__fade--end" aria-hidden="true" />
-    <aside v-if="activeItem !== undefined" class="turn-minimap__preview">
+    <aside
+      v-if="activeItem !== undefined"
+      class="turn-minimap__preview"
+      role="tooltip"
+      :style="previewStyle"
+    >
       <strong>{{ minimapPreview(activeItem).prompt || "Prompt unavailable" }}</strong>
       <p>{{ minimapPreview(activeItem).assistant || "No assistant prose in this turn." }}</p>
     </aside>

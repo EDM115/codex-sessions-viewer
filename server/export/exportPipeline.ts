@@ -16,6 +16,11 @@ import { discoverSources } from "../ingestion/discoverSources.ts";
 import { readGlobalState } from "../metadata/globalState.ts";
 import { readSessionIndex, type SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import { snapshotStateDatabase, type StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
+import {
+  attachGuardianEvidence,
+  parseGuardianConversation,
+  type GuardianReview,
+} from "../normalization/guardianEvidence.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 import {
   appendPagefindRecords,
@@ -243,7 +248,29 @@ async function prepareConversations(
   const conversations: NormalizedSession[] = [];
   const assetIds = new Set<string>();
   const faviconOrigins = new Set<string>();
-  const orderedSessionIds = [...sessionIds].toSorted();
+  const guardianIds = new Set(
+    database
+      .prepare(
+        "SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM json_each(sessions.models_json) WHERE value = 'codex-auto-review')",
+      )
+      .all()
+      .flatMap((row) => (typeof row["id"] === "string" ? [row["id"]] : [])),
+  );
+  const guardianReviews = new Map<string, GuardianReview[]>();
+  for (const guardianId of guardianIds) {
+    const guardian = getCachedSession(database, guardianId);
+    if (guardian === null) {
+      continue;
+    }
+    const review = parseGuardianConversation(guardian);
+    if (review?.parentThreadId !== null && review?.parentThreadId !== undefined) {
+      guardianReviews.set(review.parentThreadId, [
+        ...(guardianReviews.get(review.parentThreadId) ?? []),
+        review,
+      ]);
+    }
+  }
+  const orderedSessionIds = [...sessionIds].filter((id) => !guardianIds.has(id)).toSorted();
   for (const [sessionIndex, sessionId] of orderedSessionIds.entries()) {
     const cached = getCachedSession(database, sessionId);
     if (cached === null) {
@@ -252,6 +279,12 @@ async function prepareConversations(
       continue;
     }
     let conversation = cached;
+    attachGuardianEvidence(
+      conversation.turns.flatMap(({ activities }) =>
+        activities.filter((activity) => activity.kind === "tool"),
+      ),
+      guardianReviews.get(sessionId) ?? [],
+    );
     let prepared: PreparedConversationExport | null = null;
     try {
       // oxlint-disable-next-line no-await-in-loop -- Each session is prepared deterministically and failures retain the plain cached conversation.

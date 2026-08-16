@@ -17,7 +17,7 @@ export default defineNitroPlugin(async (nitroApp) => {
   if (useRuntimeConfig().viewerMode !== "live") {
     return;
   }
-  console.log("[viewer] Preparing the live Codex session cache...");
+  console.log("[viewer] Preparing the live conversation catalog...");
   const config = await loadServerViewerConfig({
     cli: {
       codexHome: process.env["CODEX_VIEWER_CODEX_HOME"],

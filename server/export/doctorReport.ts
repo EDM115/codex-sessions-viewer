@@ -21,6 +21,16 @@ export interface DoctorCacheReport {
   sessionCount: number;
   diagnosticCount: number;
   size: number | null;
+  catalog: {
+    rootCount: number;
+    subagentCount: number;
+    auxiliaryCount: number;
+    coldCount: number;
+    queuedCount: number;
+    loadingCount: number;
+    readyCount: number;
+    failedCount: number;
+  } | null;
 }
 
 export interface DoctorOfflineOutputReport {
@@ -84,6 +94,7 @@ async function inspectViewerCache(
           sessionCount: 0,
           diagnosticCount: 0,
           size: metadata.size,
+          catalog: null,
         },
         diagnostics: [],
       };
@@ -94,6 +105,55 @@ async function inspectViewerCache(
       database.exec("PRAGMA query_only = ON");
       const sessionRow = database.prepare("SELECT COUNT(*) AS count FROM sessions").get();
       const diagnosticRow = database.prepare("SELECT COUNT(*) AS count FROM diagnostics").get();
+      const hasCatalog =
+        database
+          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_catalog'")
+          .get() !== undefined;
+      const catalogCounts = {
+        rootCount: 0,
+        subagentCount: 0,
+        auxiliaryCount: 0,
+        coldCount: 0,
+        queuedCount: 0,
+        loadingCount: 0,
+        readyCount: 0,
+        failedCount: 0,
+      };
+      if (hasCatalog) {
+        for (const row of database
+          .prepare(
+            "SELECT session_kind, materialization_state, COUNT(*) AS count FROM session_catalog GROUP BY session_kind, materialization_state",
+          )
+          .all()) {
+          const count = typeof row["count"] === "number" ? row["count"] : 0;
+          const kind = row["session_kind"];
+          const state = row["materialization_state"];
+          if (kind === "root") {
+            catalogCounts.rootCount += count;
+          }
+          if (kind === "subagent") {
+            catalogCounts.subagentCount += count;
+          }
+          if (kind === "auxiliary") {
+            catalogCounts.auxiliaryCount += count;
+          }
+          if (state === "cold") {
+            catalogCounts.coldCount += count;
+          }
+          if (state === "queued") {
+            catalogCounts.queuedCount += count;
+          }
+          if (state === "loading") {
+            catalogCounts.loadingCount += count;
+          }
+          if (state === "ready") {
+            catalogCounts.readyCount += count;
+          }
+          if (state === "failed") {
+            catalogCounts.failedCount += count;
+          }
+        }
+      }
       const diagnostics = database
         .prepare(
           "SELECT code, severity, area, message, path FROM diagnostics ORDER BY created_at DESC, id",
@@ -128,6 +188,7 @@ async function inspectViewerCache(
           diagnosticCount:
             typeof diagnosticRow?.["count"] === "number" ? diagnosticRow["count"] : 0,
           size: metadata.size,
+          catalog: hasCatalog ? catalogCounts : null,
         },
         diagnostics,
       };
@@ -137,8 +198,8 @@ async function inspectViewerCache(
   } catch (error) {
     return {
       report: isMissing(error)
-        ? { status: "missing", sessionCount: 0, diagnosticCount: 0, size: null }
-        : { status: "unavailable", sessionCount: 0, diagnosticCount: 0, size: null },
+        ? { status: "missing", sessionCount: 0, diagnosticCount: 0, size: null, catalog: null }
+        : { status: "unavailable", sessionCount: 0, diagnosticCount: 0, size: null, catalog: null },
       diagnostics: [],
     };
   }
@@ -273,10 +334,14 @@ async function inspectOfflineOutput(publicRoot: string): Promise<DoctorOfflineOu
           typeof navigator.chunkSize === "number" &&
           Number.isSafeInteger(navigator.chunkSize) &&
           navigator.chunkSize > 0 &&
+          "chunkCount" in navigator &&
+          typeof navigator.chunkCount === "number" &&
+          Number.isSafeInteger(navigator.chunkCount) &&
+          navigator.chunkCount >= 0 &&
           "items" in navigator &&
           Array.isArray(navigator.items)
         ) {
-          chunkCount = Math.ceil(navigator.items.length / navigator.chunkSize);
+          chunkCount = navigator.chunkCount;
         }
       } catch {
         // Report the required navigator below.

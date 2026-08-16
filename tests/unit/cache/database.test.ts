@@ -6,7 +6,94 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 
 import { openCacheDatabase, withCacheTransaction } from "../../../server/cache/database.ts";
-import { CACHE_SCHEMA_VERSION } from "../../../server/cache/schema.ts";
+import { migrateCacheDatabase } from "../../../server/cache/migrations.ts";
+import { CACHE_SCHEMA_VERSION, INITIAL_CACHE_SCHEMA_SQL } from "../../../server/cache/schema.ts";
+
+function seedVersionOneSession(database: DatabaseSync): void {
+  const summary = {
+    id: "session-v1",
+    title: "Existing cached session",
+    scope: "active",
+    sourcePath: "C:\\codex\\sessions\\session-v1.jsonl",
+    createdAt: "2026-08-13T08:00:00.000Z",
+    updatedAt: "2026-08-13T08:30:00.000Z",
+    cwd: "C:\\Work\\viewer",
+    gitBranch: "main",
+    gitSha: null,
+    gitOriginUrl: null,
+    models: ["gpt-5.6"],
+    reasoningEfforts: ["high"],
+    turnCount: 2,
+    assistantMessageCount: 2,
+    toolCallCount: 1,
+    toolCounts: { exec_command: 1 },
+    preview: "existing cache",
+    pinned: false,
+    sectionName: null,
+    parentThreadId: null,
+    childThreadIds: [],
+    hasMedia: false,
+    diagnosticCount: 0,
+    revision: "sha256:v1",
+  };
+  database
+    .prepare(`
+      INSERT INTO source_files (
+        path, session_id, scope, size, mtime_ms, device, inode, sha256, parsed_bytes,
+        parser_version, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      summary.sourcePath,
+      summary.id,
+      summary.scope,
+      100,
+      1_786_550_400_000,
+      "1",
+      "2",
+      "a".repeat(64),
+      100,
+      1,
+      summary.updatedAt,
+    );
+  database
+    .prepare(`
+      INSERT INTO sessions (
+        id, title, scope, source_path, created_at, updated_at, cwd, git_branch, git_sha,
+        git_origin_url, models_json, reasoning_efforts_json, turn_count,
+        assistant_message_count, tool_call_count, tool_counts_json, preview, pinned,
+        section_name, parent_thread_id, child_thread_ids_json, has_media, diagnostic_count,
+        revision, summary_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      summary.id,
+      summary.title,
+      summary.scope,
+      summary.sourcePath,
+      summary.createdAt,
+      summary.updatedAt,
+      summary.cwd,
+      summary.gitBranch,
+      summary.gitSha,
+      summary.gitOriginUrl,
+      JSON.stringify(summary.models),
+      JSON.stringify(summary.reasoningEfforts),
+      summary.turnCount,
+      summary.assistantMessageCount,
+      summary.toolCallCount,
+      JSON.stringify(summary.toolCounts),
+      summary.preview,
+      0,
+      summary.sectionName,
+      summary.parentThreadId,
+      JSON.stringify(summary.childThreadIds),
+      0,
+      summary.diagnosticCount,
+      summary.revision,
+      JSON.stringify(summary),
+    );
+}
 
 describe("viewer cache database", () => {
   it("creates the versioned cache schema with foreign keys and FTS5 enabled", () => {
@@ -28,6 +115,7 @@ describe("viewer cache database", () => {
             "favicons",
             "messages",
             "raw_events",
+            "session_catalog",
             "session_fts",
             "sessions",
             "source_files",
@@ -42,6 +130,53 @@ describe("viewer cache database", () => {
       expect(
         database.prepare("SELECT sql FROM sqlite_master WHERE name = 'session_fts'").get(),
       ).toEqual(expect.objectContaining({ sql: expect.stringContaining("fts5") }));
+    } finally {
+      database.close();
+    }
+  });
+
+  it("migrates version-one normalized sessions into ready catalog rows", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec("PRAGMA foreign_keys = ON");
+    database.exec(INITIAL_CACHE_SCHEMA_SQL);
+    database.exec("PRAGMA user_version = 1");
+    seedVersionOneSession(database);
+
+    try {
+      migrateCacheDatabase(database);
+
+      expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+      expect(
+        database
+          .prepare(
+            "SELECT id, session_kind, materialization_state FROM session_catalog WHERE id = ?",
+          )
+          .get("session-v1"),
+      ).toEqual({
+        id: "session-v1",
+        session_kind: "root",
+        materialization_state: "ready",
+      });
+      expect(() =>
+        database
+          .prepare(`
+            INSERT INTO session_catalog (
+              id, source_path, scope, project_id, project_name, project_source,
+              session_kind, materialization_state, title, created_at, updated_at,
+              child_count, source_size, source_mtime_ms, source_revision, summary_json
+            ) VALUES (?, ?, 'active', 'none', 'No project', 'none', 'auxiliary', ?, ?, ?, ?, 0, 0, 0, ?, ?)
+          `)
+          .run(
+            "invalid-state",
+            "C:\\codex\\invalid-state.jsonl",
+            "warming",
+            "Invalid",
+            "2026-08-13T08:00:00.000Z",
+            "2026-08-13T08:00:00.000Z",
+            "revision",
+            "{}",
+          ),
+      ).toThrow("CHECK constraint failed");
     } finally {
       database.close();
     }

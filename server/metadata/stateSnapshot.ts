@@ -263,6 +263,20 @@ async function retainCurrentSnapshot(
   }
 }
 
+export async function readRetainedStateSnapshot(
+  snapshotRoot: string,
+): Promise<StateSnapshotResult> {
+  const diagnostic = createViewerDiagnostic({
+    code: "metadata.snapshot_invalid",
+    severity: "warning",
+    area: "metadata",
+    message: "No validated retained Codex state snapshot is currently available.",
+    path: join(snapshotRoot, "current.json"),
+  });
+  const retained = await retainCurrentSnapshot(snapshotRoot, diagnostic);
+  return retained.status === "retained" ? { ...retained, diagnostics: [] } : retained;
+}
+
 export async function snapshotStateDatabase(
   options: StateSnapshotOptions,
 ): Promise<StateSnapshotResult> {

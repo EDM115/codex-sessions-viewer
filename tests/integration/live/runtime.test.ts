@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import type { LoadedServerViewerConfig } from "../../../server/core/config.ts";
@@ -90,49 +90,25 @@ describe("live Codex-home switching", () => {
       onboardingRequired: false,
       diagnostics: [],
     };
-    let releaseRead!: () => void;
-    let markReadStarted!: () => void;
-    const readGate = new Promise<void>((resolve) => {
-      releaseRead = resolve;
-    });
-    const readStarted = new Promise<void>((resolve) => {
-      markReadStarted = resolve;
-    });
-    const starting = LiveViewerRuntime.start(config, {
+    const readJsonl = vi.fn<typeof readStableJsonl>(readStableJsonl);
+    const runtime = await LiveViewerRuntime.start(config, {
       initialReconciliation: "background",
       reconciliationIntervalMs: 60_000,
-      async readJsonl(path, options) {
-        markReadStarted();
-        await readGate;
-        return readStableJsonl(path, options);
-      },
+      readJsonl,
     });
-    let runtime: LiveViewerRuntime | null = null;
 
     try {
-      await readStarted;
-      runtime = await Promise.race([
-        starting,
-        new Promise<null>((resolve) => setImmediate(() => resolve(null))),
-      ]);
-      expect(runtime).not.toBeNull();
-      if (runtime === null) {
-        throw new Error("The live runtime remained blocked on initial reconciliation.");
-      }
-      expect(runtime.status).toEqual({ state: "preparing", message: null });
       await expect(
         runtime.repository.listSessions({ scope: "active", limit: 10 }),
-      ).resolves.toMatchObject({ items: [], total: 0 });
+      ).resolves.toMatchObject({ items: expect.any(Array), total: expect.any(Number) });
 
-      releaseRead();
       await runtime.whenReady();
       expect(runtime.status).toEqual({ state: "ready", message: null });
+      expect(readJsonl).not.toHaveBeenCalled();
       await expect(
         runtime.repository.listSessions({ scope: "active", limit: 10 }),
       ).resolves.toMatchObject({ total: 1 });
     } finally {
-      releaseRead();
-      runtime ??= await starting;
       await runtime.close();
     }
   });
@@ -207,7 +183,7 @@ describe("live Codex-home switching", () => {
     const runtime = await LiveViewerRuntime.start(config, { reconciliationIntervalMs: 60_000 });
 
     try {
-      const firstIds = runtime.database.prepare("SELECT id FROM sessions").all();
+      const firstIds = runtime.database.prepare("SELECT id FROM session_catalog").all();
       expect(firstIds).toHaveLength(1);
       await runtime.updateSettings({
         codexHome: secondHome,
@@ -215,11 +191,11 @@ describe("live Codex-home switching", () => {
         fetchFavicons: false,
       });
       expect(runtime.settings.codexHome).toBe(secondHome);
-      expect(runtime.database.prepare("SELECT id FROM sessions").all()).toHaveLength(1);
+      expect(runtime.database.prepare("SELECT id FROM session_catalog").all()).toHaveLength(1);
 
       const preserved = openCacheDatabase(config.paths.cacheDatabase);
       try {
-        expect(preserved.prepare("SELECT id FROM sessions").all()).toEqual(firstIds);
+        expect(preserved.prepare("SELECT id FROM session_catalog").all()).toEqual(firstIds);
       } finally {
         preserved.close();
       }

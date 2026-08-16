@@ -90,10 +90,14 @@ describe("conversation repository adapters", () => {
     const staticRequest = vi.fn<RepositoryRequester>(async (path) => {
       if (path.endsWith("/navigator.json")) {
         return {
+          version: 2,
           sessionId: "session-1",
           revision: "revision-1",
           chunkSize: 20,
+          chunkCount: 0,
           items: [],
+          turnChunks: {},
+          inspectorChunks: {},
         };
       }
       throw new Error(`Unexpected static request: ${path}`);
@@ -143,10 +147,18 @@ describe("conversation repository adapters", () => {
       limit: 1,
     });
 
-    expect(first).toMatchObject({ total: 2, nextCursor: "1", items: [{ id: "session-1" }] });
-    expect(second).toMatchObject({ total: 2, nextCursor: null, items: [{ id: "session-3" }] });
+    expect(first).toMatchObject({
+      total: 2,
+      nextCursor: "1",
+      items: [{ summary: { id: "session-1" } }],
+    });
+    expect(second).toMatchObject({
+      total: 2,
+      nextCursor: null,
+      items: [{ summary: { id: "session-3" } }],
+    });
     expect(sessions).toHaveLength(3);
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("applies every static library filter and normalizes invalid cursors", async () => {
@@ -188,7 +200,7 @@ describe("conversation repository adapters", () => {
       repository.listSessions({ scope: "active", query: "   ", cursor: "invalid", limit: 2 }),
     ).resolves.toMatchObject({
       total: 4,
-      items: [{ id: "session-1" }, { id: "session-2" }],
+      items: [{ summary: { id: "session-1" } }, { summary: { id: "session-2" } }],
       nextCursor: "2",
     });
     await expect(
@@ -201,7 +213,7 @@ describe("conversation repository adapters", () => {
         tool: "exec_command",
         hasMedia: false,
       }),
-    ).resolves.toMatchObject({ total: 1, items: [{ id: "session-1" }] });
+    ).resolves.toMatchObject({ total: 1, items: [{ summary: { id: "session-1" } }] });
     await expect(
       repository.listSessions({ scope: "active", cwd: "C:/repo/viewer", tool: "missing" }),
     ).resolves.toMatchObject({ total: 0 });
@@ -357,9 +369,11 @@ describe("conversation repository adapters", () => {
 
   it("loads static summaries, navigators, chunks, inspectors, and asset manifests", async () => {
     const navigator = {
+      version: 2 as const,
       sessionId: "session-1",
       revision: "revision-1",
       chunkSize: 2,
+      chunkCount: 8,
       items: [
         {
           turnId: "turn-0",
@@ -380,6 +394,8 @@ describe("conversation repository adapters", () => {
           createdAt: null,
         },
       ],
+      turnChunks: { "turn-0": 0, "turn-3": 7 },
+      inspectorChunks: { "message:message-1": 0, "turn:turn-3": 1 },
     };
     const messageRecord = inspector({ type: "message", id: "message-1" });
     const turnRecord = inspector({ type: "turn", id: "turn-3" });
@@ -412,6 +428,9 @@ describe("conversation repository adapters", () => {
       if (path.endsWith("inspector-1.json")) {
         return inspectorChunk([turnRecord]);
       }
+      if (/inspector-[2-7]\.json$/u.test(path)) {
+        return inspectorChunk([]);
+      }
       if (path === "/payloads/assets.json") {
         return { assets: [asset] };
       }
@@ -436,7 +455,7 @@ describe("conversation repository adapters", () => {
     await expect(repository.resolveAsset("asset-1")).resolves.toEqual(asset);
     await expect(repository.resolveAsset("missing")).rejects.toThrow("Asset not found");
     expect(paths).toContain("/payloads/sessions/session%2F1/summary.json");
-    expect(paths).toContain("/payloads/sessions/session-1/turn-1.json");
+    expect(paths).toContain("/payloads/sessions/session-1/turn-7.json");
     expect(repository.subscribe(() => undefined)()).toBeUndefined();
   });
 
@@ -479,9 +498,9 @@ describe("conversation repository adapters", () => {
     );
     await expect(repository.listSessions({ scope: "active" })).resolves.toMatchObject({
       total: 1,
-      items: [{ id: "session-1" }],
+      items: [{ summary: { id: "session-1" } }],
     });
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledTimes(3);
   });
 
   it("passes cancellation to live requests and selects capabilities by mode", async () => {
@@ -543,7 +562,71 @@ describe("conversation repository adapters", () => {
     };
     const request = vi.fn<RepositoryRequester>(async (path) => {
       if (path.startsWith("/api/sessions?")) {
-        return { items: [summary()], nextCursor: null, total: 1 };
+        return {
+          items: [
+            {
+              summary: summary(),
+              kind: "root",
+              materialization: "ready",
+              projectId: "project-1",
+              parentThreadId: null,
+              agentPath: null,
+              agentNickname: null,
+              agentDepth: 0,
+              childCount: 0,
+            },
+          ],
+          nextCursor: null,
+          total: 1,
+        };
+      }
+      if (path === "/api/projects") {
+        return [
+          {
+            id: "project-1",
+            name: "viewer",
+            hint: "C:/repo/viewer",
+            source: "cwd",
+            activeCount: 1,
+            archivedCount: 0,
+          },
+        ];
+      }
+      if (path === "/api/sessions/prepare") {
+        return [
+          { id: "session-1", state: "ready", error: null },
+          { id: "session-2", state: "ready", error: null },
+        ];
+      }
+      if (path === "/api/search/materialize") {
+        return {
+          id: "search-1",
+          scope: "active",
+          query: "viewer",
+          state: "queued",
+          total: 2,
+          completed: 0,
+          failed: 0,
+          resultCount: 0,
+          error: null,
+          createdAt: "2026-08-16T08:00:00.000Z",
+          updatedAt: "2026-08-16T08:00:00.000Z",
+        };
+      }
+      if (path === "/api/search/materialize/search-1") {
+        return {
+          id: "search-1",
+          scope: "active",
+          query: "viewer",
+          state: "completed",
+          total: 2,
+          completed: 2,
+          failed: 0,
+          resultCount: 1,
+          error: null,
+          createdAt: "2026-08-16T08:00:00.000Z",
+          updatedAt: "2026-08-16T08:00:01.000Z",
+        };
       }
       if (path.startsWith("/api/search?")) {
         return { items: [], nextCursor: null, total: 0 };
@@ -565,6 +648,15 @@ describe("conversation repository adapters", () => {
     const repository = new LiveApiConversationRepository(request);
 
     await repository.listSessions({ scope: "active", limit: 2, hasMedia: false });
+    await expect(repository.listProjects()).resolves.toHaveLength(1);
+    await expect(
+      repository.prepareSessions(["session-1", "session-2", "session-1"]),
+    ).resolves.toHaveLength(2);
+    const searchJob = await repository.startDeepSearch({ scope: "active", query: "viewer" });
+    await expect(repository.getDeepSearch(searchJob.id)).resolves.toMatchObject({
+      state: "completed",
+    });
+    await repository.cancelDeepSearch(searchJob.id);
     await repository.search({ scope: "active", query: "viewer", model: "gpt-5" });
     await repository.getSession("session/1");
     await expect(repository.getTurnNavigator("session-1")).resolves.toEqual(navigator);
@@ -574,6 +666,10 @@ describe("conversation repository adapters", () => {
     expect(request.mock.calls.map(([path]) => path)).toEqual(
       expect.arrayContaining([
         "/api/sessions?scope=active&limit=2&hasMedia=false",
+        "/api/projects",
+        "/api/sessions/prepare",
+        "/api/search/materialize",
+        "/api/search/materialize/search-1",
         "/api/search?scope=active&query=viewer&model=gpt-5",
         "/api/sessions/session%2F1",
         "/api/sessions/session-1/navigator",
@@ -592,14 +688,19 @@ describe("conversation repository adapters", () => {
     );
     listeners.get("session.updated")?.(new MessageEvent("session.updated", { data: "{" }));
     listeners.get("settings.updated")?.(new Event("settings.updated"));
+    listeners.get("search.updated")?.(
+      new MessageEvent("search.updated", {
+        data: JSON.stringify({ type: "search.updated", ids: ["search-1"], revision: "r3" }),
+      }),
+    );
     listeners.get("diagnostic.updated")?.(
       new MessageEvent("diagnostic.updated", {
         data: JSON.stringify({ type: "wrong", ids: [], revision: "r2" }),
       }),
     );
-    expect(received).toHaveBeenCalledOnce();
+    expect(received).toHaveBeenCalledTimes(2);
     unsubscribe();
-    expect(removeEventListener).toHaveBeenCalledTimes(4);
+    expect(removeEventListener).toHaveBeenCalledTimes(5);
     expect(close).toHaveBeenCalledOnce();
     vi.unstubAllGlobals();
   });

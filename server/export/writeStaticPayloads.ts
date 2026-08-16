@@ -3,6 +3,7 @@ import { lstat, readFile, readdir, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
+import { resolveConversationProject } from "../../shared/library/projectIdentity.ts";
 import type {
   ConversationActivity,
   ConversationMessage,
@@ -12,16 +13,19 @@ import type {
   TurnNavigatorItem,
 } from "../../shared/types/conversation.ts";
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import type { ConversationProject } from "../../shared/types/library.ts";
 import type { InspectorRecord, InspectorTarget, TurnChunk } from "../../shared/types/repository.ts";
 import type { NormalizedRawEvent, NormalizedSession } from "../normalization/normalizeSession.ts";
 import { assertSafeOutputComponent, serializedJson, writeOutputFile } from "./outputFiles.ts";
 
 const DEFAULT_CHUNK_SIZE = 20;
+export const DEFAULT_STATIC_CHUNK_BYTE_LIMIT = 4 * 1024 * 1024;
 
 export interface WriteStaticPayloadOptions {
   generatedRoot: string;
   publicRoot?: string | undefined;
   chunkSize?: number | undefined;
+  maxChunkBytes?: number | undefined;
   writeIndex?: boolean | undefined;
   writeSessions?: boolean | undefined;
   diagnosticsBySession?: ReadonlyMap<string, readonly ViewerDiagnostic[]> | undefined;
@@ -60,6 +64,10 @@ function preview(value: string, maximum: number): string {
 function proseLengthBucket(turn: ConversationTurn): 1 | 2 | 3 | 4 {
   const length =
     (turn.userMessage?.sourceMarkdown.length ?? 0) +
+    (turn.steeringMessages ?? []).reduce(
+      (total, message) => total + message.sourceMarkdown.length,
+      0,
+    ) +
     turn.assistantMessages.reduce((total, message) => total + message.sourceMarkdown.length, 0);
   if (length <= 280) {
     return 1;
@@ -79,7 +87,13 @@ function navigatorItem(turn: ConversationTurn): TurnNavigatorItem {
     index: turn.index,
     userMessageId: turn.userMessage?.id ?? null,
     promptPreview: preview(turn.userMessage?.sourceMarkdown ?? "", 160),
-    assistantPreview: preview(turn.assistantMessages[0]?.sourceMarkdown ?? "", 320),
+    assistantPreview: preview(
+      turn.assistantMessages.find(({ id }) => id === turn.finalAssistantMessageId)
+        ?.sourceMarkdown ??
+        turn.assistantMessages.at(-1)?.sourceMarkdown ??
+        "",
+      320,
+    ),
     proseLengthBucket: proseLengthBucket(turn),
     createdAt: turn.userMessage?.createdAt ?? turn.startedAt,
   };
@@ -141,6 +155,7 @@ function turnEventIds(turn: ConversationTurn): string[] {
   return [
     ...new Set([
       ...(turn.userMessage?.rawEventIds ?? []),
+      ...(turn.steeringMessages ?? []).flatMap(({ rawEventIds }) => rawEventIds),
       ...turn.assistantMessages.flatMap(({ rawEventIds }) => rawEventIds),
       ...turn.activities.flatMap(({ rawEventIds }) => rawEventIds),
     ]),
@@ -195,6 +210,7 @@ function inspectorsForTurn(
       rawEvents,
     ),
     ...(turn.userMessage === null ? [] : [messageInspector(turn, turn.userMessage, rawEvents)]),
+    ...(turn.steeringMessages ?? []).map((message) => messageInspector(turn, message, rawEvents)),
     ...turn.assistantMessages.map((message) => messageInspector(turn, message, rawEvents)),
     ...turn.activities.map((activity) => {
       const timing = activityTiming(activity);
@@ -219,19 +235,27 @@ function inspectorTargetKeys(turn: ConversationTurn): string[] {
   return [
     `turn:${turn.id}`,
     ...(turn.userMessage === null ? [] : [`message:${turn.userMessage.id}`]),
+    ...(turn.steeringMessages ?? []).map((message) => `message:${message.id}`),
     ...turn.assistantMessages.map((message) => `message:${message.id}`),
     ...turn.activities.map((activity) => `activity:${activity.id}`),
   ];
 }
 
 function inspectorChunkIndex(
-  turns: readonly ConversationTurn[],
-  chunkSize: number,
+  turnChunks: readonly (readonly ConversationTurn[])[],
 ): Record<string, number> {
   return Object.fromEntries(
-    turns.flatMap((turn, index) =>
-      inspectorTargetKeys(turn).map((target) => [target, Math.floor(index / chunkSize)]),
+    turnChunks.flatMap((turns, chunkIndex) =>
+      turns.flatMap((turn) => inspectorTargetKeys(turn).map((target) => [target, chunkIndex])),
     ),
+  );
+}
+
+function turnChunkIndex(
+  turnChunks: readonly (readonly ConversationTurn[])[],
+): Record<string, number> {
+  return Object.fromEntries(
+    turnChunks.flatMap((turns, chunkIndex) => turns.map((turn) => [turn.id, chunkIndex])),
   );
 }
 
@@ -257,10 +281,42 @@ function compactInspectorChunk(
   } as const;
 }
 
-function chunks<T>(items: readonly T[], size: number): T[][] {
-  const result: T[][] = [];
-  for (let index = 0; index < items.length; index += size) {
-    result.push(items.slice(index, index + size));
+function boundedTurnChunks(
+  sessionId: string,
+  revision: string,
+  turns: readonly ConversationTurn[],
+  rawEvents: ReadonlyMap<string, NormalizedRawEvent>,
+  countLimit: number,
+  byteLimit: number,
+): ConversationTurn[][] {
+  const result: ConversationTurn[][] = [];
+  let current: ConversationTurn[] = [];
+  let currentTurnBytes = 0;
+  let currentInspectorBytes = 0;
+  for (const turn of turns) {
+    const turnBytes = Buffer.byteLength(serializedJson(turn));
+    const inspectorBytes = Buffer.byteLength(
+      serializedJson(
+        compactInspectorChunk(sessionId, revision, inspectorsForTurn(turn, rawEvents), rawEvents),
+      ),
+    );
+    if (
+      current.length > 0 &&
+      (current.length >= countLimit ||
+        currentTurnBytes + turnBytes > byteLimit ||
+        currentInspectorBytes + inspectorBytes > byteLimit)
+    ) {
+      result.push(current);
+      current = [];
+      currentTurnBytes = 0;
+      currentInspectorBytes = 0;
+    }
+    current.push(turn);
+    currentTurnBytes += turnBytes;
+    currentInspectorBytes += inspectorBytes;
+  }
+  if (current.length > 0) {
+    result.push(current);
   }
   return result;
 }
@@ -302,16 +358,150 @@ async function writePayload(
   return dispositions;
 }
 
+function cyclicConversationIds(parentById: ReadonlyMap<string, string | null>): Set<string> {
+  const cyclic = new Set<string>();
+  for (const start of parentById.keys()) {
+    const chain: string[] = [];
+    const indexes = new Map<string, number>();
+    let current: string | null | undefined = start;
+    while (current !== null && current !== undefined && parentById.has(current)) {
+      const previousIndex = indexes.get(current);
+      if (previousIndex !== undefined) {
+        for (const id of chain.slice(previousIndex)) {
+          cyclic.add(id);
+        }
+        break;
+      }
+      indexes.set(current, chain.length);
+      chain.push(current);
+      current = parentById.get(current);
+    }
+  }
+  return cyclic;
+}
+
+function reconcileStaticTopology(conversations: readonly NormalizedSession[]): NormalizedSession[] {
+  const ids = new Set(conversations.map(({ summary }) => summary.id));
+  const parents = new Map(
+    conversations.map(({ summary }) => [
+      summary.id,
+      summary.parentThreadId !== null && ids.has(summary.parentThreadId)
+        ? summary.parentThreadId
+        : null,
+    ]),
+  );
+  for (const id of cyclicConversationIds(parents)) {
+    parents.set(id, null);
+  }
+  const children = new Map<string, string[]>();
+  for (const [id, parentThreadId] of parents) {
+    if (parentThreadId !== null) {
+      children.set(parentThreadId, [...(children.get(parentThreadId) ?? []), id]);
+    }
+  }
+  return conversations.map((conversation) => ({
+    ...conversation,
+    summary: {
+      ...conversation.summary,
+      parentThreadId: parents.get(conversation.summary.id) ?? null,
+      childThreadIds: (children.get(conversation.summary.id) ?? []).toSorted(),
+    },
+  }));
+}
+
+function staticLibraryPayload(conversations: readonly NormalizedSession[]) {
+  const summaries = new Map(conversations.map(({ summary }) => [summary.id, summary]));
+  const directProjects = new Map(
+    conversations.map(({ summary }) => [
+      summary.id,
+      resolveConversationProject({ cwd: summary.cwd, gitOriginUrl: summary.gitOriginUrl }, []),
+    ]),
+  );
+  const projectFor = (
+    sessionId: string,
+  ): Omit<ConversationProject, "activeCount" | "archivedCount"> => {
+    const visited = new Set<string>();
+    let currentId = sessionId;
+    while (!visited.has(currentId)) {
+      visited.add(currentId);
+      const summary = summaries.get(currentId);
+      if (summary?.parentThreadId === null || summary === undefined) {
+        return directProjects.get(currentId) ?? directProjects.get(sessionId)!;
+      }
+      currentId = summary.parentThreadId;
+    }
+    return directProjects.get(sessionId)!;
+  };
+  const depthFor = (sessionId: string): number | null => {
+    const visited = new Set<string>();
+    let currentId = sessionId;
+    let depth = 0;
+    while (!visited.has(currentId)) {
+      visited.add(currentId);
+      const parentThreadId = summaries.get(currentId)?.parentThreadId;
+      if (parentThreadId === null || parentThreadId === undefined) {
+        return depth === 0 ? null : depth;
+      }
+      depth += 1;
+      currentId = parentThreadId;
+    }
+    return depth;
+  };
+  const projects = new Map<
+    string,
+    ConversationProject & { activeCount: number; archivedCount: number }
+  >();
+  const entries: Record<string, Record<string, unknown>> = {};
+  for (const { summary } of conversations) {
+    const project = projectFor(summary.id);
+    const existing = projects.get(project.id) ?? {
+      ...project,
+      activeCount: 0,
+      archivedCount: 0,
+    };
+    if (summary.parentThreadId === null) {
+      existing[summary.scope === "active" ? "activeCount" : "archivedCount"] += 1;
+    }
+    projects.set(project.id, existing);
+    entries[summary.id] = {
+      kind: summary.parentThreadId === null ? "root" : "subagent",
+      projectId: project.id,
+      parentThreadId: summary.parentThreadId,
+      agentPath: null,
+      agentNickname: null,
+      agentDepth: depthFor(summary.id),
+      childCount: summary.childThreadIds.length,
+    };
+  }
+  return {
+    version: 1,
+    projects: [...projects.values()].toSorted(
+      (left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id),
+    ),
+    entries,
+  } as const;
+}
+
 export async function writeStaticPayloads(
   conversations: readonly NormalizedSession[],
   options: WriteStaticPayloadOptions,
 ): Promise<WriteStaticPayloadResult> {
   const chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
+  const maxChunkBytes = options.maxChunkBytes ?? DEFAULT_STATIC_CHUNK_BYTE_LIMIT;
   if (!Number.isSafeInteger(chunkSize) || chunkSize < 1 || chunkSize > 200) {
     throw new RangeError("Static payload chunk size must be an integer from 1 through 200.");
   }
+  if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1) {
+    throw new RangeError("Static payload byte limit must be a positive safe integer.");
+  }
   const dispositions: Array<"written" | "reused"> = [];
-  const ordered = conversations.toSorted(
+  const ordered = reconcileStaticTopology(
+    conversations.filter(
+      ({ summary }) =>
+        summary.models.length === 0 ||
+        !summary.models.every((model) => model === "codex-auto-review"),
+    ),
+  ).toSorted(
     (left, right) =>
       right.summary.updatedAt.localeCompare(left.summary.updatedAt) ||
       left.summary.id.localeCompare(right.summary.id),
@@ -322,6 +512,9 @@ export async function writeStaticPayloads(
         version: 1,
         sessions: ordered.map(({ summary }) => summary),
       })),
+    );
+    dispositions.push(
+      ...(await writePayload(options, ["projects.json"], staticLibraryPayload(ordered))),
     );
   }
   let turnChunkCount = 0;
@@ -334,17 +527,27 @@ export async function writeStaticPayloads(
       diagnostics: options.diagnosticsBySession?.get(id) ?? [],
     });
     dispositions.push(...summaryDispositions);
+    const rawEvents = new Map(conversation.rawEvents.map((event) => [event.id, event]));
+    const turnChunks = boundedTurnChunks(
+      id,
+      conversation.summary.revision,
+      conversation.turns,
+      rawEvents,
+      chunkSize,
+      maxChunkBytes,
+    );
     // oxlint-disable-next-line no-await-in-loop -- Each session navigator is paired with its chunk size.
     const navigatorDispositions = await writePayload(options, ["sessions", id, "navigator.json"], {
+      version: 2,
       sessionId: id,
       revision: conversation.summary.revision,
       chunkSize,
+      chunkCount: turnChunks.length,
       items: conversation.turns.map(navigatorItem),
-      inspectorChunks: inspectorChunkIndex(conversation.turns, chunkSize),
+      turnChunks: turnChunkIndex(turnChunks),
+      inspectorChunks: inspectorChunkIndex(turnChunks),
     });
     dispositions.push(...navigatorDispositions);
-    const turnChunks = chunks(conversation.turns, chunkSize);
-    const rawEvents = new Map(conversation.rawEvents.map((event) => [event.id, event]));
     for (const [index, turns] of turnChunks.entries()) {
       const turnPayload: TurnChunk = {
         sessionId: id,

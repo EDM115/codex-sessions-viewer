@@ -6,6 +6,7 @@ import LibraryPreparationState from "../../../app/components/library/LibraryPrep
 import LibrarySearchResults from "../../../app/components/library/LibrarySearchResults.vue";
 import LibrarySessionList from "../../../app/components/library/LibrarySessionList.vue";
 import type { ConversationSummary } from "../../../shared/types/conversation.ts";
+import type { ConversationListItem } from "../../../shared/types/library.ts";
 
 function session(id: string, title: string): ConversationSummary {
   return {
@@ -33,6 +34,20 @@ function session(id: string, title: string): ConversationSummary {
     hasMedia: false,
     diagnosticCount: 0,
     revision: "revision-1",
+  };
+}
+
+function item(id: string, title: string): ConversationListItem {
+  return {
+    summary: session(id, title),
+    kind: "root",
+    materialization: "ready",
+    projectId: "project-1",
+    parentThreadId: null,
+    agentPath: null,
+    agentNickname: null,
+    agentDepth: null,
+    childCount: 0,
   };
 }
 
@@ -86,7 +101,7 @@ describe("library presentation components", () => {
     const wrapper = mount(LibrarySessionList, {
       attachTo: document.body,
       props: {
-        items: [session("session-1", "First"), session("session-2", "Second")],
+        items: [item("session-1", "First"), item("session-2", "Second")],
         selectedId: "session-1",
       },
     });
@@ -108,14 +123,14 @@ describe("library presentation components", () => {
 
   it("groups dated sessions, clamps focus movement, ignores unrelated keys, and virtualizes large archives", async () => {
     const dated = [
-      session("session-1", "First"),
-      session("session-2", "Second"),
-      session("session-3", "Third"),
+      item("session-1", "First"),
+      item("session-2", "Second"),
+      item("session-3", "Third"),
     ];
-    dated[0].sectionName = null;
-    dated[1].sectionName = null;
-    dated[2].sectionName = null;
-    dated[2].updatedAt = "2026-08-14T09:00:00.000Z";
+    dated[0].summary.sectionName = null;
+    dated[1].summary.sectionName = null;
+    dated[2].summary.sectionName = null;
+    dated[2].summary.updatedAt = "2026-08-14T09:00:00.000Z";
     const wrapper = mount(LibrarySessionList, {
       attachTo: document.body,
       props: { items: dated },
@@ -137,7 +152,7 @@ describe("library presentation components", () => {
       attachTo: document.body,
       props: {
         items: Array.from({ length: 41 }, (_, index) =>
-          session(`session-${index}`, `Session ${index}`),
+          item(`session-${index}`, `Session ${index}`),
         ),
       },
     });

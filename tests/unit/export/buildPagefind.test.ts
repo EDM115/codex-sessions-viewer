@@ -42,7 +42,7 @@ describe("Pagefind turn records", () => {
     expect(records[0]!.content).toContain("feature/parser");
     expect(records[0]!.content).toContain("https://example.test/viewer.git");
     expect(records[0]!.content).toContain("gpt-exact-2");
-    expect(records[1]).toMatchObject({
+    expect(records[1]!).toMatchObject({
       meta: {
         title: "Build the parser",
         messageId: conversation.turns[1]?.userMessage?.id,

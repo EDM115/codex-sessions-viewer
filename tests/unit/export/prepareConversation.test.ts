@@ -44,6 +44,26 @@ describe("conversation export preparation", () => {
       type: "document",
       children: [{ type: "text", text: assistant.sourceMarkdown }],
     };
+    const turn = conversation.turns[0]!;
+    const steering = {
+      ...turn.userMessage!,
+      id: "message-steering",
+      sourceMarkdown: "Please cover **Windows**.",
+      body: {
+        type: "document" as const,
+        children: [{ type: "text" as const, text: "Please cover **Windows**." }],
+      },
+    };
+    turn.steeringMessages = [steering];
+    const reasoning = turn.activities.find((activity) => activity.kind === "reasoning");
+    if (reasoning === undefined || reasoning.kind !== "reasoning") {
+      throw new Error("Expected reasoning activity.");
+    }
+    reasoning.summary = "**Planning** the implementation";
+    reasoning.body = {
+      type: "document",
+      children: [{ type: "text", text: reasoning.summary }],
+    };
     const database = openCacheDatabase(":memory:");
     replaceCachedSession(database, {
       session: conversation,
@@ -60,6 +80,14 @@ describe("conversation export preparation", () => {
       const nodes = descendants(
         prepared.conversation.turns[0]!.assistantMessages[0]!.body.children,
       );
+      const steeringNodes = descendants(
+        prepared.conversation.turns[0]!.steeringMessages![0]!.body.children,
+      );
+      const reasoningNodes = descendants(
+        prepared.conversation.turns[0]!.activities.find(
+          (activity) => activity.kind === "reasoning",
+        )!.body!.children,
+      );
 
       expect(nodes).toEqual(
         expect.arrayContaining([
@@ -68,6 +96,12 @@ describe("conversation export preparation", () => {
         ]),
       );
       expect(prepared.faviconOrigins).toEqual(new Set(["https://nuxt.com"]));
+      expect(steeringNodes).toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: "element", tagName: "strong" })]),
+      );
+      expect(reasoningNodes).toEqual(
+        expect.arrayContaining([expect.objectContaining({ type: "element", tagName: "strong" })]),
+      );
       expect(prepared.assetIds).toEqual(new Set(["asset-raw-870-0", "asset-image-1"]));
       expect(getCachedAsset(database, "asset-raw-870-0")).toMatchObject({ status: "missing" });
       expect(getCachedAsset(database, "asset-image-1")).toMatchObject({ status: "missing" });
@@ -76,6 +110,12 @@ describe("conversation export preparation", () => {
       ]);
       updateCachedSessionRichContent(database, prepared.conversation);
       const cached = getCachedSession(database, conversation.summary.id)!;
+      expect(cached.turns[0]!.steeringMessages).toEqual([
+        expect.objectContaining({
+          id: "message-steering",
+          sourceMarkdown: "Please cover **Windows**.",
+        }),
+      ]);
       const cachedNodes = descendants(cached.turns[0]!.assistantMessages[0]!.body.children);
       const reused = await prepareConversationForExport(database, cached, {
         mediaRoot: join(root, "media-cache"),

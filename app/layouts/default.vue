@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { PhGear, PhHouse } from "@phosphor-icons/vue";
 
+import LibraryWorkspace from "../components/library/LibraryWorkspace.vue";
 import UiIconLink from "../components/ui/UiIconLink.vue";
 import { usePresentationSettings } from "../composables/usePresentationSettings.ts";
 
@@ -45,7 +46,10 @@ const context = computed(() =>
       </nav>
     </header>
     <div id="main-content" class="app-content">
-      <slot />
+      <LibraryWorkspace v-if="route.path === '/' || route.path.startsWith('/session/')">
+        <slot />
+      </LibraryWorkspace>
+      <slot v-else />
     </div>
   </div>
 </template>

@@ -36,20 +36,38 @@ function scaledActivity(
 
 function scaledTurn(source: ConversationTurn, sessionId: string, index: number): ConversationTurn {
   const id = `scale-turn-${index}`;
+  const userMessage =
+    source.userMessage === null ? null : scaledMessage(source.userMessage, id, "user", index, 0);
+  const assistantMessages = source.assistantMessages.map((message, messageIndex) =>
+    scaledMessage(message, id, "assistant", index, messageIndex),
+  );
+  const activities = source.activities.map((activity, activityIndex) =>
+    scaledActivity(activity, id, index, activityIndex),
+  );
+  const ids = new Map<string, string>();
+  if (source.userMessage !== null && userMessage !== null) {
+    ids.set(source.userMessage.id, userMessage.id);
+  }
+  source.assistantMessages.forEach((message, messageIndex) =>
+    ids.set(message.id, assistantMessages[messageIndex]!.id),
+  );
+  source.activities.forEach((activity, activityIndex) =>
+    ids.set(activity.id, activities[activityIndex]!.id),
+  );
   return {
     ...source,
     id,
     sourceTurnId: `source-scale-turn-${index}`,
     sessionId,
     index,
-    userMessage:
-      source.userMessage === null ? null : scaledMessage(source.userMessage, id, "user", index, 0),
-    assistantMessages: source.assistantMessages.map((message, messageIndex) =>
-      scaledMessage(message, id, "assistant", index, messageIndex),
-    ),
-    activities: source.activities.map((activity, activityIndex) =>
-      scaledActivity(activity, id, index, activityIndex),
-    ),
+    userMessage,
+    assistantMessages,
+    activities,
+    entryOrder: source.entryOrder?.map((entry) => ({ ...entry, id: ids.get(entry.id)! })),
+    finalAssistantMessageId:
+      source.finalAssistantMessageId === null || source.finalAssistantMessageId === undefined
+        ? source.finalAssistantMessageId
+        : ids.get(source.finalAssistantMessageId),
     diagnosticIds: [],
   };
 }

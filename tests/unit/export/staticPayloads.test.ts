@@ -14,14 +14,16 @@ import {
   reconcileStaticSessionArtifacts,
   writeStaticPayloads,
 } from "../../../server/export/writeStaticPayloads.ts";
+import { staticLibraryPayloadSchema } from "../../../shared/types/staticPayloads.ts";
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 const temporaryDirectories: string[] = [];
 const sessionIndexSchema = z.object({
   version: z.number(),
-  sessions: z.array(z.object({ id: z.string() })),
+  sessions: z.array(z.object({ id: z.string(), parentThreadId: z.string().nullable() })),
 });
 const navigatorSchema = z.object({
+  version: z.literal(2),
   items: z.array(
     z.object({
       turnId: z.string(),
@@ -30,6 +32,8 @@ const navigatorSchema = z.object({
     }),
   ),
   chunkSize: z.number(),
+  chunkCount: z.number(),
+  turnChunks: z.record(z.string(), z.number()),
   inspectorChunks: z.record(z.string(), z.number()),
 });
 const turnChunkSchema = z.object({
@@ -77,7 +81,6 @@ describe("conversation Markdown files", () => {
       scope: "active",
       revision: "sha256:fixture",
     });
-
     const first = await writeConversationExport(conversation, { generatedRoot, publicRoot });
     const second = await writeConversationExport(conversation, { generatedRoot, publicRoot });
     const privateMarkdown = join(
@@ -149,7 +152,6 @@ describe("static repository payloads", () => {
       scope: "active",
       revision: "sha256:fixture",
     });
-
     const result = await writeStaticPayloads([conversation], {
       generatedRoot,
       publicRoot,
@@ -162,6 +164,9 @@ describe("static repository payloads", () => {
     const navigator = navigatorSchema.parse(
       JSON.parse(await readFile(join(sessionRoot, "navigator.json"), "utf8")),
     );
+    const projects = staticLibraryPayloadSchema.parse(
+      JSON.parse(await readFile(join(generatedRoot, "payloads", "projects.json"), "utf8")),
+    );
     const firstChunk = turnChunkSchema.parse(
       JSON.parse(await readFile(join(sessionRoot, "turn-0.json"), "utf8")),
     );
@@ -171,10 +176,21 @@ describe("static repository payloads", () => {
     expect(result).toMatchObject({ sessionCount: 1, turnChunkCount: 2, published: true });
     expect(index).toEqual({
       version: 1,
-      sessions: [expect.objectContaining({ id: conversation.summary.id })],
+      sessions: [expect.objectContaining({ id: conversation.summary.id, parentThreadId: null })],
+    });
+    expect(projects.projects).toEqual([
+      expect.objectContaining({ activeCount: 1, archivedCount: 0, source: "git" }),
+    ]);
+    expect(projects.entries[conversation.summary.id]).toMatchObject({
+      kind: "root",
+      parentThreadId: null,
+      childCount: 0,
     });
     expect(navigator).toMatchObject({
+      version: 2,
       chunkSize: 1,
+      chunkCount: 2,
+      turnChunks: { "turn-1": 0, "turn-2": 1 },
       items: [
         expect.objectContaining({ turnId: "turn-1", promptPreview: "Build the parser" }),
         expect.objectContaining({ turnId: "turn-2" }),
@@ -218,6 +234,39 @@ describe("static repository payloads", () => {
     expect(await readFile(join(publicRoot, "payloads", "sessions", "index.json"), "utf8")).toBe(
       await readFile(join(generatedRoot, "payloads", "sessions", "index.json"), "utf8"),
     );
+    expect(await readFile(join(publicRoot, "payloads", "projects.json"), "utf8")).toBe(
+      await readFile(join(generatedRoot, "payloads", "projects.json"), "utf8"),
+    );
+  });
+
+  it("starts a new static chunk before the configured byte budget aggregates large turns", async () => {
+    const root = await temporaryRoot();
+    const conversation = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: join(root, "sessions", "modern.jsonl"),
+      scope: "active",
+      revision: "sha256:byte-bounded",
+    });
+    conversation.summary.parentThreadId = null;
+
+    const result = await writeStaticPayloads([conversation], {
+      generatedRoot: root,
+      chunkSize: 20,
+      maxChunkBytes: 1,
+    });
+    const navigator = JSON.parse(
+      await readFile(
+        join(root, "payloads", "sessions", conversation.summary.id, "navigator.json"),
+        "utf8",
+      ),
+    ) as {
+      chunkCount: number;
+      turnChunks: Record<string, number>;
+    };
+
+    expect(result.turnChunkCount).toBe(conversation.turns.length);
+    expect(navigator.chunkCount).toBe(conversation.turns.length);
+    expect(navigator.turnChunks).toEqual({ "turn-1": 0, "turn-2": 1 });
   });
 
   it("removes obsolete chunk files only after a smaller replacement payload succeeds", async () => {

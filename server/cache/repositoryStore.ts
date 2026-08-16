@@ -1,4 +1,4 @@
-import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
+import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
 import {
   conversationSummarySchema,
@@ -10,11 +10,11 @@ import {
   type JsonValue,
   type TurnNavigatorItem,
 } from "../../shared/types/conversation.ts";
+import type { ConversationListItem } from "../../shared/types/library.ts";
 import {
   inspectorRecordSchema,
   inspectorTargetSchema,
   sessionListQuerySchema,
-  sessionListResponseSchema,
   turnChunkQuerySchema,
   turnChunkSchema,
   turnNavigatorResponseSchema,
@@ -26,6 +26,7 @@ import {
   type TurnChunkQuery,
 } from "../../shared/types/repository.ts";
 import type { NormalizedRawEvent, NormalizedSession } from "../normalization/normalizeSession.ts";
+import { listCatalogSessions } from "./catalogStore.ts";
 
 const DEFAULT_PAGE_SIZE = 20;
 const RAW_EVENT_QUERY_SIZE = 400;
@@ -72,65 +73,13 @@ function cursorIndex(cursor: string | undefined): number {
   return value;
 }
 
-function likeValue(value: string): string {
-  return `%${value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`;
-}
-
-function sessionFilters(query: SessionListQuery): { sql: string; values: SQLInputValue[] } {
-  const clauses = ["scope = ?"];
-  const values: SQLInputValue[] = [query.scope];
-  if (query.query !== undefined && query.query.trim() !== "") {
-    clauses.push("(title LIKE ? ESCAPE '\\' OR preview LIKE ? ESCAPE '\\')");
-    const value = likeValue(query.query.trim());
-    values.push(value, value);
-  }
-  if (query.model !== undefined) {
-    clauses.push("EXISTS (SELECT 1 FROM json_each(models_json) WHERE value = ?)");
-    values.push(query.model);
-  }
-  if (query.cwd !== undefined) {
-    clauses.push("cwd = ?");
-    values.push(query.cwd);
-  }
-  if (query.tool !== undefined) {
-    clauses.push("EXISTS (SELECT 1 FROM json_each(tool_counts_json) WHERE key = ? AND value > 0)");
-    values.push(query.tool);
-  }
-  if (query.hasMedia !== undefined) {
-    clauses.push("has_media = ?");
-    values.push(query.hasMedia ? 1 : 0);
-  }
-  return { sql: clauses.join(" AND "), values };
-}
-
 export function listCachedSessions(
   database: DatabaseSync,
   input: SessionListQuery,
-): CursorPage<ReturnType<typeof conversationSummarySchema.parse>> {
+): CursorPage<ConversationListItem> {
   const query = sessionListQuerySchema.parse(input);
-  const limit = query.limit ?? 50;
-  const offset = cursorIndex(query.cursor);
-  const filters = sessionFilters(query);
-  const total = Number(
-    database
-      .prepare(`SELECT count(*) AS total FROM sessions WHERE ${filters.sql}`)
-      .get(...filters.values)?.["total"] ?? 0,
-  );
-  const items = database
-    .prepare(`
-      SELECT summary_json
-      FROM sessions
-      WHERE ${filters.sql}
-      ORDER BY updated_at DESC, id
-      LIMIT ? OFFSET ?
-    `)
-    .all(...filters.values, limit, offset)
-    .map((row) => conversationSummarySchema.parse(parsedJson(row["summary_json"])));
-  return sessionListResponseSchema.parse({
-    items,
-    nextCursor: offset + items.length < total ? String(offset + items.length) : null,
-    total,
-  });
+  cursorIndex(query.cursor);
+  return listCatalogSessions(database, query);
 }
 
 export function getCachedSessionSummary(
@@ -164,6 +113,10 @@ function proseLengthBucketFromLength(length: number): 1 | 2 | 3 | 4 {
 function proseLengthBucket(turn: ConversationTurn): 1 | 2 | 3 | 4 {
   return proseLengthBucketFromLength(
     (turn.userMessage?.sourceMarkdown.length ?? 0) +
+      (turn.steeringMessages ?? []).reduce(
+        (total, message) => total + message.sourceMarkdown.length,
+        0,
+      ) +
       turn.assistantMessages.reduce((total, message) => total + message.sourceMarkdown.length, 0),
   );
 }
@@ -174,7 +127,13 @@ export function createTurnNavigatorItem(turn: ConversationTurn): TurnNavigatorIt
     index: turn.index,
     userMessageId: turn.userMessage?.id ?? null,
     promptPreview: preview(turn.userMessage?.sourceMarkdown ?? "", 160),
-    assistantPreview: preview(turn.assistantMessages[0]?.sourceMarkdown ?? "", 320),
+    assistantPreview: preview(
+      turn.assistantMessages.find(({ id }) => id === turn.finalAssistantMessageId)
+        ?.sourceMarkdown ??
+        turn.assistantMessages.at(-1)?.sourceMarkdown ??
+        "",
+      320,
+    ),
     proseLengthBucket: proseLengthBucket(turn),
     createdAt: turn.userMessage?.createdAt ?? turn.startedAt,
   };
@@ -357,6 +316,7 @@ function turnEventIds(turn: ConversationTurn): string[] {
   return [
     ...new Set([
       ...(turn.userMessage?.rawEventIds ?? []),
+      ...(turn.steeringMessages ?? []).flatMap(({ rawEventIds }) => rawEventIds),
       ...turn.assistantMessages.flatMap(({ rawEventIds }) => rawEventIds),
       ...turn.activities.flatMap(({ rawEventIds }) => rawEventIds),
     ]),
@@ -477,9 +437,11 @@ export function getCachedInspector(
     );
   }
   if (target.type === "message") {
-    const message = [turn.userMessage, ...turn.assistantMessages].find(
-      (candidate) => candidate?.id === target.id,
-    );
+    const message = [
+      turn.userMessage,
+      ...(turn.steeringMessages ?? []),
+      ...turn.assistantMessages,
+    ].find((candidate) => candidate?.id === target.id);
     return message === undefined || message === null
       ? null
       : messageInspector(turn, message, rawEventsById(database, sessionId, message.rawEventIds));

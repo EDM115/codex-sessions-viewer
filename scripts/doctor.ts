@@ -23,7 +23,12 @@ async function main(): Promise<void> {
     `Metadata: session index ${report.metadata.sessionIndex ? "available" : "missing"}, global state ${report.metadata.globalState ? "available" : "missing"}, state database ${report.metadata.stateDatabase ? "available" : "missing"}.`,
   );
   console.log(
-    `Viewer cache: ${report.cache.status}; ${report.cache.sessionCount} sessions and ${report.cache.diagnosticCount} parser diagnostics.`,
+    `Normalized payloads: ${report.cache.status}; ${report.cache.sessionCount} sessions and ${report.cache.diagnosticCount} parser diagnostics.`,
+  );
+  console.log(
+    report.cache.catalog === null
+      ? "Viewer catalog: unavailable."
+      : `Viewer catalog: ${report.cache.catalog.rootCount} roots, ${report.cache.catalog.subagentCount} subagents, ${report.cache.catalog.auxiliaryCount} auxiliaries; ${report.cache.catalog.readyCount} ready, ${report.cache.catalog.coldCount} cold, ${report.cache.catalog.queuedCount} queued, ${report.cache.catalog.loadingCount} loading, ${report.cache.catalog.failedCount} failed.`,
   );
   console.log(
     `State snapshot: ${report.snapshotManifest}; offline output ${report.offlineOutput.status} (${report.offlineOutput.sessionCount} sessions, search ${report.offlineOutput.searchIndex}).`,

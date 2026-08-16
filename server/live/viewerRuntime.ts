@@ -122,7 +122,7 @@ export class LiveViewerRuntime {
       {
         database,
         reconciler,
-        repository: new LiveConversationRepository(database, bus),
+        repository: new LiveConversationRepository(database, bus, reconciler),
       },
       bus,
       options,
@@ -234,7 +234,7 @@ export class LiveViewerRuntime {
     return {
       database,
       reconciler,
-      repository: new LiveConversationRepository(database, this.#bus),
+      repository: new LiveConversationRepository(database, this.#bus, reconciler),
     };
   }
 

@@ -1,13 +1,27 @@
 <script setup lang="ts">
-import { PhArchive, PhImage, PhWarningCircle } from "@phosphor-icons/vue";
+import { PhArchive, PhImage, PhRobot, PhWarningCircle } from "@phosphor-icons/vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 
-import type { ConversationSummary } from "#shared/types/conversation.ts";
+import type { ConversationListItem } from "#shared/types/library.ts";
 
-defineProps<{
+import { useOptionalLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
+
+const props = defineProps<{
   groupLabel?: string;
   selected: boolean;
-  session: ConversationSummary;
+  item: ConversationListItem;
 }>();
+const workspace = useOptionalLibraryWorkspace();
+const row = ref<HTMLElement | null>(null);
+let stopObserving: () => void = () => undefined;
+
+onMounted(() => {
+  if (row.value !== null) {
+    stopObserving = workspace?.observeSession(row.value, props.item) ?? (() => undefined);
+  }
+});
+
+onBeforeUnmount(() => stopObserving());
 
 function destination(id: string): string {
   return `/session/${encodeURIComponent(id)}`;
@@ -15,39 +29,54 @@ function destination(id: string): string {
 </script>
 
 <template>
-  <div class="library-session-row">
+  <div ref="row" class="library-session-row">
     <p v-if="groupLabel" class="library-session-group">{{ groupLabel }}</p>
     <a
       class="library-session-item"
       :class="selected ? 'is-selected' : null"
-      :href="destination(session.id)"
+      :href="destination(item.summary.id)"
       :aria-current="selected ? 'page' : undefined"
     >
       <span class="library-session-item__heading">
-        <span class="library-session-item__title">{{ session.title }}</span>
+        <span class="library-session-item__title">{{ item.summary.title }}</span>
+        <PhRobot
+          v-if="item.kind === 'subagent'"
+          :size="14"
+          weight="regular"
+          aria-label="Subagent"
+        />
         <PhArchive
-          v-if="session.scope === 'archived'"
+          v-if="item.summary.scope === 'archived'"
           :size="14"
           weight="regular"
           aria-label="Archived"
         />
-        <PhImage v-if="session.hasMedia" :size="14" weight="regular" aria-label="Has media" />
+        <PhImage v-if="item.summary.hasMedia" :size="14" weight="regular" aria-label="Has media" />
         <PhWarningCircle
-          v-if="session.diagnosticCount > 0"
+          v-if="item.summary.diagnosticCount > 0"
           class="library-session-item__warning"
           :size="14"
           weight="regular"
-          :aria-label="`${session.diagnosticCount} diagnostics`"
+          :aria-label="`${item.summary.diagnosticCount} diagnostics`"
         />
       </span>
       <span class="library-session-item__preview">{{
-        session.preview || "No transcript preview"
+        item.summary.preview || "No transcript preview"
       }}</span>
       <span class="library-session-item__metadata tabular">
-        <span>{{ session.updatedAt.slice(0, 10) }}</span>
-        <span>{{ session.turnCount }} turns</span>
-        <span>{{ session.models[0] ?? "unknown model" }}</span>
+        <span>{{ item.summary.updatedAt.slice(0, 10) }}</span>
+        <span v-if="item.materialization !== 'ready'">{{ item.materialization }}</span>
+        <span v-else>{{ item.summary.turnCount }} turns</span>
+        <span>{{ item.summary.models[0] ?? "model pending" }}</span>
       </span>
     </a>
+    <button
+      v-if="item.materialization === 'failed'"
+      class="library-session-item__retry"
+      type="button"
+      @click="workspace?.retryPreparation(item.summary.id)"
+    >
+      Retry preparation
+    </button>
   </div>
 </template>

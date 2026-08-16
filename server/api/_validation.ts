@@ -9,7 +9,9 @@ import {
 import * as z from "zod";
 
 import {
+  deepSearchRequestSchema,
   inspectorTargetSchema,
+  preparationRequestSchema,
   type InspectorTarget,
   type SearchQuery,
   type SessionListQuery,
@@ -25,13 +27,23 @@ const idSchema = z.string().min(1).max(512);
 const sessionParamsSchema = z.strictObject({ id: idSchema });
 const assetParamsSchema = z.strictObject({ assetId: idSchema });
 const faviconParamsSchema = z.strictObject({ originKey: z.string().regex(/^[\w-]{1,2048}$/u) });
+const deepSearchParamsSchema = z.strictObject({ id: idSchema });
 const apiInspectorQuerySchema = inspectorTargetSchema;
 
-function validator<T>(schema: z.ZodType<T>): (value: unknown) => T | false {
+export function validator<T>(schema: z.ZodType<T>): (value: unknown) => T | false {
   return (value) => {
     const parsed = schema.safeParse(value);
     return parsed.success ? parsed.data : false;
   };
+}
+
+export const validatePreparationBody = validator(preparationRequestSchema);
+export const validateDeepSearchBody = validator(deepSearchRequestSchema);
+
+export async function deepSearchId(event: H3Event): Promise<string> {
+  return (
+    await getValidatedRouterParams(event, validator(deepSearchParamsSchema), { decode: true })
+  ).id;
 }
 
 export async function sessionId(event: H3Event): Promise<string> {

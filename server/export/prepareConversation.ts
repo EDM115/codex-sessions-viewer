@@ -65,6 +65,7 @@ function cloneConversationForRichContent(source: NormalizedSession): NormalizedS
     turns: source.turns.map((turn) => ({
       ...turn,
       userMessage: turn.userMessage === null ? null : { ...turn.userMessage },
+      steeringMessages: (turn.steeringMessages ?? []).map((message) => ({ ...message })),
       assistantMessages: turn.assistantMessages.map((message) => ({ ...message })),
       activities: turn.activities.map((activity) => ({ ...activity })),
     })),
@@ -86,9 +87,11 @@ export async function prepareConversationForExport(
   const discoveredFaviconOrigins = new Set<string>();
   const assetIds = new Set(references.map(({ assetId }) => assetId));
   for (const turn of conversation.turns) {
-    const messages = [turn.userMessage, ...turn.assistantMessages].filter(
-      (message) => message !== null,
-    );
+    const messages = [
+      turn.userMessage,
+      ...(turn.steeringMessages ?? []),
+      ...turn.assistantMessages,
+    ].filter((message) => message !== null);
     for (const message of messages) {
       if (isNormalizerPlaceholder(message.body, message.sourceMarkdown)) {
         // oxlint-disable-next-line no-await-in-loop -- Rich parsing is bounded and keeps message ordering deterministic.

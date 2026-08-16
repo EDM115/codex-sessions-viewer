@@ -133,6 +133,84 @@ describe("conversation timeline repository integration", () => {
     expect(timeline.revision.value).toBe("revision-2");
   });
 
+  it("applies a distant target atomically with a bounded window and exposes pending ownership", async () => {
+    let resolveTarget!: (chunk: TurnChunk) => void;
+    const calls: Array<{ targetTurnId?: string; limit?: number }> = [];
+    const repository = {
+      getTurns: async (_id: string, query: { targetTurnId?: string; limit?: number }) => {
+        calls.push(query);
+        return new Promise<TurnChunk>((resolve) => {
+          resolveTarget = resolve;
+        });
+      },
+    } as Pick<ConversationRepository, "getTurns">;
+    const timeline = useConversationTimeline({
+      sessionId: "session-1",
+      repository,
+      initialChunk: {
+        sessionId: "session-1",
+        turns: Array.from({ length: 20 }, (_, offset) => turn(40 + offset)),
+        previousCursor: "1",
+        nextCursor: null,
+        revision: "revision-1",
+      },
+    });
+    const lifecycle: string[] = [];
+
+    const target = timeline.loadTarget("turn-2", {
+      limit: 5,
+      beforeApply: () => lifecycle.push(`before:${timeline.turns.value[0]?.id}`),
+      afterApply: () => lifecycle.push(`after:${timeline.turns.value[0]?.id}`),
+    });
+    expect(timeline.pendingTurnId.value).toBe("turn-2");
+    expect(timeline.loadingTarget.value).toBe(true);
+    resolveTarget({
+      sessionId: "session-1",
+      turns: Array.from({ length: 5 }, (_, index) => turn(index)),
+      previousCursor: null,
+      nextCursor: "1",
+      revision: "revision-2",
+    });
+    await target;
+
+    expect(calls).toEqual([{ targetTurnId: "turn-2", limit: 5 }]);
+    expect(lifecycle).toEqual(["before:turn-40", "after:turn-0"]);
+    expect(timeline.turns.value.map(({ id }) => id)).toEqual([
+      "turn-0",
+      "turn-1",
+      "turn-2",
+      "turn-3",
+      "turn-4",
+    ]);
+    expect(timeline.pendingTurnId.value).toBeNull();
+  });
+
+  it("keeps the prior window and records the failed target marker", async () => {
+    const repository = {
+      getTurns: async () => {
+        throw new Error("Target payload unavailable");
+      },
+    } as Pick<ConversationRepository, "getTurns">;
+    const timeline = useConversationTimeline({
+      sessionId: "session-1",
+      repository,
+      initialChunk: {
+        sessionId: "session-1",
+        turns: [turn(40)],
+        previousCursor: "1",
+        nextCursor: null,
+        revision: "revision-1",
+      },
+    });
+
+    await timeline.loadTarget("turn-2", { limit: 5 });
+
+    expect(timeline.turns.value.map(({ id }) => id)).toEqual(["turn-40"]);
+    expect(timeline.targetErrorTurnId.value).toBe("turn-2");
+    expect(timeline.error.value).toBe("Target payload unavailable");
+    expect(timeline.pendingTurnId.value).toBeNull();
+  });
+
   it("captures a prepend anchor once, immediately before applying a deferred response", async () => {
     let resolveChunk!: (chunk: TurnChunk) => void;
     const repository = {

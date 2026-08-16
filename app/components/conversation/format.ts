@@ -65,7 +65,10 @@ function activityText(activity: ConversationActivity): string | null {
     return activity.summary.trim() === "" ? null : `Reasoning\n${activity.summary}`;
   }
   if (activity.kind === "tool") {
-    const label = `${activity.namespace === null ? "tool" : activity.namespace}/${activity.name}`;
+    const label =
+      activity.name === "exec_command"
+        ? "Ran command"
+        : `${activity.namespace === null ? "tool" : activity.namespace}/${activity.name}`;
     return [
       `${label} · ${activity.status}`,
       `Input\n${formattedJson(activity.input)}`,
@@ -80,6 +83,21 @@ function activityText(activity: ConversationActivity): string | null {
   }
   if (activity.kind === "patch") {
     return `Patch · ${activity.status}\n${activity.patch}`;
+  }
+  if (activity.kind === "file_change") {
+    return activity.files
+      .map((file) => {
+        const verb =
+          file.change === "add"
+            ? "Created file"
+            : file.change === "delete"
+              ? "Deleted file"
+              : file.change === "move"
+                ? "Moved file"
+                : "Edited file";
+        return `${verb} · ${file.path} (+${file.addedLines} −${file.removedLines})`;
+      })
+      .join("\n");
   }
   if (activity.kind === "plan") {
     return `Plan${activity.title === null ? "" : ` · ${activity.title}`}\n${activity.items.map(({ status, step }) => `[${status}] ${step}`).join("\n")}`;
@@ -102,10 +120,36 @@ function activityText(activity: ConversationActivity): string | null {
 }
 
 export function agentWorkText(turn: ConversationTurn): string {
-  return [
-    ...turn.activities.map(activityText),
-    ...turn.assistantMessages.map(({ sourceMarkdown }) => sourceMarkdown),
-  ]
+  const finalAssistantId =
+    turn.finalAssistantMessageId ?? turn.assistantMessages.at(-1)?.id ?? null;
+  const messages = new Map(
+    [turn.userMessage, ...(turn.steeringMessages ?? []), ...turn.assistantMessages]
+      .filter((message) => message !== null)
+      .map((message) => [message.id, message]),
+  );
+  const activities = new Map(turn.activities.map((activity) => [activity.id, activity]));
+  const order = turn.entryOrder ?? [
+    ...(turn.userMessage === null ? [] : [{ kind: "message" as const, id: turn.userMessage.id }]),
+    ...(turn.steeringMessages ?? []).map(({ id }) => ({ kind: "message" as const, id })),
+    ...turn.activities.map(({ id }) => ({ kind: "activity" as const, id })),
+    ...turn.assistantMessages.map(({ id }) => ({ kind: "message" as const, id })),
+  ];
+  return order
+    .flatMap((reference) => {
+      if (reference.kind === "activity") {
+        const text = activities.get(reference.id);
+        return text === undefined ? [] : [activityText(text)];
+      }
+      if (reference.id === turn.userMessage?.id || reference.id === finalAssistantId) {
+        return [];
+      }
+      const message = messages.get(reference.id);
+      return message === undefined
+        ? []
+        : [
+            `${message.role === "user" ? "You (steering)" : "Assistant (progress)"}\n${message.sourceMarkdown}`,
+          ];
+    })
     .filter((value): value is string => value !== null && value.trim() !== "")
     .join("\n\n");
 }

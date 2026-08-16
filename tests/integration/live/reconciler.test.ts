@@ -67,6 +67,31 @@ describe("live reconciliation", () => {
     });
   });
 
+  it("publishes the metadata catalog without waiting for the watcher initial scan", async () => {
+    const { codexHome, cacheDir } = await createCodexHome();
+    const database = openCacheDatabase(":memory:");
+    const closeWatcher = vi.fn(async () => undefined);
+    const reconciler = new LiveReconciler({
+      bus: new InvalidationBus(),
+      cacheDir,
+      codexHome,
+      database,
+      reconciliationIntervalMs: 60_000,
+      watch: () => ({ ready: new Promise<void>(() => undefined), close: closeWatcher }),
+    });
+
+    try {
+      await expect(reconciler.start()).resolves.toBeUndefined();
+      expect(database.prepare("SELECT count(*) AS count FROM session_catalog").get()).toEqual({
+        count: 1,
+      });
+    } finally {
+      await reconciler.close();
+      database.close();
+    }
+    expect(closeWatcher).toHaveBeenCalledOnce();
+  });
+
   it("updates only the appended session and publishes its changed turn IDs", async () => {
     const { codexHome, rollout, cacheDir } = await createCodexHome();
     const database = openCacheDatabase(":memory:");
@@ -88,8 +113,14 @@ describe("live reconciliation", () => {
 
     try {
       await reconciler.start();
-      const row = database.prepare("SELECT id FROM sessions").get();
+      const row = database.prepare("SELECT id FROM session_catalog").get();
       const sessionId = String(row?.["id"]);
+      expect(database.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({
+        count: 0,
+      });
+      await expect(reconciler.prepareSessions([sessionId])).resolves.toEqual([
+        { id: sessionId, state: "ready", error: null },
+      ]);
       const before = getCachedSession(database, sessionId);
       bus.subscribe((event) => events.push(event));
 
@@ -141,8 +172,15 @@ describe("live reconciliation", () => {
 
     try {
       await reconciler.start();
-      expect(readJsonl).toHaveBeenCalledOnce();
+      expect(readJsonl).not.toHaveBeenCalled();
       await reconciler.reconcileNow("test");
+      expect(readJsonl).not.toHaveBeenCalled();
+      const id = String(database.prepare("SELECT id FROM session_catalog").get()?.["id"]);
+      await expect(reconciler.prepareSessions([id])).resolves.toEqual([
+        { id, state: "ready", error: null },
+      ]);
+      expect(readJsonl).toHaveBeenCalledOnce();
+      await reconciler.reconcileNow("unchanged");
       expect(readJsonl).toHaveBeenCalledOnce();
     } finally {
       await reconciler.close();

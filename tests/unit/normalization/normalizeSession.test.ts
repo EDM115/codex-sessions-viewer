@@ -314,7 +314,7 @@ describe("session normalization", () => {
     ]);
   });
 
-  it("normalizes an in-flight steering message as a distinct viewer turn with shared source provenance", () => {
+  it("keeps an in-flight steering message inside the active source turn", () => {
     const values = [
       {
         timestamp: "2026-01-01T00:00:00.000Z",
@@ -367,13 +367,116 @@ describe("session normalization", () => {
         id: "turn-running",
         sourceTurnId: "turn-running",
         userMessage: expect.objectContaining({ sourceMarkdown: "initial prompt" }),
-      }),
-      expect.objectContaining({
-        id: "turn-running:raw-400",
-        sourceTurnId: "turn-running",
-        userMessage: expect.objectContaining({ sourceMarkdown: "steer the running model" }),
+        steeringMessages: [expect.objectContaining({ sourceMarkdown: "steer the running model" })],
+        entryOrder: [
+          { kind: "message", id: "message-raw-200" },
+          { kind: "activity", id: "reasoning-raw-300" },
+          { kind: "message", id: "message-raw-400" },
+        ],
       }),
     ]);
+  });
+
+  it("preserves Markdown reasoning entries, steering, progress, tools, and the final response in source order", () => {
+    const result = normalizeSession({
+      sourcePath: "ordered.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: jsonlRecords([
+        {
+          timestamp: "2026-01-01T00:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "turn-ordered" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:02.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Build it" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:03.000Z",
+          type: "response_item",
+          payload: {
+            type: "reasoning",
+            id: "reasoning-source",
+            summary: [
+              { type: "summary_text", text: "**Planning** the implementation" },
+              { type: "summary_text", text: "**Checking** the boundary" },
+            ],
+            internal_chat_message_metadata_passthrough: { turn_id: "turn-ordered" },
+          },
+        },
+        {
+          timestamp: "2026-01-01T00:00:04.000Z",
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "I am checking the files.",
+            phase: "commentary",
+          },
+        },
+        {
+          timestamp: "2026-01-01T00:00:05.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "Please also cover Windows." },
+        },
+        {
+          timestamp: "2026-01-01T00:00:06.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            id: "tool-source",
+            call_id: "call-1",
+            name: "exec_command",
+            arguments: '{"cmd":"pnpm test"}',
+            internal_chat_message_metadata_passthrough: { turn_id: "turn-ordered" },
+          },
+        },
+        {
+          timestamp: "2026-01-01T00:00:07.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            id: "tool-output",
+            call_id: "call-1",
+            output: "passed",
+            internal_chat_message_metadata_passthrough: { turn_id: "turn-ordered" },
+          },
+        },
+        {
+          timestamp: "2026-01-01T00:00:08.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "Done.", phase: "final" },
+        },
+        {
+          timestamp: "2026-01-01T00:00:09.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "turn-ordered" },
+        },
+      ]),
+    });
+
+    const turn = result.session?.turns[0];
+    expect(turn?.steeringMessages?.map(({ sourceMarkdown }) => sourceMarkdown)).toEqual([
+      "Please also cover Windows.",
+    ]);
+    expect(turn?.activities.filter(({ kind }) => kind === "reasoning")).toHaveLength(2);
+    expect(turn?.entryOrder).toEqual([
+      { kind: "message", id: "message-raw-200" },
+      { kind: "activity", id: "reasoning-raw-300-0" },
+      { kind: "activity", id: "reasoning-raw-300-1" },
+      { kind: "message", id: "message-raw-400" },
+      { kind: "message", id: "message-raw-500" },
+      { kind: "activity", id: "tool-call-1" },
+      { kind: "message", id: "message-raw-800" },
+    ]);
+    expect(turn?.finalAssistantMessageId).toBe("message-raw-800");
   });
 
   it("coalesces both web-search representations without losing completion details", () => {

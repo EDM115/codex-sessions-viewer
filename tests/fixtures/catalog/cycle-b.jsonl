@@ -1,0 +1,1 @@
+{"timestamp":"2026-08-13T08:06:00.000Z","type":"session_meta","payload":{"id":"cycle-b","timestamp":"2026-08-13T08:06:00.000Z","cwd":"C:\\Cycle\\b","source":{"subagent":{"thread_spawn":{"parent_thread_id":"cycle-a","depth":2,"agent_path":"/root/b","agent_nickname":"B"}}}}}

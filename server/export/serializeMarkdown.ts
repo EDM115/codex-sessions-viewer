@@ -124,6 +124,16 @@ function serializeActivity(activity: ConversationActivity): string | null {
           : activity.affectedPaths.map((path) => `- \`${path.replaceAll("`", "\\`")}\``).join("\n"),
         activity.patch === "" ? null : fenced(activity.patch, "diff"),
       ]);
+    case "file_change":
+      return activity.files
+        .map((file) =>
+          joinSections([
+            `#### ${file.change === "add" ? "Created" : file.change === "delete" ? "Deleted" : file.change === "move" ? "Moved" : "Edited"} file — ${file.path}`,
+            `+${file.addedLines} −${file.removedLines}`,
+            file.diff === null ? null : fenced(file.diff, "diff"),
+          ]),
+        )
+        .join("\n\n");
     case "plan":
       return joinSections([
         `#### Plan${activity.title === null ? "" : ` — ${activity.title}`}`,
@@ -146,41 +156,45 @@ function serializeActivity(activity: ConversationActivity): string | null {
   }
 }
 
-interface AgentWorkItem {
-  timestamp: string | null;
-  order: number;
-  markdown: string | null;
-}
-
-function compareWorkItems(left: AgentWorkItem, right: AgentWorkItem): number {
-  if (left.timestamp === null && right.timestamp !== null) {
-    return 1;
-  }
-  if (left.timestamp !== null && right.timestamp === null) {
-    return -1;
-  }
-  const byTimestamp = (left.timestamp ?? "").localeCompare(right.timestamp ?? "");
-  return byTimestamp === 0 ? left.order - right.order : byTimestamp;
-}
-
 export function serializeAgentWork(turn: ConversationTurn): string {
-  const items: AgentWorkItem[] = [
-    ...turn.activities.map((activity, order) => ({
-      timestamp: activity.createdAt,
-      order,
-      markdown: serializeActivity(activity),
-    })),
-    ...turn.assistantMessages.map((message, index) => ({
-      timestamp: message.createdAt,
-      order: turn.activities.length + index,
-      markdown: serializeAssistantMessage(message),
-    })),
+  const finalAssistantId =
+    turn.finalAssistantMessageId ?? turn.assistantMessages.at(-1)?.id ?? null;
+  const messages = new Map(
+    [turn.userMessage, ...(turn.steeringMessages ?? []), ...turn.assistantMessages]
+      .filter((message) => message !== null)
+      .map((message) => [message.id, message]),
+  );
+  const activities = new Map(turn.activities.map((activity) => [activity.id, activity]));
+  const order = turn.entryOrder ?? [
+    ...(turn.userMessage === null ? [] : [{ kind: "message" as const, id: turn.userMessage.id }]),
+    ...(turn.steeringMessages ?? []).map(({ id }) => ({ kind: "message" as const, id })),
+    ...turn.activities.map(({ id }) => ({ kind: "activity" as const, id })),
+    ...turn.assistantMessages.map(({ id }) => ({ kind: "message" as const, id })),
   ];
-  return items
-    .toSorted(compareWorkItems)
-    .map((item) => item.markdown)
+  return order
+    .map((reference) => {
+      if (reference.kind === "activity") {
+        return serializeActivity(activities.get(reference.id)!);
+      }
+      if (reference.id === turn.userMessage?.id || reference.id === finalAssistantId) {
+        return null;
+      }
+      const message = messages.get(reference.id);
+      if (message === undefined) {
+        return null;
+      }
+      return `#### ${message.role === "user" ? "You — steering" : "Assistant — progress"}\n\n${serializeAssistantMessage(message)}`;
+    })
     .filter((markdown): markdown is string => markdown !== null && markdown !== "")
     .join("\n\n");
+}
+
+export function finalAssistantMessage(turn: ConversationTurn): ConversationMessage | null {
+  return (
+    turn.assistantMessages.find(({ id }) => id === turn.finalAssistantMessageId) ??
+    turn.assistantMessages.at(-1) ??
+    null
+  );
 }
 
 function conversationFrontmatter(conversation: NormalizedSession): string {
@@ -207,12 +221,24 @@ export function serializeConversation(conversation: NormalizedSession): string {
     const attachments = turn.activities.filter(
       (activity): activity is MediaActivity => activity.kind === "media",
     );
+    const work = serializeAgentWork(turn);
+    const workDuration =
+      turn.durationMs === null
+        ? null
+        : turn.durationMs < 60_000
+          ? duration(turn.durationMs)
+          : `${Math.floor(Math.round(turn.durationMs / 1_000) / 60)}m ${Math.round(turn.durationMs / 1_000) % 60}s`;
     return joinSections([
       `## Turn ${turn.index + 1}`,
       turn.userMessage === null
         ? null
         : `### User prompt\n\n${serializeUserPrompt(turn.userMessage, attachments)}`,
-      `### Agent work\n\n${serializeAgentWork(turn)}`,
+      work === ""
+        ? null
+        : `### ${workDuration === null ? "Worked" : `Worked for ${workDuration}`}\n\n${work}`,
+      finalAssistantMessage(turn) === null
+        ? null
+        : `### Assistant response\n\n${serializeAssistantMessage(finalAssistantMessage(turn)!)}`,
     ]);
   });
   return `${conversationFrontmatter(conversation)}\n\n# ${conversation.summary.title}\n\n${turns.join("\n\n")}\n`;

@@ -7,7 +7,6 @@ import * as z from "zod";
 import {
   conversationSummarySchema,
   sha256Schema,
-  turnNavigatorItemSchema,
   type ConversationTurn,
 } from "../../shared/types/conversation.ts";
 import { viewerDiagnosticSchema } from "../../shared/types/diagnostics.ts";
@@ -15,6 +14,8 @@ import { resolvedAssetSchema, turnChunkSchema } from "../../shared/types/reposit
 import {
   hydrateStaticInspectorRecords,
   staticInspectorChunkSchema,
+  staticLibraryPayloadSchema,
+  staticNavigatorPayloadSchema,
 } from "../../shared/types/staticPayloads.ts";
 import { assertSafeOutputComponent } from "./outputFiles.ts";
 
@@ -31,14 +32,6 @@ const sessionIndexSchema = z.strictObject({
 const sessionSummarySchema = z.strictObject({
   summary: conversationSummarySchema,
   diagnostics: z.array(viewerDiagnosticSchema),
-});
-
-const navigatorSchema = z.strictObject({
-  sessionId: z.string().min(1),
-  revision: z.string().min(1),
-  chunkSize: z.int().min(1).max(200),
-  items: z.array(turnNavigatorItemSchema),
-  inspectorChunks: z.record(z.string(), z.int().nonnegative()),
 });
 
 const assetManifestSchema = z.strictObject({
@@ -179,6 +172,7 @@ function expectedInspectorTargets(turns: readonly ConversationTurn[]): string[] 
   return turns.flatMap((turn) => [
     inspectorTargetKey("turn", turn.id),
     ...(turn.userMessage === null ? [] : [inspectorTargetKey("message", turn.userMessage.id)]),
+    ...(turn.steeringMessages ?? []).map((message) => inspectorTargetKey("message", message.id)),
     ...turn.assistantMessages.map((message) => inspectorTargetKey("message", message.id)),
     ...turn.activities.map((activity) => inspectorTargetKey("activity", activity.id)),
   ]);
@@ -197,6 +191,96 @@ function assertEqualOrdered(
 ): void {
   if (left.length !== right.length || left.some((value, index) => value !== right[index])) {
     throw new Error(message);
+  }
+}
+
+function assertTurnOrdering(turn: ConversationTurn, path: string): void {
+  const expectedFinal = turn.assistantMessages.at(-1)?.id ?? null;
+  if (turn.finalAssistantMessageId !== expectedFinal) {
+    throw new Error(`Turn final assistant ID does not match its last response: ${path}`);
+  }
+  if (turn.entryOrder === undefined) {
+    throw new Error(`Turn is missing chronological entry order: ${path}`);
+  }
+  const expectedEntries = [
+    ...(turn.userMessage === null ? [] : [`message:${turn.userMessage.id}`]),
+    ...(turn.steeringMessages ?? []).map(({ id }) => `message:${id}`),
+    ...turn.assistantMessages.map(({ id }) => `message:${id}`),
+    ...turn.activities.map(({ id }) => `activity:${id}`),
+  ].toSorted();
+  const actualEntries = turn.entryOrder.map(({ kind, id }) => `${kind}:${id}`);
+  assertUnique(actualEntries, `turn entry references in ${path}`);
+  assertEqualOrdered(
+    actualEntries.toSorted(),
+    expectedEntries,
+    `Turn chronological entry order does not match its messages and activities: ${path}`,
+  );
+}
+
+function assertLibraryTopology(
+  sessions: readonly z.infer<typeof conversationSummarySchema>[],
+  library: z.infer<typeof staticLibraryPayloadSchema>,
+): void {
+  const summaries = new Map(sessions.map((summary) => [summary.id, summary]));
+  const projectIds = new Set(library.projects.map(({ id }) => id));
+  assertEqualOrdered(
+    Object.keys(library.entries).toSorted(),
+    [...summaries.keys()].toSorted(),
+    "Generated project payload does not match the public session index.",
+  );
+  for (const summary of sessions) {
+    if (
+      summary.models.length > 0 &&
+      summary.models.every((model) => model === "codex-auto-review")
+    ) {
+      throw new Error(
+        `Auxiliary guardian session crossed the public output boundary: ${summary.id}`,
+      );
+    }
+    const entry = library.entries[summary.id]!;
+    if (!projectIds.has(entry.projectId)) {
+      throw new Error(`Session references a missing generated project: ${summary.id}`);
+    }
+    if (
+      entry.parentThreadId !== summary.parentThreadId ||
+      entry.kind !== (summary.parentThreadId === null ? "root" : "subagent") ||
+      entry.childCount !== summary.childThreadIds.length
+    ) {
+      throw new Error(
+        `Generated project topology does not match the session summary: ${summary.id}`,
+      );
+    }
+    if (summary.parentThreadId !== null) {
+      const parent = summaries.get(summary.parentThreadId);
+      if (parent === undefined || !parent.childThreadIds.includes(summary.id)) {
+        throw new Error(`Generated subagent is missing its parent edge: ${summary.id}`);
+      }
+    }
+    for (const childId of summary.childThreadIds) {
+      if (summaries.get(childId)?.parentThreadId !== summary.id) {
+        throw new Error(`Generated session contains an inconsistent child edge: ${summary.id}`);
+      }
+    }
+    const visited = new Set([summary.id]);
+    let ancestorId = summary.parentThreadId;
+    while (ancestorId !== null) {
+      if (visited.has(ancestorId)) {
+        throw new Error(`Generated subagent topology contains a cycle: ${summary.id}`);
+      }
+      visited.add(ancestorId);
+      ancestorId = summaries.get(ancestorId)?.parentThreadId ?? null;
+    }
+  }
+  for (const project of library.projects) {
+    const roots = sessions.filter(
+      (summary) =>
+        summary.parentThreadId === null && library.entries[summary.id]?.projectId === project.id,
+    );
+    const activeCount = roots.filter(({ scope }) => scope === "active").length;
+    const archivedCount = roots.filter(({ scope }) => scope === "archived").length;
+    if (project.activeCount !== activeCount || project.archivedCount !== archivedCount) {
+      throw new Error(`Generated project counts do not match root conversations: ${project.id}`);
+    }
   }
 }
 
@@ -219,7 +303,11 @@ async function verifySession(
   if (summaryPayload.diagnostics.length !== indexedSummary.diagnosticCount) {
     throw new Error(`Session diagnostics do not match the indexed diagnostic count: ${id}`);
   }
-  const navigator = await parseJson(publicRoot, `${base}/navigator.json`, navigatorSchema);
+  const navigator = await parseJson(
+    publicRoot,
+    `${base}/navigator.json`,
+    staticNavigatorPayloadSchema,
+  );
   if (navigator.sessionId !== id || navigator.revision !== indexedSummary.revision) {
     throw new Error(`Session navigator does not match the indexed session: ${id}`);
   }
@@ -235,8 +323,22 @@ async function verifySession(
       throw new Error(`Session navigator contains a non-contiguous turn index: ${id}`);
     }
   }
-  const chunkCount = Math.ceil(navigator.items.length / navigator.chunkSize);
+  const chunkCount = navigator.chunkCount;
+  const expectedNavigatorTurnIds = navigator.items.map(({ turnId }) => turnId);
+  assertEqualOrdered(
+    Object.keys(navigator.turnChunks).toSorted(),
+    [...expectedNavigatorTurnIds].toSorted(),
+    `Navigator turn chunk index does not match its turns: ${id}`,
+  );
+  if (
+    (navigator.items.length === 0 && chunkCount !== 0) ||
+    (navigator.items.length > 0 && chunkCount < 1) ||
+    Object.values(navigator.turnChunks).some((chunk) => chunk >= chunkCount)
+  ) {
+    throw new Error(`Navigator turn chunk index is out of range: ${id}`);
+  }
   const chunkTurnIds: string[] = [];
+  const expectedTurnChunks: Record<string, number> = {};
   const expectedInspectorChunks: Record<string, number> = {};
   for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
     const turnPath = `${base}/turn-${chunkIndex}.json`;
@@ -264,7 +366,9 @@ async function verifySession(
       if (turn.sessionId !== id) {
         throw new Error(`Turn chunk contains a turn from another session: ${turnPath}`);
       }
+      assertTurnOrdering(turn, turnPath);
       chunkTurnIds.push(turn.id);
+      expectedTurnChunks[turn.id] = chunkIndex;
     }
     if (inspectorChunk.sessionId !== id || inspectorChunk.revision !== indexedSummary.revision) {
       throw new Error(`Inspector chunk metadata does not match the session: ${inspectorPath}`);
@@ -309,6 +413,15 @@ async function verifySession(
     chunkTurnIds,
     navigator.items.map(({ turnId }) => turnId),
     `Turn chunks do not match the navigator: ${id}`,
+  );
+  assertEqualOrdered(
+    Object.entries(navigator.turnChunks)
+      .map(([turnId, chunk]) => `${turnId}:${chunk}`)
+      .toSorted(),
+    Object.entries(expectedTurnChunks)
+      .map(([turnId, chunk]) => `${turnId}:${chunk}`)
+      .toSorted(),
+    `Navigator turn chunk index does not match turn payloads: ${id}`,
   );
   assertEqualOrdered(
     Object.entries(navigator.inspectorChunks)
@@ -428,6 +541,7 @@ export async function verifyGeneratedOutput(
     "payloads/sessions/index.json",
     sessionIndexSchema,
   );
+  const library = await parseJson(publicRoot, "payloads/projects.json", staticLibraryPayloadSchema);
   const assetManifest = await parseJson(publicRoot, "payloads/assets.json", assetManifestSchema);
   const faviconManifest = await parseJson(
     publicRoot,
@@ -438,6 +552,7 @@ export async function verifyGeneratedOutput(
     sessionIndex.sessions.map(({ id }) => id),
     "session IDs in the session index",
   );
+  assertLibraryTopology(sessionIndex.sessions, library);
   let turnCount = 0;
   for (const session of sessionIndex.sessions) {
     // oxlint-disable-next-line no-await-in-loop -- Each session is fully checked and released before the next one.

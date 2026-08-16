@@ -1,4 +1,4 @@
-export const CACHE_SCHEMA_VERSION = 1;
+export const CACHE_SCHEMA_VERSION = 2;
 
 export const INITIAL_CACHE_SCHEMA_SQL = `
   CREATE TABLE source_files (
@@ -161,4 +161,81 @@ export const INITIAL_CACHE_SCHEMA_SQL = `
   CREATE INDEX activities_turn_created_idx ON activities(turn_id, created_at, id);
   CREATE INDEX raw_events_session_order_idx ON raw_events(session_id, source_order);
   CREATE INDEX diagnostics_session_idx ON diagnostics(session_id);
+`;
+
+export const SEED_CATALOG_FROM_SESSIONS_SQL = `
+  INSERT OR IGNORE INTO session_catalog (
+    id, source_path, scope, project_id, project_name, project_source, project_hint,
+    session_kind, materialization_state, title, created_at, updated_at, cwd,
+    git_origin_url, parent_thread_id, agent_path, agent_nickname, agent_depth,
+    child_count, source_size, source_mtime_ms, source_device, source_inode,
+    source_revision, error, summary_json
+  )
+  SELECT
+    sessions.id,
+    sessions.source_path,
+    sessions.scope,
+    'none',
+    'No project',
+    'none',
+    NULL,
+    CASE WHEN sessions.parent_thread_id IS NULL THEN 'root' ELSE 'subagent' END,
+    'ready',
+    sessions.title,
+    sessions.created_at,
+    sessions.updated_at,
+    sessions.cwd,
+    sessions.git_origin_url,
+    sessions.parent_thread_id,
+    NULL,
+    NULL,
+    CASE WHEN sessions.parent_thread_id IS NULL THEN NULL ELSE 1 END,
+    json_array_length(sessions.child_thread_ids_json),
+    source_files.size,
+    source_files.mtime_ms,
+    source_files.device,
+    source_files.inode,
+    'catalog:' || source_files.device || ':' || source_files.inode || ':' || source_files.size || ':' || CAST(source_files.mtime_ms AS INTEGER),
+    NULL,
+    sessions.summary_json
+  FROM sessions
+  INNER JOIN source_files ON source_files.path = sessions.source_path;
+`;
+
+export const CATALOG_CACHE_SCHEMA_SQL = `
+  CREATE TABLE session_catalog (
+    id TEXT PRIMARY KEY,
+    source_path TEXT NOT NULL UNIQUE,
+    scope TEXT NOT NULL CHECK (scope IN ('active', 'archived')),
+    project_id TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    project_source TEXT NOT NULL CHECK (project_source IN ('codex', 'git', 'cwd', 'none')),
+    project_hint TEXT,
+    session_kind TEXT NOT NULL CHECK (session_kind IN ('root', 'subagent', 'auxiliary')),
+    materialization_state TEXT NOT NULL CHECK (materialization_state IN ('cold', 'queued', 'loading', 'ready', 'failed')),
+    title TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    cwd TEXT,
+    git_origin_url TEXT,
+    parent_thread_id TEXT,
+    agent_path TEXT,
+    agent_nickname TEXT,
+    agent_depth INTEGER CHECK (agent_depth IS NULL OR agent_depth >= 0),
+    child_count INTEGER NOT NULL CHECK (child_count >= 0),
+    source_size INTEGER NOT NULL CHECK (source_size >= 0),
+    source_mtime_ms REAL NOT NULL CHECK (source_mtime_ms >= 0),
+    source_device TEXT,
+    source_inode TEXT,
+    source_revision TEXT NOT NULL,
+    error TEXT,
+    summary_json TEXT NOT NULL
+  ) STRICT;
+
+  CREATE INDEX session_catalog_scope_project_root_idx ON session_catalog(scope, project_id, session_kind, updated_at DESC, id);
+  CREATE INDEX session_catalog_parent_idx ON session_catalog(parent_thread_id, updated_at DESC, id);
+  CREATE INDEX session_catalog_materialization_idx ON session_catalog(materialization_state, updated_at DESC, id);
+  CREATE INDEX session_catalog_project_idx ON session_catalog(project_name COLLATE NOCASE, project_id);
+
+  ${SEED_CATALOG_FROM_SESSIONS_SQL}
 `;

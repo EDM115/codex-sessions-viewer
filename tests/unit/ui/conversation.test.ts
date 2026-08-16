@@ -269,7 +269,7 @@ describe("conversation presentation", () => {
     expect(text).toContain("Status · succeeded");
     expect(text).toContain("Conversation compacted\nEarlier context");
     expect(text).toContain("Media · file\nreport.txt");
-    expect(text).toContain("The parser is ready.");
+    expect(text).not.toContain("The parser is ready.");
     expect(text).not.toContain("future");
   });
 
@@ -289,13 +289,16 @@ describe("conversation presentation", () => {
     expect(wrapper.get(".conversation-message--assistant").text()).toContain(
       "The parser is ready.",
     );
-    expect(wrapper.get('[data-activity-group="reasoning"]').attributes()).toHaveProperty("open");
-    expect(wrapper.get('[data-activity-group="work"]').attributes()).not.toHaveProperty("open");
+    expect(wrapper.findAll(".conversation-message--assistant")).toHaveLength(1);
+    expect(wrapper.get('[data-activity-group="worked"]').attributes()).not.toHaveProperty("open");
+    expect(wrapper.get('[data-activity-group="worked"] summary').text()).toContain(
+      "Worked for 3.0 s",
+    );
     expect(wrapper.text()).not.toContain("filesystem/read_file");
     expect(wrapper.text()).not.toContain("Access denied");
     expect(wrapper.text()).not.toContain("protocol-only");
 
-    const work = wrapper.get('[data-activity-group="work"]');
+    const work = wrapper.get('[data-activity-group="worked"]');
     (work.element as HTMLDetailsElement).open = true;
     await work.trigger("toggle");
     expect(wrapper.text()).toContain("filesystem/read_file");
@@ -359,6 +362,66 @@ describe("conversation presentation", () => {
     await first.trigger("keydown", { key: "End" });
     expect(wrapper.emitted("select")?.at(-1)).toEqual(["turn-2"]);
     expect(document.activeElement).toBe(wrapper.get('button[data-turn-id="turn-2"]').element);
+    wrapper.unmount();
+  });
+
+  it("centers the minimap preview on the active marker and updates it after scroll", async () => {
+    const items: TurnNavigatorItem[] = [
+      {
+        turnId: "turn-0",
+        index: 0,
+        userMessageId: "user-0",
+        promptPreview: "Prompt zero",
+        assistantPreview: "Assistant zero",
+        proseLengthBucket: 2,
+        createdAt: null,
+      },
+    ];
+    const wrapper = mount(TurnMinimap, {
+      attachTo: document.body,
+      props: { items, currentTurnId: "turn-0" },
+    });
+    const nav = wrapper.get(".turn-minimap").element as HTMLElement;
+    const marker = wrapper.get(".turn-minimap__marker").element as HTMLElement;
+    let markerTop = 172;
+    vi.spyOn(nav, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 80,
+      bottom: 400,
+      left: 0,
+      width: 80,
+      height: 400,
+      toJSON: () => undefined,
+    });
+    vi.spyOn(marker, "getBoundingClientRect").mockImplementation(() => ({
+      x: 50,
+      y: markerTop,
+      top: markerTop,
+      right: 80,
+      bottom: markerTop + 2,
+      left: 50,
+      width: 30,
+      height: 2,
+      toJSON: () => undefined,
+    }));
+
+    await wrapper.get('button[data-turn-id="turn-0"]').trigger("focus");
+    await wrapper.vm.$nextTick();
+    expect(
+      (wrapper.get('[role="tooltip"]').element as HTMLElement).style.getPropertyValue(
+        "--turn-preview-center",
+      ),
+    ).toBe("173px");
+
+    markerTop = 232;
+    await wrapper.get(".turn-minimap__scroll").trigger("scroll");
+    expect(
+      (wrapper.get('[role="tooltip"]').element as HTMLElement).style.getPropertyValue(
+        "--turn-preview-center",
+      ),
+    ).toBe("233px");
     wrapper.unmount();
   });
 

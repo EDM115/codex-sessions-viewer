@@ -2,15 +2,18 @@
 import { PhFunnel, PhX } from "@phosphor-icons/vue";
 import { computed } from "vue";
 
-import type { ConversationScope, ConversationSummary } from "#shared/types/conversation.ts";
+import type { ConversationScope } from "#shared/types/conversation.ts";
+import type { ConversationListItem } from "#shared/types/library.ts";
 import type { SearchHit } from "#shared/types/repository.ts";
 
+import { useOptionalLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
 import UiButton from "../ui/UiButton.vue";
 import UiDisclosure from "../ui/UiDisclosure.vue";
 import UiIconButton from "../ui/UiIconButton.vue";
 import UiTabs, { type UiTabItem } from "../ui/UiTabs.vue";
 import UiTextField from "../ui/UiTextField.vue";
 import LibraryEmptyState from "./LibraryEmptyState.vue";
+import LibraryProjectTree from "./LibraryProjectTree.vue";
 import LibrarySearchResults from "./LibrarySearchResults.vue";
 import LibrarySessionList from "./LibrarySessionList.vue";
 import LibrarySkeleton from "./LibrarySkeleton.vue";
@@ -22,7 +25,7 @@ const props = withDefaults(
     error: string | null;
     hasMedia: boolean;
     hits: SearchHit[];
-    items: ConversationSummary[];
+    items: ConversationListItem[];
     loading: boolean;
     mode?: "live" | "static";
     model: string;
@@ -48,6 +51,15 @@ const emit = defineEmits<{
   "update:scope": [value: ConversationScope];
   "update:tool": [value: string];
 }>();
+const workspace = useOptionalLibraryWorkspace();
+const deepSearchJob = computed(() => workspace?.deepSearchJob.value ?? null);
+const canStartDeepSearch = computed(
+  () =>
+    deepSearchJob.value === null ||
+    deepSearchJob.value.state === "completed" ||
+    deepSearchJob.value.state === "cancelled" ||
+    deepSearchJob.value.state === "failed",
+);
 
 const tabs = computed<UiTabItem[]>(() => [
   { value: "active", label: "Active", count: props.counts.active },
@@ -152,9 +164,30 @@ function updateMedia(event: Event): void {
       <PhFunnel :size="15" weight="regular" aria-hidden="true" /> Transcript search was not included
       in this export; matching session metadata only.
     </p>
+    <div
+      v-else-if="searching && searchExactTurns && mode === 'live'"
+      class="library-sidebar__progressive-search"
+    >
+      <p class="library-sidebar__boundary">
+        <PhFunnel :size="15" weight="regular" aria-hidden="true" /> Exact results currently cover
+        prepared conversations.
+      </p>
+      <UiButton v-if="canStartDeepSearch" variant="quiet" @click="workspace?.startDeepSearch()"
+        >Search unloaded conversations</UiButton
+      >
+      <template v-else>
+        <p class="library-sidebar__search-progress tabular" role="status">
+          Searched {{ (deepSearchJob?.completed ?? 0) + (deepSearchJob?.failed ?? 0) }} /
+          {{ deepSearchJob?.total ?? 0 }} unloaded conversations
+        </p>
+        <UiButton variant="quiet" @click="workspace?.cancelDeepSearch()"
+          >Cancel deep search</UiButton
+        >
+      </template>
+    </div>
 
     <div class="library-sidebar__scroll-region">
-      <LibrarySkeleton v-if="loading" />
+      <LibrarySkeleton v-if="loading && !workspace?.hasSettledContent.value" />
       <LibraryEmptyState
         v-else-if="error"
         title="The session source is unavailable"
@@ -167,7 +200,12 @@ function updateMedia(event: Event): void {
         :hits="hits"
         :query="query"
       />
-      <LibrarySessionList v-else-if="items.length > 0" :items="items" :selected-id="selectedId" />
+      <LibrarySessionList
+        v-else-if="searching && items.length > 0"
+        :items="items"
+        :selected-id="selectedId"
+      />
+      <LibraryProjectTree v-else-if="!searching && workspace !== null" />
       <LibraryEmptyState
         v-else
         :title="searching ? 'No matching turns' : `No ${scope} sessions`"
@@ -180,7 +218,7 @@ function updateMedia(event: Event): void {
     </div>
 
     <UiButton
-      v-if="nextCursor && !loading"
+      v-if="searching && nextCursor && !loading"
       class="library-sidebar__more"
       variant="quiet"
       @click="emit('load-more')"

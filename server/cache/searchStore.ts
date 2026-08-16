@@ -131,7 +131,9 @@ export function replaceSessionSearchRows(
       turn.id,
       turn.userMessage?.id ?? turn.assistantMessages[0]?.id ?? null,
       firstTurn ? session.summary.title : "",
-      turn.userMessage?.sourceMarkdown ?? "",
+      [turn.userMessage, ...(turn.steeringMessages ?? [])]
+        .flatMap((message) => (message === null ? [] : [message.sourceMarkdown]))
+        .join("\n"),
       turn.assistantMessages.map((message) => message.sourceMarkdown).join("\n"),
       columns.reasoning.join("\n"),
       columns.tools.join("\n"),

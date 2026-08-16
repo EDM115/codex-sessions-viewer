@@ -2,10 +2,15 @@ import * as z from "zod";
 
 import {
   conversationSummarySchema,
-  turnNavigatorItemSchema,
   type ConversationSummary,
   type TurnNavigatorItem,
 } from "#shared/types/conversation.ts";
+import {
+  deepSearchJobSchema,
+  type ConversationListItem,
+  type ConversationProject,
+  type DeepSearchJob,
+} from "#shared/types/library.ts";
 import {
   repositoryCapabilitiesForMode,
   resolvedAssetSchema,
@@ -25,6 +30,9 @@ import {
 import {
   hydrateStaticInspectorRecord,
   staticInspectorChunkSchema,
+  staticLibraryPayloadSchema,
+  staticNavigatorPayloadSchema,
+  type StaticLibraryPayload,
 } from "#shared/types/staticPayloads.ts";
 
 import type { RepositoryRequester } from "./live.ts";
@@ -57,13 +65,6 @@ const sessionIndexSchema = z.strictObject({
   sessions: z.array(conversationSummarySchema),
 });
 const summaryPayloadSchema = z.object({ summary: conversationSummarySchema });
-const navigatorPayloadSchema = z.object({
-  sessionId: z.string().min(1),
-  revision: z.string().min(1),
-  chunkSize: z.int().positive(),
-  items: z.array(turnNavigatorItemSchema),
-  inspectorChunks: z.record(z.string(), z.int().nonnegative()).optional().default({}),
-});
 const assetManifestSchema = z.object({
   assets: z.array(resolvedAssetSchema),
 });
@@ -122,7 +123,8 @@ function includes(value: string | null, query: string): boolean {
   return value?.toLocaleLowerCase().includes(query) ?? false;
 }
 
-function matchesSession(session: ConversationSummary, query: SessionListQuery): boolean {
+function matchesSession(item: ConversationListItem, query: SessionListQuery): boolean {
+  const session = item.summary;
   if (session.scope !== query.scope) {
     return false;
   }
@@ -145,7 +147,47 @@ function matchesSession(session: ConversationSummary, query: SessionListQuery): 
   if (query.tool !== undefined && !(query.tool in session.toolCounts)) {
     return false;
   }
+  if (query.projectId !== undefined && item.projectId !== query.projectId) {
+    return false;
+  }
+  if (query.parentThreadId === undefined || query.parentThreadId === "__root__") {
+    if (item.kind !== "root" || item.parentThreadId !== null) {
+      return false;
+    }
+  } else if (item.kind !== "subagent" || item.parentThreadId !== query.parentThreadId) {
+    return false;
+  }
   return query.hasMedia === undefined || session.hasMedia === query.hasMedia;
+}
+
+function fallbackLibrary(sessions: readonly ConversationSummary[]): StaticLibraryPayload {
+  const roots = sessions.filter(({ parentThreadId }) => parentThreadId === null);
+  const project: ConversationProject = {
+    id: "none",
+    name: "No project",
+    source: "none",
+    hint: null,
+    activeCount: roots.filter(({ scope }) => scope === "active").length,
+    archivedCount: roots.filter(({ scope }) => scope === "archived").length,
+  };
+  return staticLibraryPayloadSchema.parse({
+    version: 1,
+    projects: [project],
+    entries: Object.fromEntries(
+      sessions.map((session) => [
+        session.id,
+        {
+          kind: session.parentThreadId === null ? "root" : "subagent",
+          projectId: "none",
+          parentThreadId: session.parentThreadId,
+          agentPath: null,
+          agentNickname: null,
+          agentDepth: session.parentThreadId === null ? null : 1,
+          childCount: session.childThreadIds.length,
+        },
+      ]),
+    ),
+  });
 }
 
 function pagefindFilters(query: SearchQuery): Record<string, string> {
@@ -193,8 +235,11 @@ async function pagefindHit(
 
 export class StaticConversationRepository implements ConversationRepository {
   private indexPromise: Promise<ConversationSummary[]> | null = null;
+  private libraryPromise: Promise<StaticLibraryPayload | null> | null = null;
   private pagefindPromise: Promise<PagefindBrowserApi> | null = null;
   private faviconPromise: Promise<ReadonlyMap<string, string>> | null = null;
+  private deepSearchSequence = 0;
+  private readonly deepSearchJobs = new Map<string, DeepSearchJob>();
 
   constructor(
     private readonly requester: RepositoryRequester = browserRequest,
@@ -207,18 +252,75 @@ export class StaticConversationRepository implements ConversationRepository {
 
   async listSessions(query: SessionListQuery, options: RepositoryRequestOptions = {}) {
     options.signal?.throwIfAborted();
-    const sessions = (await this.index(options)).filter((session) =>
-      matchesSession(session, query),
-    );
+    const summaries = await this.index(options);
+    const library = (await this.library(options)) ?? fallbackLibrary(summaries);
+    const sessions = summaries
+      .flatMap((summary): ConversationListItem[] => {
+        const entry = library.entries[summary.id];
+        return entry === undefined ? [] : [{ summary, materialization: "ready", ...entry }];
+      })
+      .filter((item) => matchesSession(item, query));
     options.signal?.throwIfAborted();
     const offset = cursorOffset(query.cursor);
-    const limit = query.limit ?? 50;
+    const limit = query.limit ?? 20;
     const items = sessions.slice(offset, offset + limit);
     return {
       items,
       nextCursor: offset + items.length < sessions.length ? String(offset + items.length) : null,
       total: sessions.length,
     };
+  }
+
+  async listProjects(options: RepositoryRequestOptions = {}) {
+    const summaries = await this.index(options);
+    return ((await this.library(options)) ?? fallbackLibrary(summaries)).projects;
+  }
+
+  async prepareSessions(ids: string[]) {
+    return ids.map((id) => ({ id, state: "ready" as const, error: null }));
+  }
+
+  async startDeepSearch(
+    query: SearchQuery,
+    options: RepositoryRequestOptions = {},
+  ): Promise<DeepSearchJob> {
+    this.deepSearchSequence += 1;
+    const now = new Date().toISOString();
+    const result = await this.search(query, options);
+    const job = deepSearchJobSchema.parse({
+      id: `static:${this.deepSearchSequence}`,
+      scope: query.scope,
+      query: query.query,
+      state: "completed",
+      total: 0,
+      completed: 0,
+      failed: 0,
+      resultCount: result.total,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    this.deepSearchJobs.set(job.id, job);
+    return job;
+  }
+
+  async getDeepSearch(id: string): Promise<DeepSearchJob> {
+    const job = this.deepSearchJobs.get(id);
+    if (job === undefined) {
+      throw new Error("Static deep-search job not found.");
+    }
+    return { ...job };
+  }
+
+  async cancelDeepSearch(id: string): Promise<void> {
+    const job = this.deepSearchJobs.get(id);
+    if (job !== undefined) {
+      this.deepSearchJobs.set(id, {
+        ...job,
+        state: "cancelled",
+        updatedAt: new Date().toISOString(),
+      });
+    }
   }
 
   async search(query: SearchQuery, options: RepositoryRequestOptions = {}) {
@@ -258,7 +360,11 @@ export class StaticConversationRepository implements ConversationRepository {
       if (target === undefined) {
         throw new Error("Turn target not found in the static payloads.");
       }
-      cursor = String(Math.floor(target.index / navigator.chunkSize));
+      const targetChunk = navigator.turnChunks[target.turnId];
+      if (targetChunk === undefined) {
+        throw new Error("Turn target has no static chunk mapping.");
+      }
+      cursor = String(targetChunk);
     }
     return turnChunkSchema.parse(
       await this.requester(
@@ -278,11 +384,10 @@ export class StaticConversationRepository implements ConversationRepository {
       indexedChunk !== undefined
         ? [indexedChunk]
         : likelyTurn === undefined
-          ? Array.from(
-              { length: Math.ceil(navigator.items.length / navigator.chunkSize) },
-              (_, index) => index,
-            )
-          : [Math.floor(likelyTurn.index / navigator.chunkSize)];
+          ? Array.from({ length: navigator.chunkCount }, (_, index) => index)
+          : [navigator.turnChunks[likelyTurn.turnId]].filter(
+              (chunkIndex): chunkIndex is number => chunkIndex !== undefined,
+            );
     // oxlint-disable no-await-in-loop -- Static inspector chunks are searched in order and stop as soon as the requested record is found.
     for (const chunkIndex of chunkIndexes) {
       const chunk = staticInspectorChunkSchema.parse(
@@ -328,9 +433,19 @@ export class StaticConversationRepository implements ConversationRepository {
     return this.indexPromise;
   }
 
+  private library(options: RepositoryRequestOptions): Promise<StaticLibraryPayload | null> {
+    this.libraryPromise ??= this.requester("/payloads/projects.json", options)
+      .then((value) => {
+        const parsed = staticLibraryPayloadSchema.safeParse(value);
+        return parsed.success ? parsed.data : null;
+      })
+      .catch(() => null);
+    return this.libraryPromise;
+  }
+
   private navigator(id: string) {
     return this.requester(`/payloads/sessions/${encodeURIComponent(id)}/navigator.json`).then(
-      (value) => navigatorPayloadSchema.parse(value),
+      (value) => staticNavigatorPayloadSchema.parse(value),
     );
   }
 

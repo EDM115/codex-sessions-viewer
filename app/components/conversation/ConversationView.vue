@@ -245,12 +245,27 @@ async function jumpToTurn(turnId: string): Promise<void> {
       await nextTick();
       focusMinimapToggle();
     }
-    await timeline.loadTarget(turnId);
+    let replacedTargetWindow = false;
+    await timeline.loadTarget(turnId, {
+      limit: props.mode === "live" ? 5 : 20,
+      beforeApply: () => {
+        if (requestVersion !== jumpRequestVersion) {
+          return;
+        }
+        virtualizer.value.measure();
+        if (scroller.value !== null) {
+          scroller.value.scrollTop = 0;
+        }
+        replacedTargetWindow = true;
+      },
+    });
     if (requestVersion !== jumpRequestVersion) {
       return;
     }
     await nextTick();
-    virtualizer.value.measure();
+    if (replacedTargetWindow) {
+      virtualizer.value.measure();
+    }
     const index = timeline.turns.value.findIndex(({ id }) => id === turnId);
     if (index < 0) {
       return;
@@ -581,6 +596,8 @@ onBeforeUnmount(() => {
         <TurnMinimap
           :items="[...navigatorItems]"
           :current-turn-id="currentTurnId"
+          :pending-turn-id="timeline.pendingTurnId.value"
+          :error-turn-id="timeline.targetErrorTurnId.value"
           @select="jumpToTurn"
         />
       </div>

@@ -30,6 +30,7 @@ test("renders code and tables without widening responsive conversation layouts",
   goto,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.clock.setFixedTime(new Date("2026-08-15T12:00:00.000Z"));
   await page.setViewportSize({ width: 768, height: 900 });
   await goto(sessionRoute, { waitUntil: "hydration" });
 

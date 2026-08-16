@@ -1,7 +1,9 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
 
 import MediaViewer from "../../../app/components/media/MediaViewer.vue";
+import { useMediaViewer } from "../../../app/composables/useMediaViewer.ts";
 
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
 
@@ -15,6 +17,37 @@ describe("Task 11 fullscreen media viewer", () => {
     }
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("restores focus to a virtualized replacement of its opener", async () => {
+    const message = document.createElement("article");
+    message.dataset["messageId"] = "message-1";
+    const opener = document.createElement("button");
+    opener.setAttribute("aria-label", "Open Mermaid diagram");
+    message.append(opener);
+    document.body.append(message);
+    opener.focus();
+    const viewer = useMediaViewer();
+    viewer.open({
+      kind: "svg",
+      alt: "Diagram",
+      filename: "diagram.svg",
+      height: null,
+      mimeType: "image/svg+xml",
+      source: "graph TD",
+      svg: '<svg xmlns="http://www.w3.org/2000/svg"/>',
+      width: null,
+    });
+
+    const replacementMessage = message.cloneNode(false) as HTMLElement;
+    const replacement = opener.cloneNode(true) as HTMLButtonElement;
+    replacementMessage.append(replacement);
+    message.replaceWith(replacementMessage);
+    viewer.close();
+    await nextTick();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+    expect(document.activeElement).toBe(replacement);
   });
 
   it("uses a modal surface, makes the workbench inert, zooms, resets, and closes on Escape", async () => {

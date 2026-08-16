@@ -31,6 +31,17 @@ describe("cached full-text search", () => {
       createdAt: "2026-01-01T10:00:21.000Z",
       details: { line: 21 },
     });
+    active.turns[0]!.steeringMessages = [
+      {
+        ...active.turns[0]!.userMessage!,
+        id: "message-steering-search",
+        sourceMarkdown: "Please include the Windows boundary.",
+        body: {
+          type: "document",
+          children: [{ type: "text", text: "Please include the Windows boundary." }],
+        },
+      },
+    ];
     const database = openCacheDatabase(":memory:");
 
     try {
@@ -54,6 +65,7 @@ describe("cached full-text search", () => {
         "diagram.png",
         "feature parser",
         "Constellation",
+        "Windows boundary",
       ]) {
         const result = searchResponseSchema.parse(
           searchCachedSessions(database, { scope: "active", query }),

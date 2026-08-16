@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { catalogSession, listCatalogSessions } from "../../../server/cache/catalogStore.ts";
 import { getCachedSession, replaceCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
@@ -37,6 +38,16 @@ describe("cached conversations", () => {
       expect(database.prepare("SELECT count(*) AS count FROM raw_events").get()).toEqual({
         count: session.rawEvents.length,
       });
+      expect(catalogSession(database, session.summary.id)).toMatchObject({
+        materialization: "ready",
+        summary: { revision: session.summary.revision },
+      });
+      expect(
+        listCatalogSessions(database, {
+          scope: "active",
+          parentThreadId: "__root__",
+        }).items[0]?.summary,
+      ).toEqual({ ...session.summary, parentThreadId: null });
     } finally {
       database.close();
     }
@@ -58,7 +69,11 @@ describe("cached conversations", () => {
       }
       const broken: NormalizedSession = structuredClone(session);
       broken.summary.revision = "sha256:must-not-commit";
-      broken.turns[1]!.assistantMessages[0]!.id = duplicateMessageId;
+      const targetMessage = broken.turns[1]?.assistantMessages[0];
+      if (targetMessage === undefined) {
+        throw new Error("Expected the cloned fixture to preserve its second assistant message");
+      }
+      targetMessage.id = duplicateMessageId;
 
       expect(() =>
         replaceCachedSession(database, { session: broken, diagnostics: [], source }),

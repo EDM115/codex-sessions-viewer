@@ -95,9 +95,11 @@ describe("static conversation repository", () => {
     const requester = vi.fn(async (path: string) => {
       if (path.endsWith("navigator.json")) {
         return {
+          version: 2,
           sessionId: "session-1",
           revision: "revision-1",
           chunkSize: 1,
+          chunkCount: 3,
           items: [
             {
               turnId: "turn-0",
@@ -127,6 +129,7 @@ describe("static conversation repository", () => {
               createdAt: null,
             },
           ],
+          turnChunks: { "turn-0": 0, "turn-1": 1, "turn-2": 2 },
           inspectorChunks: { "message:message-last": 2 },
         };
       }

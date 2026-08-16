@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { upsertCatalogSessions } from "../../../server/cache/catalogStore.ts";
 import { replaceCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import {
@@ -25,6 +26,41 @@ async function cachedFixture(turnCount?: number) {
   session.summary.toolCounts = { shell: 2 };
   session.summary.hasMedia = true;
   const database = openCacheDatabase(":memory:");
+  if (session.summary.parentThreadId !== null) {
+    const parentSummary = {
+      ...session.summary,
+      id: session.summary.parentThreadId,
+      title: "Fixture parent",
+      sourcePath: "C:/fixtures/repository-store-parent.jsonl",
+      parentThreadId: null,
+      childThreadIds: [session.summary.id],
+      revision: "sha256:repository-store-parent",
+    };
+    upsertCatalogSessions(database, [
+      {
+        summary: parentSummary,
+        kind: "root",
+        materialization: "cold",
+        project: {
+          id: "path:c:/work_100%/viewer",
+          name: "viewer",
+          source: "cwd",
+          hint: "C:/work_100%/viewer",
+        },
+        parentThreadId: null,
+        agentPath: null,
+        agentNickname: null,
+        agentDepth: null,
+        childCount: 1,
+        sourceSize: 1,
+        sourceMtimeMs: 1,
+        sourceDevice: null,
+        sourceInode: null,
+        sourceRevision: parentSummary.revision,
+        error: null,
+      },
+    ]);
+  }
   replaceCachedSession(database, {
     session,
     diagnostics: [],
@@ -37,27 +73,28 @@ describe("bounded cache repository", () => {
   it("applies every session filter and cursor boundary without loading conversation rows", async () => {
     const { database, session } = await cachedFixture();
     try {
+      const parentThreadId = session.summary.parentThreadId ?? "__root__";
       for (const query of [
-        { scope: "active" as const, query: session.summary.title.slice(0, 5) },
-        { scope: "active" as const, model: "gpt-test" },
-        { scope: "active" as const, cwd: "C:/work_100%\\viewer" },
-        { scope: "active" as const, tool: "shell" },
-        { scope: "active" as const, hasMedia: true },
+        { scope: "active" as const, parentThreadId, query: session.summary.title.slice(0, 5) },
+        { scope: "active" as const, parentThreadId, model: "gpt-test" },
+        { scope: "active" as const, parentThreadId, cwd: "C:/work_100%\\viewer" },
+        { scope: "active" as const, parentThreadId, tool: "shell" },
+        { scope: "active" as const, parentThreadId, hasMedia: true },
       ]) {
         expect(listCachedSessions(database, query)).toMatchObject({
-          items: [{ id: session.summary.id }],
+          items: [{ summary: { id: session.summary.id } }],
           nextCursor: null,
           total: 1,
         });
       }
       for (const query of [
-        { scope: "archived" as const },
-        { scope: "active" as const, query: "work_100%\\viewer" },
-        { scope: "active" as const, model: "missing" },
-        { scope: "active" as const, cwd: "C:/missing" },
-        { scope: "active" as const, tool: "missing" },
-        { scope: "active" as const, hasMedia: false },
-        { scope: "active" as const, query: "   " },
+        { scope: "archived" as const, parentThreadId },
+        { scope: "active" as const, parentThreadId, query: "work_100%\\viewer" },
+        { scope: "active" as const, parentThreadId, model: "missing" },
+        { scope: "active" as const, parentThreadId, cwd: "C:/missing" },
+        { scope: "active" as const, parentThreadId, tool: "missing" },
+        { scope: "active" as const, parentThreadId, hasMedia: false },
+        { scope: "active" as const, parentThreadId, query: "   " },
       ]) {
         const page = listCachedSessions(database, query);
         expect(page.total).toBe(query.query?.trim() === "" ? 1 : 0);

@@ -152,7 +152,7 @@ describe("Markdown copy serializers", () => {
     expect(markdown).toContain("Check the existing boundary first.");
     expect(markdown).toContain("functions.shell_command");
     expect(markdown).toContain("Verification passed.");
-    expect(markdown).toContain("Implemented the requested change.");
+    expect(markdown).not.toContain("Implemented the requested change.");
     expect(markdown).not.toContain("Inspect `src/index.ts`.");
     expect(markdown).not.toContain("future_protocol_record");
     expect(markdown).not.toContain("secretProtocolDetail");
@@ -196,7 +196,8 @@ describe("Markdown copy serializers", () => {
     expect(markdown).toContain('title: "Export: --- and # headings"');
     expect(markdown).toContain("## Turn 1");
     expect(markdown).toContain("### User prompt");
-    expect(markdown).toContain("### Agent work");
+    expect(markdown).toContain("### Worked for 5s");
+    expect(markdown.match(/Implemented the requested change\./gu)).toHaveLength(1);
     expect(markdown).toContain("Inspect `src/index.ts`.");
   });
 
@@ -304,6 +305,7 @@ describe("Markdown copy serializers", () => {
     value.assistantMessages = [
       {
         ...message("assistant", "Same timestamp response."),
+        id: "assistant-timed",
         createdAt: "2026-08-13T10:00:01.000Z",
       },
       {
@@ -311,7 +313,13 @@ describe("Markdown copy serializers", () => {
         id: "assistant-untimed",
         createdAt: null as unknown as string,
       },
+      {
+        ...message("assistant", "Final response."),
+        id: "assistant-final",
+        createdAt: "2026-08-13T10:00:07.000Z",
+      },
     ];
+    value.finalAssistantMessageId = "assistant-final";
 
     const markdown = serializeAgentWork(value);
     expect(markdown).toContain("Web search — running");

@@ -5,10 +5,44 @@ import {
   sourceFingerprintSchema,
 } from "../../../shared/types/conversation.ts";
 import {
+  conversationListItemSchema,
+  conversationProjectSchema,
+  preparationResultSchema,
+} from "../../../shared/types/library.ts";
+import {
   repositoryCapabilitiesForMode,
   turnNavigatorResponseSchema,
   viewerInvalidationSchema,
 } from "../../../shared/types/repository.ts";
+
+function summary() {
+  return {
+    id: "019ff624-c8b9-7212-96cf-d68fc58ff082",
+    title: "Continue with Task 2",
+    scope: "active" as const,
+    sourcePath: "/home/dev/.codex/sessions/session.jsonl",
+    createdAt: "2026-08-13T08:00:00.000Z",
+    updatedAt: "2026-08-13T08:30:00.000Z",
+    cwd: "/home/dev/project",
+    gitBranch: "main",
+    gitSha: null,
+    gitOriginUrl: null,
+    models: ["gpt-5.6"],
+    reasoningEfforts: ["high"],
+    turnCount: 2,
+    assistantMessageCount: 2,
+    toolCallCount: 1,
+    toolCounts: { shell_command: 1 },
+    preview: "continue with Task 2",
+    pinned: false,
+    sectionName: null,
+    parentThreadId: null,
+    childThreadIds: [],
+    hasMedia: false,
+    diagnosticCount: 0,
+    revision: "sha256:revision",
+  };
+}
 
 describe("persisted conversation contracts", () => {
   it("accepts complete cache records and rejects an invalid fingerprint hash", () => {
@@ -31,35 +65,46 @@ describe("persisted conversation contracts", () => {
   });
 
   it("validates the conversation-summary API payload", () => {
-    const summary = {
-      id: "019ff624-c8b9-7212-96cf-d68fc58ff082",
-      title: "Continue with Task 2",
-      scope: "active",
-      sourcePath: "/home/dev/.codex/sessions/session.jsonl",
-      createdAt: "2026-08-13T08:00:00.000Z",
-      updatedAt: "2026-08-13T08:30:00.000Z",
-      cwd: "/home/dev/project",
-      gitBranch: "main",
-      gitSha: null,
-      gitOriginUrl: null,
-      models: ["gpt-5.6"],
-      reasoningEfforts: ["high"],
-      turnCount: 2,
-      assistantMessageCount: 2,
-      toolCallCount: 1,
-      toolCounts: { shell_command: 1 },
-      preview: "continue with Task 2",
-      pinned: false,
-      sectionName: null,
-      parentThreadId: null,
-      childThreadIds: [],
-      hasMedia: false,
-      diagnosticCount: 0,
-      revision: "sha256:revision",
-    };
+    const value = summary();
 
-    expect(conversationSummarySchema.parse(summary)).toEqual(summary);
-    expect(conversationSummarySchema.safeParse({ ...summary, turnCount: -1 }).success).toBe(false);
+    expect(conversationSummarySchema.parse(value)).toEqual(value);
+    expect(conversationSummarySchema.safeParse({ ...value, turnCount: -1 }).success).toBe(false);
+  });
+
+  it("validates strict project, list-item, and preparation payloads", () => {
+    const item = {
+      summary: summary(),
+      kind: "subagent" as const,
+      materialization: "cold" as const,
+      projectId: "codex:repo",
+      parentThreadId: "parent-1",
+      agentPath: "/root/review",
+      agentNickname: "Fermat",
+      agentDepth: 1,
+      childCount: 0,
+    };
+    const project = {
+      id: "codex:repo",
+      name: "Repo",
+      source: "codex" as const,
+      hint: "C:\\Work\\repo",
+      activeCount: 3,
+      archivedCount: 1,
+    };
+    const preparation = { id: item.summary.id, state: "queued" as const, error: null };
+
+    expect(conversationListItemSchema.parse(item)).toEqual(item);
+    expect(conversationProjectSchema.parse(project)).toEqual(project);
+    expect(preparationResultSchema.parse(preparation)).toEqual(preparation);
+    expect(conversationListItemSchema.safeParse({ ...item, kind: "auxiliary" }).success).toBe(
+      false,
+    );
+    expect(
+      conversationListItemSchema.safeParse({ ...item, materialization: "warming" }).success,
+    ).toBe(false);
+    expect(conversationProjectSchema.safeParse({ ...project, activeCount: -1 }).success).toBe(
+      false,
+    );
   });
 });
 
@@ -96,6 +141,17 @@ describe("repository mode contracts", () => {
         revision: "entire transcript body",
       }).success,
     ).toBe(false);
+    expect(
+      viewerInvalidationSchema.parse({
+        type: "search.updated",
+        ids: ["search-1"],
+        revision: "sha256:search",
+      }),
+    ).toEqual({
+      type: "search.updated",
+      ids: ["search-1"],
+      revision: "sha256:search",
+    });
   });
 
   it("validates turn navigator response buckets", () => {

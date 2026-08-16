@@ -83,7 +83,7 @@ describe("turn event assembly", () => {
     expect(result.turns[1]?.events.map(({ event: item }) => item.lineNumber)).toEqual([3, 4]);
   });
 
-  it("gives an in-flight steering prompt a distinct viewer ID while retaining the raw turn ID", () => {
+  it("keeps an in-flight steering prompt in the active source turn", () => {
     const result = assembleTurnEvents(
       [
         event(1, "event_msg", { type: "task_started", turn_id: "turn-running" }),
@@ -99,21 +99,19 @@ describe("turn event assembly", () => {
       expect.objectContaining({
         id: "turn-running",
         sourceTurnId: "turn-running",
-        events: [
-          expect.objectContaining({ turnId: "turn-running" }),
-          expect.objectContaining({ turnId: "turn-running" }),
-          expect.objectContaining({ turnId: "turn-running" }),
-        ],
-      }),
-      expect.objectContaining({
-        id: "turn-running:raw-400",
-        sourceTurnId: "turn-running",
-        events: [
-          expect.objectContaining({ turnId: "turn-running:raw-400" }),
-          expect.objectContaining({ turnId: "turn-running:raw-400" }),
-        ],
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            turnId: "turn-running",
+            event: expect.objectContaining({ lineNumber: 2 }),
+          }),
+          expect.objectContaining({
+            turnId: "turn-running",
+            event: expect.objectContaining({ lineNumber: 4 }),
+          }),
+        ]),
       }),
     ]);
+    expect(result.turns[0]?.events).toHaveLength(5);
   });
 
   it("keeps protocol-only records unscoped when no turn is active", () => {

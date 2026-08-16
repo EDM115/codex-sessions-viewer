@@ -93,7 +93,7 @@ test("opens an exact turn with the virtualized timeline, minimap, and inspector"
     .poll(() => page.locator(".conversation-timeline [data-turn-id]").count())
     .toBeLessThan(20);
   await page
-    .getByText(/Agent work/)
+    .getByText(/Worked for/)
     .first()
     .click();
   await expect(page.getByText("filesystem/read_file")).toBeVisible();
@@ -155,20 +155,72 @@ test("jumps across chunks from the narrow minimap and restores keyboard focus", 
   goto,
 }) => {
   const sessionId = "11111111-1111-4111-8111-111111111111";
+  const targetRequests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (
+      url.pathname === `/api/sessions/${sessionId}/turns` &&
+      url.searchParams.has("targetTurnId")
+    ) {
+      targetRequests.push(url.href);
+    }
+  });
   await page.setViewportSize({ width: 390, height: 800 });
-  await goto(`/session/${sessionId}?turn=turn-1#turn-turn-1`, { waitUntil: "hydration" });
+  await goto(`/session/${sessionId}`, { waitUntil: "hydration" });
   const toggle = page.getByRole("button", { name: "Open turn minimap" });
 
   await toggle.click();
-  await expect(page.getByRole("button", { name: /Turn 1:/ })).toBeFocused();
-  await page.getByRole("button", { name: /Turn 1:/ }).press("End");
+  await expect(
+    page.locator('#turn-minimap-panel .turn-minimap__target[tabindex="0"]'),
+  ).toBeFocused();
+  const recentMarker = page.getByRole("button", { name: /Turn 25:/ });
+  await recentMarker.focus();
+  await expect(recentMarker).toBeFocused();
+  const preview = page.locator(".turn-minimap__preview");
+  await expect(preview).toBeVisible();
+  const recentCenter = await preview.evaluate((element) =>
+    Number.parseFloat((element as HTMLElement).style.getPropertyValue("--turn-preview-center")),
+  );
+  const marker21 = page.getByRole("button", { name: /Turn 21:/ });
+  await marker21.focus();
+  await expect
+    .poll(() =>
+      preview.evaluate((element) =>
+        Number.parseFloat((element as HTMLElement).style.getPropertyValue("--turn-preview-center")),
+      ),
+    )
+    .not.toBe(recentCenter);
+  const measuredCenter = await page.locator(".turn-minimap").evaluate((nav) => {
+    const marker = nav.querySelector<HTMLElement>(
+      '.turn-minimap__target[data-turn-id="turn-21"] .turn-minimap__marker',
+    );
+    const previewElement = nav.querySelector<HTMLElement>(".turn-minimap__preview");
+    if (marker === null || previewElement === null) {
+      return Number.NaN;
+    }
+    const markerRect = marker.getBoundingClientRect();
+    const navRect = nav.getBoundingClientRect();
+    const expected = markerRect.top - navRect.top + markerRect.height / 2;
+    const actual = Number.parseFloat(
+      previewElement.style.getPropertyValue("--turn-preview-center"),
+    );
+    return Math.abs(expected - actual);
+  });
+  expect(measuredCenter).toBeLessThanOrEqual(1);
+
+  await marker21.press("Home");
   await expect(toggle).toBeFocused();
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
-  await expect(page).toHaveURL(/turn=turn-25/);
-  await expect(page.getByText("Review timeline turn 25", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/turn=turn-1/);
+  await expect(
+    page.getByLabel("Conversation timeline").getByText("Build the parser", { exact: true }),
+  ).toBeVisible();
+  await expect
+    .poll(() => targetRequests.some((url) => url.includes("targetTurnId=turn-1")))
+    .toBe(true);
 
   await toggle.click();
-  await page.getByRole("button", { name: /Turn 21:/ }).click();
+  await marker21.click();
   await expect(page).toHaveURL(/turn=turn-21/);
   await expect(
     page.getByText("Keep the tall timeline turn active while reading", { exact: true }),

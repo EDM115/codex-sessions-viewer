@@ -1,13 +1,20 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import { CACHE_SCHEMA_VERSION, INITIAL_CACHE_SCHEMA_SQL } from "./schema.ts";
+import {
+  CACHE_SCHEMA_VERSION,
+  CATALOG_CACHE_SCHEMA_SQL,
+  INITIAL_CACHE_SCHEMA_SQL,
+} from "./schema.ts";
 
 interface CacheMigration {
   version: number;
   sql: string;
 }
 
-const migrations: readonly CacheMigration[] = [{ version: 1, sql: INITIAL_CACHE_SCHEMA_SQL }];
+const migrations: readonly CacheMigration[] = [
+  { version: 1, sql: INITIAL_CACHE_SCHEMA_SQL },
+  { version: 2, sql: CATALOG_CACHE_SCHEMA_SQL },
+];
 
 function userVersion(database: DatabaseSync): number {
   const row = database.prepare("PRAGMA user_version").get();

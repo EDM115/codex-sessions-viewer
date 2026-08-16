@@ -18,7 +18,7 @@ import { representativeLargeSession } from "./fixtures.ts";
 const temporaryDirectories: string[] = [];
 
 function median(values: readonly number[]): number {
-  const sorted = [...values].sort((left, right) => left - right);
+  const sorted = values.toSorted((left, right) => left - right);
   return sorted[Math.floor(sorted.length / 2)]!;
 }
 

@@ -26,7 +26,7 @@ Start the live viewer on the loopback interface:
 pnpm live
 ```
 
-Then open `http://127.0.0.1:3000`. The page shell and loading skeleton render while the read-only session cache reconciles in the background; the library becomes queryable as cached or newly transformed sessions are ready.
+Then open `http://127.0.0.1:3000`. Startup builds only a byte-bounded metadata catalog; it does not normalize every transcript. Project folders and root-conversation counts become available from that catalog, each list page contains at most 20 roots, and one visible or explicitly opened cold session is prepared at a time. The persistent desktop library remains usable while an opened conversation shows its loading skeleton.
 
 Build an offline archive without making favicon requests:
 
@@ -46,7 +46,11 @@ Then open `http://127.0.0.1:3000`. Static output requires this local HTTP server
 pnpm live [--codex-home <path>] [--port <number>]
 ```
 
-The server binds only to `127.0.0.1`. It uses cached data immediately when possible, watches active and archived rollouts, coalesces changes, and broadcasts local invalidations over SSE. A Codex JSONL file may be mid-append; only complete stable records are exposed.
+The server binds only to `127.0.0.1`. It uses cached data immediately when possible, watches active and archived rollouts, coalesces changes, and broadcasts local invalidations over SSE. A Codex JSONL file may be mid-append; only complete stable records are exposed. Visible preparation and explicit opens share a serialized priority queue, so full transcript normalization never fans out across the archive.
+
+Library folders are derived from Codex project metadata, git origins, and working directories. Root conversations appear directly in their project; subagents are nested below their parent at any depth. `codex-auto-review` rollouts are auxiliary approval evidence rather than conversations: they are excluded from counts, routes, folders, and model filters, while an unambiguous allow/deny result remains attached to the reviewed tool call.
+
+Normal live search checks ready cached transcripts and catalog metadata first. If results may exist in cold sessions, the UI offers an explicit progressive deep search. That operation prepares cold sessions serially, reports progress, can be cancelled, and never turns ordinary typing into an archive-wide scan.
 
 The Codex-home precedence is the explicit CLI argument, viewer configuration, `CODEX_HOME`, then the platform default `~/.codex`.
 
@@ -65,6 +69,8 @@ The default output is `.output/public`. Export writes into isolated staging dire
 
 Pagefind creates one flat search record per turn and can require substantial memory for very large archives. Use `--no-index` when full-text search is unnecessary or when first validating a large collection, then test indexed export on a representative Codex home before scaling it up.
 
+Static turn payloads are bounded by both turn count and an approximate byte budget, with an explicit per-turn chunk map for exact distant navigation. A single unusually large turn remains indivisible, but unrelated large turns are no longer aggregated into the same JSON payload. Prerendered session routes ship the conversation skeleton and fetch their selected chunk after hydration, avoiding duplication of multi-megabyte tool output in session HTML.
+
 ### Offline server
 
 ```powershell
@@ -79,7 +85,7 @@ This server reads `.output/public`, binds only to `127.0.0.1`, accepts `GET` and
 pnpm run doctor [--codex-home <path>]
 ```
 
-Doctor is read-only. It reports discovered active and archived sources, optional metadata, cache availability and parser diagnostics, state-snapshot availability, static-output completeness, and whether Pagefind is present or disabled.
+Doctor is read-only. It reports discovered active and archived sources, catalog roots/subagents/auxiliaries, cold/queued/loading/ready/failed materialization counts, normalized payloads and parser diagnostics separately, state-snapshot availability, static-output completeness, and whether Pagefind is present or disabled.
 
 ### Generated-output verification
 
@@ -141,7 +147,7 @@ Vitest separates Node, Pagefind, performance, UI, and Nuxt-owned suites. Pagefin
 
 ### The live page is preparing for a long time
 
-The initial HTML should still show the application shell and loaders. Run `pnpm run doctor` in another terminal and inspect the live terminal for a reconciliation diagnostic. A malformed or changing source is isolated; a single favicon or optional metadata failure should not stop the library.
+The initial HTML should still show the application shell and loaders, but the library should not wait for full transcript reconciliation. Run `pnpm run doctor` in another terminal and compare the catalog counts with the normalized-payload count. A malformed or changing source is isolated; a single favicon or optional metadata failure should not stop the library. A conversation row may remain cold until it enters the viewport, and opening it promotes that one session ahead of background visible preparation.
 
 If the selected Codex home is wrong, start with `pnpm live --codex-home <path>` or update it from Settings. The server validates the new directory before changing watcher context.
 

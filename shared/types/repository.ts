@@ -2,7 +2,6 @@ import * as z from "zod";
 
 import {
   conversationScopeSchema,
-  conversationSummarySchema,
   conversationTurnSchema,
   isoTimestampSchema,
   jsonValueSchema,
@@ -15,6 +14,13 @@ import {
   type TokenUsage,
   type TurnNavigatorItem,
 } from "./conversation.ts";
+import {
+  conversationListItemSchema,
+  type ConversationListItem,
+  type ConversationProject,
+  type DeepSearchJob,
+  type PreparationResult,
+} from "./library.ts";
 
 export type RepositoryMode = "live" | "static";
 
@@ -39,6 +45,8 @@ export interface SessionListQuery {
   cwd?: string;
   tool?: string;
   hasMedia?: boolean;
+  projectId?: string;
+  parentThreadId?: string;
 }
 
 export interface SearchQuery extends SessionListQuery {
@@ -48,6 +56,14 @@ export interface SearchQuery extends SessionListQuery {
 export interface RepositoryRequestOptions {
   signal?: AbortSignal;
 }
+
+export const preparationRequestSchema = z.strictObject({
+  ids: z
+    .array(z.string().min(1))
+    .min(1)
+    .max(20)
+    .refine((ids) => new Set(ids).size === ids.length),
+});
 
 export interface SearchHit {
   sessionId: string;
@@ -113,7 +129,8 @@ export type ViewerInvalidationType =
   | "library.updated"
   | "session.updated"
   | "settings.updated"
-  | "diagnostic.updated";
+  | "diagnostic.updated"
+  | "search.updated";
 
 export interface ViewerInvalidation {
   type: ViewerInvalidationType;
@@ -131,7 +148,12 @@ export interface ConversationRepository {
   listSessions(
     query: SessionListQuery,
     options?: RepositoryRequestOptions,
-  ): Promise<CursorPage<ConversationSummary>>;
+  ): Promise<CursorPage<ConversationListItem>>;
+  listProjects(options?: RepositoryRequestOptions): Promise<ConversationProject[]>;
+  prepareSessions(ids: string[], options?: RepositoryRequestOptions): Promise<PreparationResult[]>;
+  startDeepSearch(query: SearchQuery, options?: RepositoryRequestOptions): Promise<DeepSearchJob>;
+  getDeepSearch(id: string, options?: RepositoryRequestOptions): Promise<DeepSearchJob>;
+  cancelDeepSearch(id: string, options?: RepositoryRequestOptions): Promise<void>;
   search(query: SearchQuery, options?: RepositoryRequestOptions): Promise<CursorPage<SearchHit>>;
   getSession(id: string): Promise<ConversationSummary>;
   getTurnNavigator(id: string): Promise<TurnNavigatorItem[]>;
@@ -182,11 +204,15 @@ export const sessionListQuerySchema = z.strictObject({
   cwd: z.string().optional(),
   tool: z.string().optional(),
   hasMedia: z.boolean().optional(),
+  projectId: z.string().min(1).optional(),
+  parentThreadId: z.string().min(1).optional(),
 });
 
 export const searchQuerySchema = sessionListQuerySchema.extend({
   query: z.string().min(1),
 });
+
+export const deepSearchRequestSchema = searchQuerySchema.omit({ cursor: true, limit: true });
 
 export const searchHitSchema = z.strictObject({
   sessionId: z.string().min(1),
@@ -198,7 +224,7 @@ export const searchHitSchema = z.strictObject({
   score: z.number().nonnegative(),
 });
 
-export const sessionListResponseSchema = cursorPageSchema(conversationSummarySchema);
+export const sessionListResponseSchema = cursorPageSchema(conversationListItemSchema);
 export const searchResponseSchema = cursorPageSchema(searchHitSchema);
 export const turnNavigatorResponseSchema = z.array(turnNavigatorItemSchema);
 
@@ -254,7 +280,13 @@ export const resolvedAssetSchema = z.strictObject({
 });
 
 export const viewerInvalidationSchema = z.strictObject({
-  type: z.enum(["library.updated", "session.updated", "settings.updated", "diagnostic.updated"]),
+  type: z.enum([
+    "library.updated",
+    "session.updated",
+    "settings.updated",
+    "diagnostic.updated",
+    "search.updated",
+  ]),
   ids: z.array(z.string()),
   revision: z.string().min(1),
 });

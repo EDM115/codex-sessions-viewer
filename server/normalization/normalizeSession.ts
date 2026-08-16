@@ -19,7 +19,7 @@ import {
   type StatusActivity,
   type SubagentActivity,
   type TokenUsage,
-  type ToolActivity,
+  type TurnEntryReference,
   type WebSearchActivity,
 } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
@@ -44,7 +44,7 @@ import { createUnknownActivity, sanitizeUnknownPayload } from "./unknownEvents.t
 const filenameUuidPattern =
   /([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?=\.jsonl$)/i;
 const epochTimestamp = "1970-01-01T00:00:00.000Z";
-export const NORMALIZATION_PARSER_VERSION = 2;
+export const NORMALIZATION_PARSER_VERSION = 3;
 
 export interface NormalizeSessionInput {
   records: readonly JsonlRecord[];
@@ -85,11 +85,18 @@ interface SessionMetaEvidence {
 }
 
 interface MessageCandidate {
+  event: CodexEvent;
   id: string;
   phase: string | null;
+  source: "event_msg" | "response_item";
   timestamp: string;
   text: string;
   rawEventId: string;
+}
+
+interface MergedMessageCandidate extends MessageCandidate {
+  events: CodexEvent[];
+  rawEventIds: string[];
 }
 
 function objectValue(value: JsonValue | undefined): JsonObject | null {
@@ -309,7 +316,9 @@ function messageCandidate(
       ? null
       : {
           id: `message-${event.id}`,
+          event,
           phase: role === "assistant" ? stringValue(payload["phase"]) : null,
+          source: "event_msg",
           timestamp: eventTimestamp(event, fallbackTimestamp),
           text,
           rawEventId: event.id,
@@ -327,11 +336,45 @@ function messageCandidate(
     ? null
     : {
         id: `message-${stringValue(payload["id"]) ?? event.id}`,
+        event,
         phase: stringValue(payload["phase"]),
+        source: "response_item",
         timestamp: eventTimestamp(event, fallbackTimestamp),
         text,
         rawEventId: event.id,
       };
+}
+
+function mergedMessageCandidates(
+  turn: AssembledTurnEvents,
+  role: "user" | "assistant",
+  fallbackTimestamp: string,
+): MergedMessageCandidate[] {
+  const merged: MergedMessageCandidate[] = [];
+  for (const { event } of turn.events) {
+    const candidate = messageCandidate(event, role, fallbackTimestamp);
+    if (candidate === null) {
+      continue;
+    }
+    const previous = merged.at(-1);
+    if (
+      previous !== undefined &&
+      previous.source !== candidate.source &&
+      previous.text === candidate.text &&
+      (previous.phase === candidate.phase || previous.phase === null || candidate.phase === null)
+    ) {
+      previous.rawEventIds.push(candidate.rawEventId);
+      previous.events.push(candidate.event);
+      previous.phase ??= candidate.phase;
+      continue;
+    }
+    merged.push({
+      ...candidate,
+      events: [candidate.event],
+      rawEventIds: [candidate.rawEventId],
+    });
+  }
+  return merged;
 }
 
 function normalizeMessages(
@@ -339,67 +382,63 @@ function normalizeMessages(
   fallbackTimestamp: string,
 ): {
   userMessage: ConversationMessage | null;
+  steeringMessages: ConversationMessage[];
   assistantMessages: ConversationMessage[];
   media: MediaActivity[];
 } {
-  const userEventCandidate = turn.events
-    .map(({ event }) => ({ event, candidate: messageCandidate(event, "user", fallbackTimestamp) }))
-    .find(({ event, candidate }) => event.type === "event_msg" && candidate !== null);
-  const responseUserCandidate = turn.events
-    .map(({ event }) => ({ event, candidate: messageCandidate(event, "user", fallbackTimestamp) }))
-    .find(({ candidate }) => candidate !== null);
-  const selectedUser = userEventCandidate ?? responseUserCandidate ?? null;
-  const userAttachments = selectedUser === null ? [] : attachmentSources(selectedUser.event);
-  const attachmentIds = userAttachments.map(
-    (_, index) => `asset-${selectedUser!.event.id}-${index}`,
-  );
-  const userMessage =
-    selectedUser?.candidate === null || selectedUser === null
-      ? null
-      : {
-          id: selectedUser.candidate.id,
+  const media: MediaActivity[] = [];
+  const users = mergedMessageCandidates(turn, "user", fallbackTimestamp).map(
+    (candidate): ConversationMessage => {
+      const attachmentSourcesForMessage = candidate.events.flatMap(attachmentSources);
+      const attachmentIds = attachmentSourcesForMessage.map(
+        (_, index) => `asset-${candidate.event.id}-${index}`,
+      );
+      media.push(
+        ...attachmentSourcesForMessage.map((source, index): MediaActivity => ({
+          id: `media-${candidate.event.id}-${index}`,
           turnId: turn.id,
-          role: "user" as const,
-          phase: selectedUser.candidate.phase,
-          createdAt: selectedUser.candidate.timestamp,
-          sourceMarkdown: selectedUser.candidate.text,
-          body: plainDocument(selectedUser.candidate.text),
-          attachmentIds,
-          rawEventIds: [selectedUser.candidate.rawEventId],
-        };
-
-  const deduplicated = new Map<string, ConversationMessage>();
-  for (const { event } of turn.events) {
-    const candidate = messageCandidate(event, "assistant", fallbackTimestamp);
-    if (candidate === null) {
-      continue;
-    }
-    const key = `${candidate.phase ?? ""}\u0000${candidate.text}`;
-    const existing = deduplicated.get(key);
-    if (existing === undefined) {
-      deduplicated.set(key, {
+          createdAt: candidate.event.timestamp,
+          rawEventIds: [...candidate.rawEventIds],
+          kind: "media",
+          assetId: attachmentIds[index]!,
+          mediaType: source.mediaType,
+          sourcePath: source.path,
+        })),
+      );
+      return {
         id: candidate.id,
         turnId: turn.id,
-        role: "assistant",
+        role: "user",
         phase: candidate.phase,
         createdAt: candidate.timestamp,
         sourceMarkdown: candidate.text,
         body: plainDocument(candidate.text),
-        attachmentIds: [],
-        rawEventIds: [candidate.rawEventId],
-      });
-    } else {
-      existing.rawEventIds.push(candidate.rawEventId);
-    }
-  }
-  if (deduplicated.size === 0) {
+        attachmentIds,
+        rawEventIds: [...candidate.rawEventIds],
+      };
+    },
+  );
+  const assistantMessages = mergedMessageCandidates(turn, "assistant", fallbackTimestamp).map(
+    (candidate): ConversationMessage => ({
+      id: candidate.id,
+      turnId: turn.id,
+      role: "assistant",
+      phase: candidate.phase,
+      createdAt: candidate.timestamp,
+      sourceMarkdown: candidate.text,
+      body: plainDocument(candidate.text),
+      attachmentIds: [],
+      rawEventIds: [...candidate.rawEventIds],
+    }),
+  );
+  if (assistantMessages.length === 0) {
     const completion = turn.events.find(
       ({ event }) => event.type === "event_msg" && event.payloadType === "task_complete",
     )?.event;
     const payload = completion === undefined ? null : payloadObject(completion);
     const text = stringValue(payload?.["last_agent_message"]);
     if (completion !== undefined && text !== null) {
-      deduplicated.set(text, {
+      assistantMessages.push({
         id: `message-${completion.id}`,
         turnId: turn.id,
         role: "assistant",
@@ -412,49 +451,62 @@ function normalizeMessages(
       });
     }
   }
-
-  const media = userAttachments.map((source, index): MediaActivity => ({
-    id: `media-${selectedUser!.event.id}-${index}`,
-    turnId: turn.id,
-    createdAt: selectedUser!.event.timestamp,
-    rawEventIds: [selectedUser!.event.id],
-    kind: "media",
-    assetId: attachmentIds[index]!,
-    mediaType: source.mediaType,
-    sourcePath: source.path,
-  }));
-  return { userMessage, assistantMessages: [...deduplicated.values()], media };
+  return {
+    userMessage: users[0] ?? null,
+    steeringMessages: users.slice(1),
+    assistantMessages,
+    media,
+  };
 }
 
 function normalizeReasoning(
   events: readonly TurnScopedEvent[],
   turnId: string,
 ): ReasoningActivity[] {
-  const activities = new Map<string, ReasoningActivity>();
+  const activities: Array<ReasoningActivity & { source: "event_msg" | "response_item" }> = [];
   for (const { event } of events) {
     const payload = payloadObject(event);
     if (payload === null) {
       continue;
     }
-    let summary: string | null = null;
+    let summaries: string[] = [];
     let encrypted = false;
     if (event.type === "event_msg" && event.payloadType === "agent_reasoning") {
-      summary = stringValue(payload["text"]);
+      const summary = stringValue(payload["text"]);
+      summaries = summary === null ? [] : [summary];
     } else if (event.type === "response_item" && event.payloadType === "reasoning") {
-      summary = contentText(payload["summary"]) || contentText(payload["content"]);
+      const source = Array.isArray(payload["summary"]) ? payload["summary"] : payload["content"];
+      summaries = Array.isArray(source)
+        ? source.flatMap((item) => {
+            const text = stringValue(objectValue(item)?.["text"]);
+            return text === null ? [] : [text];
+          })
+        : [];
       encrypted = stringValue(payload["encrypted_content"]) !== null;
     } else {
       continue;
     }
-    if ((summary === null || summary === "") && !encrypted) {
+    if (summaries.length === 0 && encrypted) {
+      summaries = [""];
+    }
+    if (summaries.length === 0) {
       continue;
     }
-    const text = summary ?? "";
-    const key = text === "" ? event.id : text;
-    const existing = activities.get(key);
-    if (existing === undefined) {
-      activities.set(key, {
-        id: `reasoning-${event.id}`,
+    summaries.forEach((text, index) => {
+      const source = event.type === "event_msg" ? "event_msg" : "response_item";
+      const previous = activities.at(-1);
+      if (
+        index === 0 &&
+        previous !== undefined &&
+        previous.source !== source &&
+        previous.summary === text
+      ) {
+        previous.rawEventIds.push(event.id);
+        previous.encrypted ||= encrypted;
+        return;
+      }
+      activities.push({
+        id: `reasoning-${event.id}${summaries.length === 1 ? "" : `-${index}`}`,
         turnId,
         createdAt: event.timestamp,
         rawEventIds: [event.id],
@@ -462,13 +514,11 @@ function normalizeReasoning(
         summary: text,
         body: text === "" ? null : plainDocument(text),
         encrypted,
+        source,
       });
-    } else {
-      existing.rawEventIds.push(event.id);
-      existing.encrypted ||= encrypted;
-    }
+    });
   }
-  return [...activities.values()];
+  return activities.map(({ source: _source, ...activity }) => activity);
 }
 
 function normalizeWebSearch(event: CodexEvent, turnId: string): WebSearchActivity | null {
@@ -712,11 +762,32 @@ function activityOffset(
   return Math.min(...activity.rawEventIds.map((id) => offsets.get(id) ?? Number.MAX_SAFE_INTEGER));
 }
 
+function turnEntryOrder(
+  messages: readonly ConversationMessage[],
+  activities: readonly ConversationActivity[],
+  offsets: ReadonlyMap<string, number>,
+): TurnEntryReference[] {
+  return [
+    ...messages.map((message) => ({
+      reference: { kind: "message" as const, id: message.id },
+      offset: Math.min(
+        ...message.rawEventIds.map((id) => offsets.get(id) ?? Number.MAX_SAFE_INTEGER),
+      ),
+    })),
+    ...activities.map((activity) => ({
+      reference: { kind: "activity" as const, id: activity.id },
+      offset: activityOffset(activity, offsets),
+    })),
+  ]
+    .toSorted((left, right) => left.offset - right.offset)
+    .map(({ reference }) => reference);
+}
+
 function normalizeActivities(
   turn: AssembledTurnEvents,
   media: MediaActivity[],
   eventOffsets: ReadonlyMap<string, number>,
-  tools: readonly ToolActivity[],
+  tools: readonly ConversationActivity[],
   consumedToolEventIds: ReadonlySet<string>,
 ): ConversationActivity[] {
   const activities: ConversationActivity[] = [
@@ -1016,8 +1087,19 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
       sessionId,
       index: assembled.index,
       userMessage: messages.userMessage,
+      steeringMessages: messages.steeringMessages,
       assistantMessages: messages.assistantMessages,
       activities,
+      entryOrder: turnEntryOrder(
+        [
+          ...(messages.userMessage === null ? [] : [messages.userMessage]),
+          ...messages.steeringMessages,
+          ...messages.assistantMessages,
+        ],
+        activities,
+        eventOffsets,
+      ),
+      finalAssistantMessageId: messages.assistantMessages.at(-1)?.id ?? null,
       ...metrics,
       tokenDelta: delta,
       models: evidence.models,

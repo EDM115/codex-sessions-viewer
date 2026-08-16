@@ -30,6 +30,8 @@ async function validOutput(): Promise<{ root: string; sessionId: string }> {
     scope: "active",
     revision: "sha256:verified-output",
   });
+  conversation.summary.parentThreadId = null;
+  conversation.summary.childThreadIds = [];
   const sessionId = conversation.summary.id;
   await writeStaticPayloads([conversation], { generatedRoot: root, chunkSize: 1 });
   await writeConversationExport(conversation, { generatedRoot: root, publicRoot: root });
@@ -185,6 +187,153 @@ describe("generated output verification", () => {
       items[1]!["turnId"] = items[0]!["turnId"];
     });
     await expect(verifyGeneratedOutput(duplicateTurn.root)).rejects.toThrow("duplicate turn IDs");
+  });
+
+  it("requires the generated project catalog and excludes guardian sessions", async () => {
+    const missingProjects = await validOutput();
+    await rm(join(missingProjects.root, "payloads", "projects.json"));
+    await expect(verifyGeneratedOutput(missingProjects.root)).rejects.toThrow(
+      "payloads/projects.json",
+    );
+
+    const guardian = await validOutput();
+    const indexPath = join(guardian.root, "payloads", "sessions", "index.json");
+    await rewriteJson(indexPath, (value) => {
+      const summary = (value["sessions"] as Array<Record<string, unknown>>)[0]!;
+      summary["models"] = ["codex-auto-review"];
+    });
+    await expect(verifyGeneratedOutput(guardian.root)).rejects.toThrow(
+      "Auxiliary guardian session crossed",
+    );
+  });
+
+  it("rejects missing and cyclic subagent parent edges", async () => {
+    const missingParent = await validOutput();
+    const missingIndexPath = join(missingParent.root, "payloads", "sessions", "index.json");
+    const missingSummaryPath = join(
+      missingParent.root,
+      "payloads",
+      "sessions",
+      missingParent.sessionId,
+      "summary.json",
+    );
+    const missingProjectsPath = join(missingParent.root, "payloads", "projects.json");
+    await Promise.all(
+      [missingIndexPath, missingSummaryPath].map((path) =>
+        rewriteJson(path, (value) => {
+          const summary =
+            "sessions" in value
+              ? (value["sessions"] as Array<Record<string, unknown>>)[0]!
+              : (value["summary"] as Record<string, unknown>);
+          summary["parentThreadId"] = "missing-parent";
+        }),
+      ),
+    );
+    await rewriteJson(missingProjectsPath, (value) => {
+      const entry = (value["entries"] as Record<string, Record<string, unknown>>)[
+        missingParent.sessionId
+      ]!;
+      entry["kind"] = "subagent";
+      entry["parentThreadId"] = "missing-parent";
+      entry["agentDepth"] = 1;
+    });
+    await expect(verifyGeneratedOutput(missingParent.root)).rejects.toThrow(
+      "missing its parent edge",
+    );
+
+    const cycle = await validOutput();
+    const cycleIndexPath = join(cycle.root, "payloads", "sessions", "index.json");
+    const cycleSummaryPath = join(
+      cycle.root,
+      "payloads",
+      "sessions",
+      cycle.sessionId,
+      "summary.json",
+    );
+    await Promise.all(
+      [cycleIndexPath, cycleSummaryPath].map((path) =>
+        rewriteJson(path, (value) => {
+          const summary =
+            "sessions" in value
+              ? (value["sessions"] as Array<Record<string, unknown>>)[0]!
+              : (value["summary"] as Record<string, unknown>);
+          summary["parentThreadId"] = cycle.sessionId;
+          summary["childThreadIds"] = [cycle.sessionId];
+        }),
+      ),
+    );
+    await rewriteJson(join(cycle.root, "payloads", "projects.json"), (value) => {
+      const entry = (value["entries"] as Record<string, Record<string, unknown>>)[cycle.sessionId]!;
+      entry["kind"] = "subagent";
+      entry["parentThreadId"] = cycle.sessionId;
+      entry["agentDepth"] = 1;
+      entry["childCount"] = 1;
+    });
+    await expect(verifyGeneratedOutput(cycle.root)).rejects.toThrow("topology contains a cycle");
+  });
+
+  it("rejects missing entry-order references and a mismatched final response", async () => {
+    const missingEntry = await validOutput();
+    const missingTurnPath = join(
+      missingEntry.root,
+      "payloads",
+      "sessions",
+      missingEntry.sessionId,
+      "turn-0.json",
+    );
+    await rewriteJson(missingTurnPath, (value) => {
+      const turn = (value["turns"] as Array<Record<string, unknown>>)[0]!;
+      (turn["entryOrder"] as unknown[]).pop();
+    });
+    await expect(verifyGeneratedOutput(missingEntry.root)).rejects.toThrow(
+      "chronological entry order does not match",
+    );
+
+    const mismatchedFinal = await validOutput();
+    const finalTurnPath = join(
+      mismatchedFinal.root,
+      "payloads",
+      "sessions",
+      mismatchedFinal.sessionId,
+      "turn-0.json",
+    );
+    await rewriteJson(finalTurnPath, (value) => {
+      const turn = (value["turns"] as Array<Record<string, unknown>>)[0]!;
+      turn["finalAssistantMessageId"] = null;
+    });
+    await expect(verifyGeneratedOutput(mismatchedFinal.root)).rejects.toThrow(
+      "final assistant ID does not match",
+    );
+  });
+
+  it("rejects a steering message without matching inspector evidence", async () => {
+    const missingSteeringInspector = await validOutput();
+    const turnPath = join(
+      missingSteeringInspector.root,
+      "payloads",
+      "sessions",
+      missingSteeringInspector.sessionId,
+      "turn-0.json",
+    );
+    await rewriteJson(turnPath, (value) => {
+      const turn = (value["turns"] as Array<Record<string, unknown>>)[0]!;
+      const userMessage = turn["userMessage"] as Record<string, unknown>;
+      turn["steeringMessages"] = [
+        {
+          ...userMessage,
+          id: "steering-without-inspector",
+          sourceMarkdown: "Please keep the existing API.",
+        },
+      ];
+      (turn["entryOrder"] as unknown[]).push({
+        kind: "message",
+        id: "steering-without-inspector",
+      });
+    });
+
+    await expect(verifyGeneratedOutput(missingSteeringInspector.root)).rejects.toThrow(
+      "Inspector records do not match their turn chunk",
+    );
   });
 
   it("rejects inspector records that do not exactly match their turn chunk", async () => {

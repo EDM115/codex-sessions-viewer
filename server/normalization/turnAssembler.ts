@@ -121,11 +121,7 @@ export function assembleTurnEvents(
   for (const event of events) {
     const explicit = explicitTurnId(event);
     if (beginsPrompt(event)) {
-      if (
-        active === null ||
-        active.closed ||
-        active.events.some(({ event: item }) => beginsPrompt(item))
-      ) {
+      if (active === null || active.closed) {
         active = createTurn(null, true);
       }
       addEvent(active, event);

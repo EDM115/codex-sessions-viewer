@@ -15,6 +15,7 @@ import {
   type NormalizedRawEvent,
   type NormalizedSession,
 } from "../normalization/normalizeSession.ts";
+import { markCatalogSessionReady } from "./catalogStore.ts";
 import { withCacheTransaction } from "./database.ts";
 import { replaceSessionSearchRows } from "./searchStore.ts";
 
@@ -197,6 +198,9 @@ function replaceChildren(database: DatabaseSync, session: NormalizedSession): vo
     if (turn.userMessage !== null) {
       writeMessage(insertMessage, sessionId, turn.userMessage);
     }
+    for (const message of turn.steeringMessages ?? []) {
+      writeMessage(insertMessage, sessionId, message);
+    }
     for (const message of turn.assistantMessages) {
       writeMessage(insertMessage, sessionId, message);
     }
@@ -263,6 +267,7 @@ export function replaceCachedSession(
   withCacheTransaction(database, () => {
     writeSource(database, input.session.summary.id, input.source);
     writeSummary(database, input.session);
+    markCatalogSessionReady(database, input.session.summary);
     replaceChildren(database, input.session);
     writeDiagnostics(database, input.session.summary.id, input.diagnostics);
     replaceSessionSearchRows(database, input.session, input.diagnostics);
@@ -294,9 +299,11 @@ export function updateCachedSessionRichContent(
       if (updateTurn.run(json(validatedTurn), session.summary.id, turn.id).changes !== 1) {
         throw new Error("The cached session turn changed while rich content was being stored.");
       }
-      const messages = [turn.userMessage, ...turn.assistantMessages].filter(
-        (message): message is ConversationMessage => message !== null,
-      );
+      const messages = [
+        turn.userMessage,
+        ...(turn.steeringMessages ?? []),
+        ...turn.assistantMessages,
+      ].filter((message): message is ConversationMessage => message !== null);
       for (const message of messages) {
         if (updateMessage.run(json(message.body), session.summary.id, message.id).changes !== 1) {
           throw new Error(
@@ -379,6 +386,7 @@ export function removeCachedSource(database: DatabaseSync, sourcePath: string): 
         database.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
       }
     }
+    database.prepare("DELETE FROM session_catalog WHERE source_path = ?").run(sourcePath);
     database.prepare("DELETE FROM source_files WHERE path = ?").run(sourcePath);
     return sessionId;
   });

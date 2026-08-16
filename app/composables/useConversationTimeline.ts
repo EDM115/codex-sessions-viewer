@@ -16,6 +16,12 @@ export interface ConversationTimelineOptions {
   initialChunk: TurnChunk;
 }
 
+export interface TargetWindowOptions {
+  limit?: number;
+  beforeApply?: (chunk: TurnChunk) => void;
+  afterApply?: (chunk: TurnChunk) => void;
+}
+
 function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : "The conversation chunk could not be loaded.";
 }
@@ -29,6 +35,8 @@ export function useConversationTimeline(options: ConversationTimelineOptions) {
   const loadingBefore = shallowRef(false);
   const loadingAfter = shallowRef(false);
   const loadingTarget = shallowRef(false);
+  const pendingTurnId = shallowRef<string | null>(null);
+  const targetErrorTurnId = shallowRef<string | null>(null);
   let beforeRequest: Promise<void> | null = null;
   let afterRequest: Promise<void> | null = null;
   let targetRequest: Promise<void> | null = null;
@@ -139,7 +147,7 @@ export function useConversationTimeline(options: ConversationTimelineOptions) {
     return request;
   }
 
-  function loadTarget(turnId: string): Promise<void> {
+  function loadTarget(turnId: string, targetOptions: TargetWindowOptions = {}): Promise<void> {
     const generation = ++windowGeneration;
     const sequence = ++requestSequence;
     beforeRequest = null;
@@ -147,19 +155,23 @@ export function useConversationTimeline(options: ConversationTimelineOptions) {
     loadingBefore.value = false;
     loadingAfter.value = false;
     clearError(sequence);
+    targetErrorTurnId.value = null;
     if (turns.value.some(({ id }) => id === turnId)) {
       targetRequest = null;
       loadingTarget.value = false;
+      pendingTurnId.value = null;
       return Promise.resolve();
     }
     loadingTarget.value = true;
+    pendingTurnId.value = turnId;
     const request = options.repository
       .getTurns(options.sessionId, {
         targetTurnId: turnId,
-        limit: CONVERSATION_CHUNK_SIZE,
+        limit: targetOptions.limit ?? CONVERSATION_CHUNK_SIZE,
       })
       .then((chunk) => {
         if (generation === windowGeneration) {
+          targetOptions.beforeApply?.(chunk);
           turns.value = [...chunk.turns];
           turnSequences.clear();
           for (const { id } of chunk.turns) {
@@ -169,18 +181,21 @@ export function useConversationTimeline(options: ConversationTimelineOptions) {
           nextCursor.value = chunk.nextCursor;
           applyRevision(chunk, sequence);
           clearError(sequence);
+          targetOptions.afterApply?.(chunk);
         }
         return undefined;
       })
       .catch((reason: unknown) => {
         if (generation === windowGeneration) {
           applyError(reason, sequence);
+          targetErrorTurnId.value = turnId;
         }
       })
       .finally(() => {
         if (targetRequest === request) {
           targetRequest = null;
           loadingTarget.value = false;
+          pendingTurnId.value = null;
         }
       });
     targetRequest = request;
@@ -246,6 +261,8 @@ export function useConversationTimeline(options: ConversationTimelineOptions) {
     loadingBefore: readonly(loadingBefore),
     loadingAfter: readonly(loadingAfter),
     loadingTarget: readonly(loadingTarget),
+    pendingTurnId: readonly(pendingTurnId),
+    targetErrorTurnId: readonly(targetErrorTurnId),
     canLoadBefore: computed(() => previousCursor.value !== null),
     canLoadAfter: computed(() => nextCursor.value !== null),
     loadBefore: (

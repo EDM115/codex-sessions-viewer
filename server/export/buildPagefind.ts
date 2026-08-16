@@ -9,7 +9,12 @@ import type { CustomRecord } from "pagefind";
 
 import type { ConversationSummary, ConversationTurn } from "../../shared/types/conversation.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
-import { serializeAgentWork, serializeUserPrompt } from "./serializeMarkdown.ts";
+import {
+  finalAssistantMessage,
+  serializeAgentWork,
+  serializeAssistantMessage,
+  serializeUserPrompt,
+} from "./serializeMarkdown.ts";
 
 export interface PagefindBuildResult {
   recordCount: number;
@@ -129,14 +134,16 @@ function projectFromCwd(cwd: string | null): string | null {
 }
 
 function turnContent(turn: ConversationTurn): string {
-  const prompt =
-    turn.userMessage === null
-      ? ""
-      : serializeUserPrompt(
-          turn.userMessage,
-          turn.activities.filter((activity) => activity.kind === "media"),
-        );
-  return [prompt, serializeAgentWork(turn)].filter(Boolean).join("\n\n");
+  const media = turn.activities.filter((activity) => activity.kind === "media");
+  const prompts = [turn.userMessage, ...(turn.steeringMessages ?? [])]
+    .flatMap((message, index) =>
+      message === null ? [] : [serializeUserPrompt(message, index === 0 ? media : [])],
+    )
+    .join("\n\n");
+  const final = finalAssistantMessage(turn);
+  return [prompts, serializeAgentWork(turn), final === null ? "" : serializeAssistantMessage(final)]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function sessionSearchContent(summary: ConversationSummary): string {

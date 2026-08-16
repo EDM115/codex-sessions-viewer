@@ -6,8 +6,8 @@ import type { InspectorTarget, ResolvedAsset } from "#shared/types/repository.ts
 import type { PresentationSettings } from "#shared/types/settings.ts";
 
 import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import ConversationActivityList from "./ConversationActivityList.vue";
 import ConversationMessage from "./ConversationMessage.vue";
+import ConversationWorkStream from "./ConversationWorkStream.vue";
 import { agentWorkText } from "./format.ts";
 
 const props = defineProps<{
@@ -27,6 +27,12 @@ const emit = defineEmits<{
 }>();
 
 const workText = computed(() => agentWorkText(props.turn));
+const finalAssistant = computed(
+  () =>
+    props.turn.assistantMessages.find(({ id }) => id === props.turn.finalAssistantMessageId) ??
+    props.turn.assistantMessages.at(-1) ??
+    null,
+);
 </script>
 
 <template>
@@ -39,21 +45,21 @@ const workText = computed(() => agentWorkText(props.turn));
       :timestamp-format="timestampFormat"
       @open-media="emit('openMedia', $event)"
     />
-    <ConversationActivityList
-      :activities="turn.activities"
-      :reasoning-default="reasoningDefault"
-      :tool-calls-default="toolCallsDefault"
+    <ConversationWorkStream
+      :turn="turn"
+      :resolve-asset="resolveAsset"
+      :resolve-favicon="resolveFavicon"
       @before-resize="emit('beforeResize')"
       @resized="emit('resized')"
     />
     <ConversationMessage
-      v-for="(message, index) in turn.assistantMessages"
-      :key="message.id"
-      :message="message"
+      v-if="finalAssistant !== null"
+      :key="finalAssistant.id"
+      :message="finalAssistant"
       :resolve-asset="resolveAsset"
       :resolve-favicon="resolveFavicon"
       :timestamp-format="timestampFormat"
-      :duration-ms="index === turn.assistantMessages.length - 1 ? turn.durationMs : null"
+      :duration-ms="turn.durationMs"
       :agent-work="workText"
       @inspect="emit('inspect', { type: 'message', id: $event })"
       @open-media="emit('openMedia', $event)"

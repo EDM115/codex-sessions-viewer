@@ -1,14 +1,16 @@
 import {
   jsonValueSchema,
   type ActivityStatus,
+  type FileChangeActivity,
   type JsonObject,
   type JsonValue,
   type ToolActivity,
 } from "../../shared/types/conversation.ts";
 import { payloadObject, type CodexEvent, type TurnScopedEvent } from "./eventSchema.ts";
+import { deriveNestedExecActivities } from "./nestedExec.ts";
 
 interface ToolPairingResult {
-  activities: ToolActivity[];
+  activities: Array<ToolActivity | FileChangeActivity>;
   consumedEventIds: string[];
 }
 
@@ -255,7 +257,8 @@ export function pairToolCalls(events: readonly TurnScopedEvent[]): ToolPairingRe
         output: pair.output,
         error: pair.error,
       };
-    });
+    })
+    .flatMap(deriveNestedExecActivities);
 
   return { activities, consumedEventIds };
 }

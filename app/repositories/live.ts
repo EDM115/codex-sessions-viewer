@@ -4,6 +4,13 @@ import {
   type TurnNavigatorItem,
 } from "#shared/types/conversation.ts";
 import {
+  conversationProjectsSchema,
+  deepSearchJobSchema,
+  preparationResultsSchema,
+  type DeepSearchJob,
+  type PreparationResult,
+} from "#shared/types/library.ts";
+import {
   inspectorRecordSchema,
   repositoryCapabilitiesForMode,
   resolvedAssetSchema,
@@ -24,9 +31,14 @@ import {
   type ViewerInvalidation,
 } from "#shared/types/repository.ts";
 
+export interface RepositoryRequesterOptions extends RepositoryRequestOptions {
+  method?: "GET" | "POST" | "DELETE";
+  body?: unknown;
+}
+
 export type RepositoryRequester = (
   path: string,
-  options?: RepositoryRequestOptions,
+  options?: RepositoryRequesterOptions,
 ) => Promise<unknown>;
 
 function queryString(input: object): string {
@@ -49,11 +61,16 @@ function base64Url(value: string): string {
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
-async function request(path: string, options: RepositoryRequestOptions = {}): Promise<unknown> {
+async function request(path: string, options: RepositoryRequesterOptions = {}): Promise<unknown> {
   const response = await fetch(path, {
-    headers: { Accept: "application/json" },
+    method: options.method,
+    headers: {
+      Accept: "application/json",
+      ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
+    },
     credentials: "same-origin",
     signal: options.signal,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
   if (!response.ok) {
     throw new Error(`Viewer API request failed with HTTP ${response.status}.`);
@@ -72,6 +89,56 @@ export class LiveApiConversationRepository implements ConversationRepository {
     return sessionListResponseSchema.parse(
       await this.requester(`/api/sessions${queryString(query)}`, options),
     );
+  }
+
+  async listProjects(options: RepositoryRequestOptions = {}) {
+    return conversationProjectsSchema.parse(await this.requester("/api/projects", options));
+  }
+
+  async prepareSessions(ids: string[], options: RepositoryRequestOptions = {}) {
+    const unique = [...new Set(ids)];
+    const results: PreparationResult[] = [];
+    // oxlint-disable no-await-in-loop -- The API contract intentionally bounds every preparation mutation to 20 IDs and preserves batch order.
+    for (let offset = 0; offset < unique.length; offset += 20) {
+      const batch = unique.slice(offset, offset + 20);
+      const prepared = preparationResultsSchema.parse(
+        await this.requester("/api/sessions/prepare", {
+          ...options,
+          method: "POST",
+          body: { ids: batch },
+        }),
+      );
+      results.push(...prepared);
+    }
+    // oxlint-enable no-await-in-loop
+    return results;
+  }
+
+  async startDeepSearch(
+    query: SearchQuery,
+    options: RepositoryRequestOptions = {},
+  ): Promise<DeepSearchJob> {
+    const { cursor: _cursor, limit: _limit, ...body } = query;
+    return deepSearchJobSchema.parse(
+      await this.requester("/api/search/materialize", {
+        ...options,
+        method: "POST",
+        body,
+      }),
+    );
+  }
+
+  async getDeepSearch(id: string, options: RepositoryRequestOptions = {}) {
+    return deepSearchJobSchema.parse(
+      await this.requester(`/api/search/materialize/${encodeURIComponent(id)}`, options),
+    );
+  }
+
+  async cancelDeepSearch(id: string, options: RepositoryRequestOptions = {}) {
+    await this.requester(`/api/search/materialize/${encodeURIComponent(id)}`, {
+      ...options,
+      method: "DELETE",
+    });
   }
 
   async search(query: SearchQuery, options: RepositoryRequestOptions = {}) {
@@ -127,6 +194,7 @@ export class LiveApiConversationRepository implements ConversationRepository {
       "session.updated",
       "settings.updated",
       "diagnostic.updated",
+      "search.updated",
     ] as const) {
       const handler: EventListener = (event): void => {
         if (!(event instanceof MessageEvent) || typeof event.data !== "string") {

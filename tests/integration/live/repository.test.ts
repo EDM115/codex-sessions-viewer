@@ -12,10 +12,11 @@ import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
 import { LiveConversationRepository } from "../../../server/live/repository.ts";
 import { conversationSummarySchema } from "../../../shared/types/conversation.ts";
 import { viewerDiagnosticSchema } from "../../../shared/types/diagnostics.ts";
-import { turnChunkSchema, turnNavigatorResponseSchema } from "../../../shared/types/repository.ts";
+import { turnChunkSchema } from "../../../shared/types/repository.ts";
 import {
   hydrateStaticInspectorRecords,
   staticInspectorChunkSchema,
+  staticNavigatorPayloadSchema,
 } from "../../../shared/types/staticPayloads.ts";
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import { representativeLargeSession } from "../../performance/fixtures.ts";
@@ -64,15 +65,7 @@ describe("live repository payloads", () => {
           diagnostics: z.array(viewerDiagnosticSchema),
         })
         .parse(summaryJson);
-      const staticNavigator = z
-        .strictObject({
-          sessionId: z.string(),
-          revision: z.string(),
-          chunkSize: z.int().positive(),
-          items: turnNavigatorResponseSchema,
-          inspectorChunks: z.record(z.string(), z.int().nonnegative()),
-        })
-        .parse(navigatorJson);
+      const staticNavigator = staticNavigatorPayloadSchema.parse(navigatorJson);
       const staticTurns = turnChunkSchema.parse(turnsJson);
       const staticInspectorChunk = staticInspectorChunkSchema.parse(inspectorsJson);
       const staticInspectors = {

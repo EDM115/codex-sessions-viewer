@@ -56,7 +56,9 @@ export default defineNuxtConfig({
   future: { typescriptBundlerResolution: true },
   experimental: {
     asyncContext: true,
-    buildCache: true,
+    // Static exports use isolated absolute staging directories. Nuxt's Windows build cache can
+    // restore those paths as bare `C:/...` ESM specifiers, which makes every prerender route fail.
+    buildCache: viewerMode === "live",
     clientFallback: true,
     clientNodeCompat: true,
     crossOriginPrefetch: true,

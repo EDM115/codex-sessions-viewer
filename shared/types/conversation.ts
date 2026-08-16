@@ -90,6 +90,15 @@ export interface ReasoningActivity extends ConversationActivityBase {
   encrypted: boolean;
 }
 
+export interface GuardianApprovalEvidence {
+  reviewedAction: JsonValue;
+  outcome: "allow" | "deny";
+  riskLevel: string;
+  userAuthorization: string | null;
+  rationale: string;
+  reviewedAt: string | null;
+}
+
 export interface ToolActivity extends ConversationActivityBase {
   kind: "tool";
   namespace: string | null;
@@ -102,6 +111,7 @@ export interface ToolActivity extends ConversationActivityBase {
   input: JsonValue;
   output: JsonValue;
   error: string | null;
+  approval?: GuardianApprovalEvidence | null;
 }
 
 export interface WebSearchActivity extends ConversationActivityBase {
@@ -116,6 +126,22 @@ export interface PatchActivity extends ConversationActivityBase {
   status: ActivityStatus;
   patch: string;
   affectedPaths: string[];
+}
+
+export interface FileChange {
+  path: string;
+  change: "add" | "update" | "delete" | "move";
+  previousPath: string | null;
+  diff: string | null;
+  content: string | null;
+  addedLines: number;
+  removedLines: number;
+}
+
+export interface FileChangeActivity extends ConversationActivityBase {
+  kind: "file_change";
+  status: ActivityStatus;
+  files: FileChange[];
 }
 
 export interface PlanActivity extends ConversationActivityBase {
@@ -166,6 +192,7 @@ export type ConversationActivity =
   | ToolActivity
   | WebSearchActivity
   | PatchActivity
+  | FileChangeActivity
   | PlanActivity
   | SubagentActivity
   | StatusActivity
@@ -173,14 +200,22 @@ export type ConversationActivity =
   | MediaActivity
   | UnknownActivity;
 
+export interface TurnEntryReference {
+  kind: "message" | "activity";
+  id: string;
+}
+
 export interface ConversationTurn {
   id: string;
   sourceTurnId: string | null;
   sessionId: string;
   index: number;
   userMessage: ConversationMessage | null;
+  steeringMessages?: ConversationMessage[];
   assistantMessages: ConversationMessage[];
   activities: ConversationActivity[];
+  entryOrder?: TurnEntryReference[];
+  finalAssistantMessageId?: string | null;
   startedAt: string | null;
   completedAt: string | null;
   durationMs: number | null;
@@ -300,6 +335,15 @@ const activityBaseShape = {
   rawEventIds: z.array(z.string()),
 };
 
+export const guardianApprovalEvidenceSchema = z.strictObject({
+  reviewedAction: jsonValueSchema,
+  outcome: z.enum(["allow", "deny"]),
+  riskLevel: z.string().min(1),
+  userAuthorization: z.string().min(1).nullable(),
+  rationale: z.string().min(1),
+  reviewedAt: nullableTimestampSchema,
+});
+
 export const conversationActivitySchema = z.discriminatedUnion("kind", [
   z.strictObject({
     ...activityBaseShape,
@@ -321,6 +365,7 @@ export const conversationActivitySchema = z.discriminatedUnion("kind", [
     input: jsonValueSchema,
     output: jsonValueSchema,
     error: z.string().nullable(),
+    approval: guardianApprovalEvidenceSchema.nullable().optional(),
   }),
   z.strictObject({
     ...activityBaseShape,
@@ -335,6 +380,22 @@ export const conversationActivitySchema = z.discriminatedUnion("kind", [
     status: activityStatusSchema,
     patch: z.string(),
     affectedPaths: z.array(z.string()),
+  }),
+  z.strictObject({
+    ...activityBaseShape,
+    kind: z.literal("file_change"),
+    status: activityStatusSchema,
+    files: z.array(
+      z.strictObject({
+        path: z.string().min(1),
+        change: z.enum(["add", "update", "delete", "move"]),
+        previousPath: z.string().min(1).nullable(),
+        diff: z.string().nullable(),
+        content: z.string().nullable(),
+        addedLines: countSchema,
+        removedLines: countSchema,
+      }),
+    ),
   }),
   z.strictObject({
     ...activityBaseShape,
@@ -389,8 +450,18 @@ export const conversationTurnSchema = z.strictObject({
   sessionId: z.string().min(1),
   index: countSchema,
   userMessage: conversationMessageSchema.nullable(),
+  steeringMessages: z.array(conversationMessageSchema).optional(),
   assistantMessages: z.array(conversationMessageSchema),
   activities: z.array(conversationActivitySchema),
+  entryOrder: z
+    .array(
+      z.strictObject({
+        kind: z.enum(["message", "activity"]),
+        id: z.string().min(1),
+      }),
+    )
+    .optional(),
+  finalAssistantMessageId: z.string().min(1).nullable().optional(),
   startedAt: nullableTimestampSchema,
   completedAt: nullableTimestampSchema,
   durationMs: z.number().nonnegative().nullable(),
