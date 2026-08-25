@@ -1,8 +1,5 @@
 nodeLinker: isolated
 engineStrict: true
-managePackageManagerVersions: true
-minimumReleaseAgeExclude:
-  - "@axe-core/playwright@4.13.0"
 allowBuilds:
   esbuild: true
   node: true
