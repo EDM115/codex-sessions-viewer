@@ -12,7 +12,7 @@ import {
   type FaviconResolution,
 } from "../content/favicons.ts";
 import { parseRichText } from "../content/parseRichText.ts";
-import { discoverReferencedLocalMedia } from "../ingestion/discoverSources.ts";
+import { discoverReferencedMedia } from "../ingestion/discoverSources.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 
 export interface PrepareConversationExportOptions {
@@ -20,6 +20,7 @@ export interface PrepareConversationExportOptions {
   faviconRoot: string;
   offline: boolean;
   mode?: "export" | "live" | undefined;
+  trustedMediaRoots?: readonly string[] | undefined;
 }
 
 export interface PreparedConversationExport {
@@ -81,11 +82,15 @@ export async function prepareConversationForExport(
   const mediaActivities = conversation.turns.flatMap(({ activities }) =>
     activities.filter((activity) => activity.kind === "media"),
   );
-  const references = discoverReferencedLocalMedia(mediaActivities);
-  const assetIdsByPath = new Map(references.map(({ path, assetId }) => [path, assetId]));
+  const references = discoverReferencedMedia(mediaActivities);
+  const assetIdsByPath = new Map(
+    references.flatMap(({ reference, assetId }) =>
+      reference.kind === "local-file" ? [[reference.path, assetId] as const] : [],
+    ),
+  );
   const embeddedMedia: EmbeddedMediaSource[] = [];
   const discoveredFaviconOrigins = new Set<string>();
-  const assetIds = new Set(references.map(({ assetId }) => assetId));
+  const assetIds = new Set(mediaActivities.map(({ assetId }) => assetId));
   for (const turn of conversation.turns) {
     const messages = [
       turn.userMessage,
@@ -114,10 +119,35 @@ export async function prepareConversationForExport(
       collectDocumentReferences(activity.body, discoveredFaviconOrigins, assetIds);
     }
   }
-  await storeReferencedMedia(database, references, {
+  const storedReferences = await storeReferencedMedia(database, references, {
     assetRoot: options.mediaRoot,
     sessionId: conversation.summary.id,
+    trustedMediaRoots: options.trustedMediaRoots,
   });
+  const storedByAssetId = new Map(storedReferences.map((stored) => [stored.assetId, stored]));
+  for (const activity of mediaActivities) {
+    if (activity.reference.kind !== "data") {
+      continue;
+    }
+    const stored = storedByAssetId.get(activity.assetId);
+    activity.reference =
+      stored?.status === "available" &&
+      stored.mimeType !== null &&
+      stored.byteSize !== null &&
+      stored.sha256 !== null
+        ? {
+            kind: "asset",
+            mimeType: stored.mimeType,
+            byteSize: stored.byteSize,
+            sha256: stored.sha256,
+          }
+        : {
+            kind: "invalid",
+            reason: "extraction-failed",
+            preview: `data:${activity.reference.mimeType};${activity.reference.encoding}`,
+            sourceHash: activity.reference.sourceHash,
+          };
+  }
   await storeEmbeddedMedia(database, embeddedMedia, {
     assetRoot: options.mediaRoot,
     sessionId: conversation.summary.id,

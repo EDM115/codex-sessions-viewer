@@ -5,6 +5,7 @@ import type {
   ConversationActivity,
   ConversationScope,
   MediaActivity,
+  MediaReference,
 } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 
@@ -26,10 +27,10 @@ export interface SourceDiscoveryResult {
   diagnostics: ViewerDiagnostic[];
 }
 
-export interface ReferencedLocalMediaSource {
+export interface ReferencedMediaSource {
   assetId: string;
   mediaType: MediaActivity["mediaType"];
-  path: string;
+  reference: Exclude<MediaReference, { kind: "asset" }>;
 }
 
 interface RolloutDiscoveryResult {
@@ -137,20 +138,20 @@ export async function discoverSources(codexHome: string): Promise<SourceDiscover
   };
 }
 
-export function discoverReferencedLocalMedia(
+export function discoverReferencedMedia(
   activities: Iterable<ConversationActivity>,
-): ReferencedLocalMediaSource[] {
-  const references: ReferencedLocalMediaSource[] = [];
+): ReferencedMediaSource[] {
+  const references: ReferencedMediaSource[] = [];
 
   for (const activity of activities) {
-    if (activity.kind !== "media" || !activity.sourcePath) {
+    if (activity.kind !== "media" || activity.reference.kind === "asset") {
       continue;
     }
 
     references.push({
       assetId: activity.assetId,
       mediaType: activity.mediaType,
-      path: activity.sourcePath,
+      reference: activity.reference,
     });
   }
 

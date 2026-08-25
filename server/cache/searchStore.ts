@@ -70,7 +70,13 @@ function indexActivity(activity: ConversationActivity, columns: SearchColumns): 
       columns.paths.push(...activity.affectedPaths);
       break;
     case "media":
-      columns.paths.push(activity.sourcePath ?? "");
+      columns.paths.push(
+        activity.reference.kind === "local-file"
+          ? activity.reference.path
+          : activity.reference.kind === "remote"
+            ? activity.reference.url
+            : "",
+      );
       break;
     default:
       break;
@@ -171,6 +177,12 @@ function buildFilters(
 ): { sql: string; values: SQLInputValue[] } {
   const clauses = ["session_fts MATCH ?", "s.scope = ?"];
   const values: SQLInputValue[] = [expression, query.scope];
+  if (query.projectId !== undefined) {
+    clauses.push(
+      "EXISTS (SELECT 1 FROM session_catalog AS c WHERE c.id = s.id AND c.project_id = ?)",
+    );
+    values.push(query.projectId);
+  }
   if (query.model !== undefined) {
     clauses.push("EXISTS (SELECT 1 FROM json_each(s.models_json) WHERE value = ?)");
     values.push(query.model);
@@ -192,6 +204,24 @@ function buildFilters(
   return { sql: clauses.join(" AND "), values };
 }
 
+export function countCachedSearchResults(database: DatabaseSync, input: SearchQuery): number {
+  const query = searchQuerySchema.parse(input);
+  const expression = ftsExpression(query.query);
+  if (expression === "") {
+    return 0;
+  }
+  const filters = buildFilters(query, expression);
+  const totalRow = database
+    .prepare(`
+      SELECT count(*) AS total
+      FROM session_fts
+      JOIN sessions AS s ON s.id = session_fts.session_id
+      WHERE ${filters.sql}
+    `)
+    .get(...filters.values);
+  return Number(totalRow?.["total"] ?? 0);
+}
+
 export function searchCachedSessions(
   database: DatabaseSync,
   input: SearchQuery,
@@ -204,15 +234,7 @@ export function searchCachedSessions(
     return { items: [], nextCursor: null, total: 0 };
   }
   const filters = buildFilters(query, expression);
-  const totalRow = database
-    .prepare(`
-      SELECT count(*) AS total
-      FROM session_fts
-      JOIN sessions AS s ON s.id = session_fts.session_id
-      WHERE ${filters.sql}
-    `)
-    .get(...filters.values);
-  const total = Number(totalRow?.["total"] ?? 0);
+  const total = countCachedSearchResults(database, query);
   const rows = database
     .prepare(`
       SELECT

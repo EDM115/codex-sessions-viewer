@@ -157,6 +157,14 @@ describe("duplicate source reconciliation", () => {
         stable: false,
         complete: true,
       },
+      {
+        sessionId: "session-1",
+        path: "C:\\codex\\sessions\\incomplete.jsonl",
+        scope: "active",
+        mtimeMs: 400,
+        stable: true,
+        complete: false,
+      },
     ]);
 
     expect(result.selected).toMatchObject({
@@ -168,8 +176,35 @@ describe("duplicate source reconciliation", () => {
         code: "source.duplicate_session",
         sessionId: "session-1",
         path: "C:\\codex\\archived_sessions\\new.jsonl",
+        details: {
+          candidateCount: 4,
+          selectedPath: "C:\\codex\\archived_sessions\\new.jsonl",
+        },
       }),
     ]);
+  });
+
+  it("breaks equal-mtime ties by normalized path", () => {
+    const result = selectPreferredSessionSource([
+      {
+        sessionId: "session-1",
+        path: "C:\\z\\..\\a.jsonl",
+        scope: "active",
+        mtimeMs: 100,
+        stable: true,
+        complete: true,
+      },
+      {
+        sessionId: "session-1",
+        path: "C:\\b.jsonl",
+        scope: "archived",
+        mtimeMs: 100,
+        stable: true,
+        complete: true,
+      },
+    ]);
+
+    expect(result.selected?.path).toBe("C:\\z\\..\\a.jsonl");
   });
 
   it("returns no selected source while every candidate is unstable or incomplete", () => {

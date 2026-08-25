@@ -10,6 +10,7 @@ import { listCachedSourcePaths } from "../cache/conversationStore.ts";
 import { openCacheDatabase } from "../cache/database.ts";
 import type { StableJsonlReader } from "../cache/sourceManifest.ts";
 import {
+  resolvedTrustedMediaRoots,
   saveServerViewerConfig,
   validateCodexHome,
   type LoadedServerViewerConfig,
@@ -114,6 +115,7 @@ export class LiveViewerRuntime {
       debounceMs: options.debounceMs,
       reconciliationIntervalMs: options.reconciliationIntervalMs,
       fetchFavicons: config.settings.fetchFavicons,
+      trustedMediaRoots: resolvedTrustedMediaRoots(config.settings),
       readJsonl: options.readJsonl,
       onError: options.onError,
     });
@@ -228,6 +230,7 @@ export class LiveViewerRuntime {
       debounceMs: this.#options.debounceMs,
       reconciliationIntervalMs: this.#options.reconciliationIntervalMs,
       fetchFavicons: settings.fetchFavicons,
+      trustedMediaRoots: resolvedTrustedMediaRoots(settings),
       readJsonl: this.#options.readJsonl,
       onError: this.#options.onError,
     });

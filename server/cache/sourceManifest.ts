@@ -51,6 +51,8 @@ export interface SessionCacheUpdaterOptions {
 
 export interface SessionCacheUpdateContext {
   force?: boolean | undefined;
+  expectedCatalogSessionId?: string | undefined;
+  expectedCatalogSourceRevision?: string | undefined;
   sessionIndexEntries?: SessionIndexEntry[] | undefined;
   stateSnapshot?: StateMetadataSnapshot | null | undefined;
 }
@@ -72,6 +74,13 @@ export type SessionCacheUpdateResult =
       status: "failed";
       retainedSessionId: string | null;
       diagnostics: ViewerDiagnostic[];
+    }
+  | {
+      status: "stale-catalog";
+      sessionId: string;
+      fingerprint: SourceFingerprint;
+      retainedSessionId: string;
+      diagnostics: [];
     };
 
 interface ObservedSource {
@@ -226,6 +235,32 @@ function storeTouchedSourceFingerprint(
     );
   if (updated.changes !== 1) {
     throw new Error("The cached source fingerprint changed while its mtime was being refreshed.");
+  }
+}
+
+export async function refreshUnchangedSourceManifest(
+  database: DatabaseSync,
+  path: string,
+  expectedSessionId: string,
+): Promise<boolean> {
+  const entry = getSourceManifestEntry(database, path);
+  if (entry === null || entry.sessionId !== expectedSessionId) {
+    return false;
+  }
+  try {
+    const observed = await observeSource(path);
+    if (matchesFingerprint(entry, observed, CACHE_PARSER_VERSION)) {
+      return true;
+    }
+    const fingerprint = await verifyTouchedSource(entry, observed, CACHE_PARSER_VERSION);
+    if (fingerprint === null) {
+      return false;
+    }
+    storeTouchedSourceFingerprint(database, entry, fingerprint);
+    clearSourceFailureDiagnostics(database, path);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -456,8 +491,27 @@ export class SessionCacheUpdater {
         diagnostics,
       };
     }
+    if (
+      context.expectedCatalogSessionId !== undefined &&
+      normalized.session.summary.id !== context.expectedCatalogSessionId
+    ) {
+      const mismatchDiagnostics = [
+        cacheFailure(
+          source.path,
+          new Error(
+            `Expected session ${context.expectedCatalogSessionId}, received ${normalized.session.summary.id}.`,
+          ),
+        ),
+      ];
+      replaceSourceFailureDiagnostics(this.#database, source.path, mismatchDiagnostics);
+      return {
+        status: "failed",
+        retainedSessionId: getSourceManifestEntry(this.#database, source.path)?.sessionId ?? null,
+        diagnostics: mismatchDiagnostics,
+      };
+    }
     normalized.session.summary.diagnosticCount = diagnostics.length;
-    replaceCachedSession(this.#database, {
+    const replacement = replaceCachedSession(this.#database, {
       session: normalized.session,
       diagnostics,
       source: {
@@ -465,7 +519,17 @@ export class SessionCacheUpdater {
         scope: source.scope,
         identity: candidate.identity,
       },
+      expectedCatalogSourceRevision: context.expectedCatalogSourceRevision,
     });
+    if (replacement.status === "stale-catalog") {
+      return {
+        status: "stale-catalog",
+        sessionId: normalized.session.summary.id,
+        fingerprint: candidate.fingerprint,
+        retainedSessionId: normalized.session.summary.id,
+        diagnostics: [],
+      };
+    }
     clearSourceFailureDiagnostics(this.#database, source.path);
     if (this.#retainLiveSources) {
       this.#liveSources.set(source.path, candidate);

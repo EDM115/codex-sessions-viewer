@@ -15,7 +15,7 @@ import {
   type NormalizedRawEvent,
   type NormalizedSession,
 } from "../normalization/normalizeSession.ts";
-import { markCatalogSessionReady } from "./catalogStore.ts";
+import { catalogSession, markCatalogSessionReady } from "./catalogStore.ts";
 import { withCacheTransaction } from "./database.ts";
 import { replaceSessionSearchRows } from "./searchStore.ts";
 
@@ -29,7 +29,12 @@ export interface ReplaceCachedSessionInput {
   session: NormalizedSession;
   diagnostics: readonly ViewerDiagnostic[];
   source: CachedSourceWrite;
+  expectedCatalogSourceRevision?: string | undefined;
 }
+
+export type ReplaceCachedSessionResult = { status: "committed" } | { status: "stale-catalog" };
+
+class StaleCatalogCommitError extends Error {}
 
 const rawEventSchema = z.strictObject({
   id: z.string().min(1),
@@ -263,15 +268,48 @@ function writeDiagnostics(
 export function replaceCachedSession(
   database: DatabaseSync,
   input: ReplaceCachedSessionInput,
-): void {
-  withCacheTransaction(database, () => {
-    writeSource(database, input.session.summary.id, input.source);
-    writeSummary(database, input.session);
-    markCatalogSessionReady(database, input.session.summary);
-    replaceChildren(database, input.session);
-    writeDiagnostics(database, input.session.summary.id, input.diagnostics);
-    replaceSessionSearchRows(database, input.session, input.diagnostics);
-  });
+): ReplaceCachedSessionResult {
+  try {
+    return withCacheTransaction(database, () => {
+      const expectedRevision = input.expectedCatalogSourceRevision;
+      if (expectedRevision !== undefined) {
+        const catalog = catalogSession(database, input.session.summary.id);
+        if (
+          catalog === null ||
+          catalog.kind === "auxiliary" ||
+          catalog.sourceRevision !== expectedRevision ||
+          catalog.summary.sourcePath !== input.source.fingerprint.path ||
+          input.session.summary.sourcePath !== input.source.fingerprint.path
+        ) {
+          return { status: "stale-catalog" };
+        }
+      }
+      writeSource(database, input.session.summary.id, input.source);
+      writeSummary(database, input.session);
+      const markedReady = markCatalogSessionReady(
+        database,
+        input.session.summary,
+        expectedRevision === undefined
+          ? undefined
+          : {
+              sourceRevision: expectedRevision,
+              sourcePath: input.source.fingerprint.path,
+            },
+      );
+      if (expectedRevision !== undefined && !markedReady) {
+        throw new StaleCatalogCommitError();
+      }
+      replaceChildren(database, input.session);
+      writeDiagnostics(database, input.session.summary.id, input.diagnostics);
+      replaceSessionSearchRows(database, input.session, input.diagnostics);
+      return { status: "committed" };
+    });
+  } catch (error) {
+    if (error instanceof StaleCatalogCommitError) {
+      return { status: "stale-catalog" };
+    }
+    throw error;
+  }
 }
 
 export function updateCachedSessionRichContent(

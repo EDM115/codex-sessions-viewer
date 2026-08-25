@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "cross-env CODEX_VIEWER_MODE=live nuxt build",
-    "coverage": "vitest run --coverage",
+    "coverage": "vitest run --coverage --testTimeout=15000 --maxWorkers=1 --no-file-parallelism",
     "dev": "pnpm live",
     "doctor": "jiti scripts/doctor.ts",
     "export": "jiti scripts/export.ts",
@@ -20,7 +20,9 @@
     "test:integration": "vitest run --project node tests/integration --passWithNoTests",
     "test:performance": "vitest run --project performance",
     "typecheck": "nuxt typecheck && tsc -p tsconfig.custom.json",
-    "verify:output": "jiti scripts/verify-output.ts"
+    "verify:output": "jiti scripts/verify-output.ts",
+    "verify:release": "pnpm verify:source && pnpm build && pnpm test:e2e",
+    "verify:source": "pnpm exec nuxt prepare && pnpm format:check && pnpm typecheck && pnpm lint && pnpm test && pnpm test:integration && pnpm test:performance && pnpm coverage"
   },
   "dependencies": {
     "@fontsource-variable/fira-code": "5.3.0",

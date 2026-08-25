@@ -13,6 +13,21 @@ function configuredPort(): number | undefined {
   return Number.isInteger(port) && port >= 1 && port <= 65_535 ? port : undefined;
 }
 
+function configuredMediaRoots(): string[] | undefined {
+  const source = process.env["CODEX_VIEWER_MEDIA_ROOTS"]?.trim();
+  if (source === undefined || source === "") {
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(source);
+    return Array.isArray(parsed) && parsed.every((value) => typeof value === "string")
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export default defineNitroPlugin(async (nitroApp) => {
   if (useRuntimeConfig().viewerMode !== "live") {
     return;
@@ -22,6 +37,7 @@ export default defineNitroPlugin(async (nitroApp) => {
     cli: {
       codexHome: process.env["CODEX_VIEWER_CODEX_HOME"],
       port: configuredPort(),
+      trustedMediaRoots: configuredMediaRoots(),
     },
   });
   const runtime = await LiveViewerRuntime.start(config, {

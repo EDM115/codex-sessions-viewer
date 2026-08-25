@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import {
@@ -21,6 +22,7 @@ export interface ServerConfigCliOptions {
   codexHome?: string | undefined;
   port?: number | undefined;
   fetchFavicons?: boolean | undefined;
+  trustedMediaRoots?: string[] | undefined;
 }
 
 export interface LoadServerViewerConfigOptions extends PathResolutionOptions {
@@ -160,11 +162,14 @@ export async function loadServerViewerConfig(
     cliCodexHome: options["cli"]?.codexHome,
     configuredCodexHome: persisted.settings?.codexHome,
   });
+  const trustedMediaRoots =
+    options["cli"]?.trustedMediaRoots ?? persisted.settings?.trustedMediaRoots;
   const settingsInput = {
     codexHome: codexHome.path,
     port: options["cli"]?.port ?? persisted.settings?.port ?? DEFAULT_SERVER_PORT,
     fetchFavicons:
       options["cli"]?.fetchFavicons ?? persisted.settings?.fetchFavicons ?? DEFAULT_FETCH_FAVICONS,
+    ...(trustedMediaRoots === undefined ? {} : { trustedMediaRoots }),
   };
   const parsedSettings = serverViewerSettingsSchema.safeParse(settingsInput);
   const diagnostics = [...persisted.diagnostics];
@@ -201,6 +206,10 @@ export async function loadServerViewerConfig(
     onboardingRequired: codexHomeDiagnostic !== null,
     diagnostics,
   };
+}
+
+export function resolvedTrustedMediaRoots(settings: ServerViewerSettings): string[] {
+  return settings.trustedMediaRoots ?? [join(settings.codexHome, "attachments")];
 }
 
 export async function saveServerViewerConfig(

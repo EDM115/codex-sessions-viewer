@@ -10,9 +10,10 @@ import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import { getCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
 import { openCacheDatabase } from "../cache/database.ts";
 import { SessionCacheUpdater } from "../cache/sourceManifest.ts";
-import { loadServerViewerConfig } from "../core/config.ts";
+import { loadServerViewerConfig, resolvedTrustedMediaRoots } from "../core/config.ts";
 import type { ViewerPaths } from "../core/paths.ts";
 import { discoverSources } from "../ingestion/discoverSources.ts";
+import { selectSessionSources } from "../ingestion/selectSessionSources.ts";
 import { readGlobalState } from "../metadata/globalState.ts";
 import { readSessionIndex, type SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import { snapshotStateDatabase, type StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
@@ -91,6 +92,7 @@ export interface RunStaticExportOptions {
   offline?: boolean | undefined;
   force?: boolean | undefined;
   index?: boolean | undefined;
+  trustedMediaRoots?: string[] | undefined;
   paths?: ViewerPaths | undefined;
   generate?: StaticGenerateRunner | undefined;
   buildSearch?: PagefindBuilder | undefined;
@@ -235,6 +237,7 @@ async function prepareConversations(
   sessionIds: ReadonlySet<string>,
   paths: ViewerPaths,
   offline: boolean,
+  trustedMediaRoots: readonly string[],
   failedSessions: Set<string>,
   richContentFailures: RichContentFailure[],
   prepareConversation: ConversationPreparer,
@@ -292,6 +295,7 @@ async function prepareConversations(
         mediaRoot: join(paths.cacheDir, "assets"),
         faviconRoot: join(paths.cacheDir, "favicons"),
         offline,
+        trustedMediaRoots,
       });
     } catch (error) {
       richContentFailures.push(richContentFailure(cached, "prepare", error));
@@ -345,14 +349,18 @@ export async function runStaticExport(
   progress.status("Resolving viewer configuration and Codex home");
   const config = await loadServerViewerConfig({
     paths: options.paths,
-    cli: { codexHome: options.codexHome },
+    cli: { codexHome: options.codexHome, trustedMediaRoots: options.trustedMediaRoots },
   });
   progress.step(`Resolved Codex home: ${config.settings.codexHome}`);
   progress.status("Discovering active and archived Codex sessions");
   const discovery = await discoverSources(config.settings.codexHome);
+  const sourceSelection = await selectSessionSources(discovery.rollouts);
+  const selectedSources = sourceSelection.selected.map(({ source }) => source);
   progress.step(
-    `Discovered ${discovery.rollouts.length} ${pluralize("session", discovery.rollouts.length)}`,
-    discovery.diagnostics.length === 0 ? "success" : "neutral",
+    `Discovered ${selectedSources.length} ${pluralize("session", selectedSources.length)}`,
+    discovery.diagnostics.length === 0 && sourceSelection.diagnostics.length === 0
+      ? "success"
+      : "neutral",
   );
   progress.status("Reading optional Codex metadata");
   const metadata = await loadExportMetadata(discovery, config.paths, progress);
@@ -362,7 +370,12 @@ export async function runStaticExport(
       : "Codex metadata ready with diagnostics",
     metadata.diagnostics.length === 0 ? "success" : "neutral",
   );
-  const diagnostics = [...config.diagnostics, ...discovery.diagnostics, ...metadata.diagnostics];
+  const diagnostics = [
+    ...config.diagnostics,
+    ...discovery.diagnostics,
+    ...sourceSelection.diagnostics,
+    ...metadata.diagnostics,
+  ];
   const diagnosticsBySession = new Map<string, ViewerDiagnostic[]>();
   const failedSessions = new Set<string>();
   const richContentFailures: RichContentFailure[] = [];
@@ -377,8 +390,8 @@ export async function runStaticExport(
       sessionIndexEntries: metadata.sessionIndexEntries,
       stateSnapshot: metadata.stateSnapshot,
     });
-    progress.statusProgress("Updating session cache", 0, discovery.rollouts.length);
-    for (const [sourceIndex, source] of discovery.rollouts.entries()) {
+    progress.statusProgress("Updating session cache", 0, selectedSources.length);
+    for (const [sourceIndex, source] of selectedSources.entries()) {
       // oxlint-disable-next-line no-await-in-loop -- Source updates are intentionally serialized around one SQLite cache and stable-read state.
       const result = await updater.update(source, { force: options.force });
       if (result.status === "updated") {
@@ -404,7 +417,7 @@ export async function runStaticExport(
           failedSessions.add(`source:${source.path}`);
         }
       }
-      progress.statusProgress("Updating session cache", sourceIndex + 1, discovery.rollouts.length);
+      progress.statusProgress("Updating session cache", sourceIndex + 1, selectedSources.length);
     }
     progress.step(
       `Session cache ready: ${transformedSessions.size} transformed, ${reusedSessions.size} reused, ${failedSessions.size} failed`,
@@ -427,6 +440,7 @@ export async function runStaticExport(
       sessionIds,
       config.paths,
       options.offline === true || !config.settings.fetchFavicons,
+      resolvedTrustedMediaRoots(config.settings),
       failedSessions,
       richContentFailures,
       options.prepareConversation ?? prepareConversationForExport,
@@ -571,7 +585,7 @@ export async function runStaticExport(
       return {
         codexHome: config.settings.codexHome,
         outputRoot,
-        discovered: discovery.rollouts.length,
+        discovered: selectedSources.length,
         transformed: transformedSessions.size,
         reused: reusedSessions.size,
         failed: failedSessions.size,

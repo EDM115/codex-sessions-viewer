@@ -10,6 +10,7 @@ Usage: pnpm export [options]
 
 Options:
   --codex-home <path>  Read sessions from this Codex home
+  --media-root <path>  Trust local attachments under this root (repeatable)
   --output <path>      Write the generated site to this directory
   --offline            Disable remote favicon requests
   --force              Retransform every discovered session
@@ -33,6 +34,7 @@ async function main(): Promise<void> {
       offline: args.offline,
       force: args.force,
       index: args.index,
+      trustedMediaRoots: args.trustedMediaRoots,
       progress,
     });
   } catch (error) {

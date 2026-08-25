@@ -7,24 +7,30 @@ import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/type
 import type { ConversationProject } from "../../shared/types/library.ts";
 import {
   listCatalogProjects,
+  listAllCatalogSessions,
   removeCatalogSource,
   upsertCatalogSessions,
   type CatalogSessionInput,
   type CatalogSessionKind,
 } from "../cache/catalogStore.ts";
 import { removeCachedSource } from "../cache/conversationStore.ts";
-import type { SourceDiscoveryResult } from "../ingestion/discoverSources.ts";
 import {
+  CACHE_PARSER_VERSION,
+  refreshUnchangedSourceManifest,
+  type StableJsonlReader,
+} from "../cache/sourceManifest.ts";
+import type { SourceDiscoveryResult } from "../ingestion/discoverSources.ts";
+import { selectSessionSources } from "../ingestion/selectSessionSources.ts";
+import {
+  observeSessionMetaSource,
   readSessionMetaPrefix,
   type SessionMetaPrefix,
+  type SessionMetaPrefixObservation,
   type SessionMetaPrefixResult,
 } from "../ingestion/sessionMetaPrefix.ts";
 import type { GlobalStateMetadata } from "../metadata/globalState.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot, StateThreadMetadata } from "../metadata/stateSnapshot.ts";
-
-const DEFAULT_PREFIX_BYTES = 4_096;
-const PREFIX_READ_CONCURRENCY = 32;
 
 export interface SessionMetaClassification {
   kind: CatalogSessionKind;
@@ -42,10 +48,13 @@ export interface RefreshLiveCatalogOptions {
   stateSnapshot: StateMetadataSnapshot | null;
   prefixBytes?: number | undefined;
   readPrefix?: typeof readSessionMetaPrefix | undefined;
+  readJsonl?: StableJsonlReader | undefined;
+  observeSource?: ((path: string) => Promise<SessionMetaPrefixObservation>) | undefined;
 }
 
 export interface CatalogRefreshResult {
   rows: CatalogSessionInput[];
+  changedIds: string[];
   projects: ConversationProject[];
   removedIds: string[];
   diagnostics: ViewerDiagnostic[];
@@ -55,6 +64,124 @@ export interface CatalogRefreshResult {
 interface DraftCatalogRow {
   input: CatalogSessionInput;
   prefix: SessionMetaPrefixResult;
+}
+
+const SOURCE_OBSERVATION_CONCURRENCY = 32;
+const CATALOG_REVISION_PREFIX = `catalog:${CACHE_PARSER_VERSION}:`;
+
+function sourcePathKey(path: string): string {
+  const normalized = resolve(path);
+  return process.platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
+}
+
+function matchingCatalogObservation(
+  existing: CatalogSessionInput,
+  observed: SessionMetaPrefixObservation,
+): boolean {
+  return (
+    existing.sourceDevice === observed.device.toString() &&
+    existing.sourceInode === observed.inode.toString() &&
+    existing.sourceSize === Number(observed.size) &&
+    existing.sourceMtimeMs === Number(observed.mtimeNs) / 1_000_000 &&
+    observed.regular &&
+    !observed.symbolicLink
+  );
+}
+
+function cachedSessionSource(
+  existing: CatalogSessionInput,
+  observation: SessionMetaPrefixObservation,
+): SessionMetaPrefixResult {
+  let subagentSource: JsonValue = null;
+  if (existing.kind === "auxiliary") {
+    subagentSource = {
+      subagent: { other: "guardian", parent_thread_id: existing.parentThreadId },
+    };
+  } else if (existing.kind === "subagent") {
+    subagentSource = {
+      subagent: {
+        thread_spawn: {
+          parent_thread_id: existing.parentThreadId,
+          agent_path: existing.agentPath,
+          agent_nickname: existing.agentNickname,
+          depth: existing.agentDepth,
+        },
+      },
+    };
+  }
+  return {
+    status: "found",
+    meta: {
+      id: existing.summary.id,
+      parentThreadId: existing.parentThreadId,
+      timestamp: existing.summary.createdAt,
+      cwd: existing.summary.cwd,
+      source: subagentSource,
+      modelProvider: null,
+      git: {
+        branch: existing.summary.gitBranch,
+        commitHash: existing.summary.gitSha,
+        repositoryUrl: existing.summary.gitOriginUrl,
+      },
+    },
+    parentThreadIdHint: existing.parentThreadId,
+    bytesRead: 0,
+    observation,
+    diagnostics: [],
+  };
+}
+
+async function reusablePrefixes(options: RefreshLiveCatalogOptions): Promise<{
+  prefixes: Map<string, SessionMetaPrefixResult>;
+  rows: Map<string, CatalogSessionInput>;
+}> {
+  const existingByPath = new Map(
+    listAllCatalogSessions(options.database).map((record) => [
+      sourcePathKey(record.summary.sourcePath),
+      record,
+    ]),
+  );
+  const reusable = new Map<string, SessionMetaPrefixResult>();
+  const reusableRows = new Map<string, CatalogSessionInput>();
+  const observeSource = options.observeSource ?? observeSessionMetaSource;
+  for (
+    let index = 0;
+    index < options.discovery.rollouts.length;
+    index += SOURCE_OBSERVATION_CONCURRENCY
+  ) {
+    const sources = options.discovery.rollouts.slice(index, index + SOURCE_OBSERVATION_CONCURRENCY);
+    // oxlint-disable-next-line no-await-in-loop -- Bounded batches cap cheap source observations at the prefix-read concurrency limit.
+    const observations = await Promise.all(
+      sources.map(async (source) => {
+        const existing = existingByPath.get(sourcePathKey(source.path));
+        if (existing === undefined) {
+          return null;
+        }
+        try {
+          const observation = await observeSource(source.path);
+          const unchanged =
+            matchingCatalogObservation(existing, observation) ||
+            (await refreshUnchangedSourceManifest(
+              options.database,
+              source.path,
+              existing.summary.id,
+            ));
+          return unchanged
+            ? { path: source.path, prefix: cachedSessionSource(existing, observation), existing }
+            : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const entry of observations) {
+      if (entry !== null) {
+        reusable.set(sourcePathKey(entry.path), entry.prefix);
+        reusableRows.set(sourcePathKey(entry.path), entry.existing);
+      }
+    }
+  }
+  return { prefixes: reusable, rows: reusableRows };
 }
 
 function asRecord(value: JsonValue | null | undefined): Record<string, JsonValue> | null {
@@ -126,11 +253,21 @@ function sourceRevision(prefix: SessionMetaPrefixResult): string {
   const observation = prefix.observation;
   return [
     "catalog",
+    CACHE_PARSER_VERSION,
     observation.device,
     observation.inode,
     observation.size,
     observation.mtimeNs / BigInt(1_000_000),
   ].join(":");
+}
+
+function reusableSourceRevision(
+  existing: CatalogSessionInput | undefined,
+  prefix: SessionMetaPrefixResult,
+): string {
+  return existing?.sourceRevision.startsWith(CATALOG_REVISION_PREFIX) === true
+    ? existing.sourceRevision
+    : sourceRevision(prefix);
 }
 
 function sectionName(
@@ -152,6 +289,7 @@ function coldSummary(options: {
   section: string | null;
   parentThreadId: string | null;
   childThreadIds: string[];
+  existingSummary?: ConversationSummary | undefined;
 }): ConversationSummary {
   const { id, source, prefix, sessionIndex, thread } = options;
   const mtimeMs = Number(prefix.observation.mtimeNs) / 1_000_000;
@@ -160,14 +298,18 @@ function coldSummary(options: {
     stateTimestamp(thread?.createdAt, Number.isFinite(mtimeMs) ? mtimeMs : 0);
   const updatedAt =
     sessionIndex?.updatedAt ??
-    stateTimestamp(thread?.updatedAt, Number.isFinite(mtimeMs) ? mtimeMs : 0);
+    (thread?.updatedAt === undefined
+      ? options.existingSummary?.updatedAt
+      : stateTimestamp(thread.updatedAt, Number.isFinite(mtimeMs) ? mtimeMs : 0)) ??
+    stateTimestamp(undefined, Number.isFinite(mtimeMs) ? mtimeMs : 0);
   const title =
     sessionIndex?.threadName?.trim() ||
     thread?.name?.trim() ||
     thread?.title.trim() ||
     thread?.firstUserMessage.trim() ||
+    options.existingSummary?.title ||
     fallbackSessionId(source.path);
-  const preview = thread?.firstUserMessage.trim() || title;
+  const preview = thread?.firstUserMessage.trim() || options.existingSummary?.preview || title;
   const cwd = prefix.meta?.cwd ?? thread?.cwd ?? null;
   return {
     id,
@@ -308,30 +450,6 @@ function applyTopology(
   }
 }
 
-async function readPrefixes(
-  options: RefreshLiveCatalogOptions,
-): Promise<
-  Array<{ source: SourceDiscoveryResult["rollouts"][number]; prefix: SessionMetaPrefixResult }>
-> {
-  const results: Array<{
-    source: SourceDiscoveryResult["rollouts"][number];
-    prefix: SessionMetaPrefixResult;
-  }> = [];
-  const readPrefix = options.readPrefix ?? readSessionMetaPrefix;
-  for (let index = 0; index < options.discovery.rollouts.length; index += PREFIX_READ_CONCURRENCY) {
-    const batch = options.discovery.rollouts.slice(index, index + PREFIX_READ_CONCURRENCY);
-    // oxlint-disable-next-line no-await-in-loop -- Bounded batches prevent hundreds of simultaneous rollout handles.
-    const prefixes = await Promise.all(
-      batch.map(async (source) => ({
-        source,
-        prefix: await readPrefix(source.path, options.prefixBytes ?? DEFAULT_PREFIX_BYTES),
-      })),
-    );
-    results.push(...prefixes);
-  }
-  return results;
-}
-
 function requiredText(row: Record<string, SQLOutputValue>, key: string): string {
   const value = row[key];
   if (typeof value !== "string") {
@@ -343,8 +461,16 @@ function requiredText(row: Record<string, SQLOutputValue>, key: string): string 
 export async function refreshLiveCatalog(
   options: RefreshLiveCatalogOptions,
 ): Promise<CatalogRefreshResult> {
-  const diagnostics = [...options.discovery.diagnostics];
-  const prefixes = await readPrefixes(options);
+  const reusable = await reusablePrefixes(options);
+  const readPrefix = options.readPrefix ?? readSessionMetaPrefix;
+  const sourceSelection = await selectSessionSources(options.discovery.rollouts, {
+    prefixBytes: options.prefixBytes,
+    readPrefix: (path, maxBytes) =>
+      Promise.resolve(reusable.prefixes.get(sourcePathKey(path)) ?? readPrefix(path, maxBytes)),
+    readJsonl: options.readJsonl,
+  });
+  const diagnostics = [...options.discovery.diagnostics, ...sourceSelection.diagnostics];
+  const prefixes = sourceSelection.selected;
   const sessionIndex = new Map(options.sessionIndexEntries.map((entry) => [entry.id, entry]));
   const threads = new Map(
     (options.stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread]),
@@ -353,30 +479,15 @@ export async function refreshLiveCatalog(
     (options.stateSnapshot?.sections ?? []).map((section) => [section.id, section.name]),
   );
   const pinned = new Set(options.globalState.pinnedThreadIds);
-  const seenIds = new Set<string>();
   const drafts: DraftCatalogRow[] = [];
 
   for (const { source, prefix } of prefixes) {
-    diagnostics.push(...prefix.diagnostics);
     if (prefix.status === "changed") {
       continue;
     }
     const id = prefix.meta?.id ?? fallbackSessionId(source.path);
-    if (seenIds.has(id)) {
-      diagnostics.push(
-        createViewerDiagnostic({
-          code: "metadata.snapshot_invalid",
-          severity: "warning",
-          area: "metadata",
-          message: "A duplicate session ID was ignored while building the conversation catalog.",
-          path: source.path,
-          details: { sessionId: id },
-        }),
-      );
-      continue;
-    }
-    seenIds.add(id);
     const thread = threads.get(id);
+    const existing = reusable.rows.get(sourcePathKey(source.path));
     const classification = classifySessionMeta(
       prefix.meta,
       thread?.model,
@@ -392,6 +503,7 @@ export async function refreshLiveCatalog(
       section: sectionName(thread, sections),
       parentThreadId: classification.parentThreadId,
       childThreadIds: [],
+      existingSummary: existing?.summary,
     });
     const project = resolveConversationProject(
       { cwd: summary.cwd, gitOriginUrl: summary.gitOriginUrl },
@@ -409,11 +521,11 @@ export async function refreshLiveCatalog(
         agentNickname: classification.agentNickname,
         agentDepth: classification.agentDepth,
         childCount: 0,
-        sourceSize: Number(prefix.observation.size),
-        sourceMtimeMs: Number(prefix.observation.mtimeNs) / 1_000_000,
-        sourceDevice: prefix.observation.device.toString(),
-        sourceInode: prefix.observation.inode.toString(),
-        sourceRevision: sourceRevision(prefix),
+        sourceSize: existing?.sourceSize ?? Number(prefix.observation.size),
+        sourceMtimeMs: existing?.sourceMtimeMs ?? Number(prefix.observation.mtimeNs) / 1_000_000,
+        sourceDevice: existing?.sourceDevice ?? prefix.observation.device.toString(),
+        sourceInode: existing?.sourceInode ?? prefix.observation.inode.toString(),
+        sourceRevision: reusableSourceRevision(existing, prefix),
         error: null,
       },
     });
@@ -421,9 +533,9 @@ export async function refreshLiveCatalog(
 
   applyTopology(drafts, options.stateSnapshot, diagnostics);
   const rows = drafts.map(({ input }) => input);
-  upsertCatalogSessions(options.database, rows);
+  const changedIds = upsertCatalogSessions(options.database, rows);
 
-  const expectedPaths = new Set(options.discovery.rollouts.map(({ path }) => resolve(path)));
+  const expectedPaths = new Set(prefixes.map(({ source }) => resolve(source.path)));
   const removedIds: string[] = [];
   for (const row of options.database.prepare("SELECT id, source_path FROM session_catalog").all()) {
     const id = requiredText(row, "id");
@@ -438,9 +550,10 @@ export async function refreshLiveCatalog(
 
   return {
     rows,
+    changedIds,
     projects: listCatalogProjects(options.database),
     removedIds: removedIds.toSorted(),
     diagnostics,
-    bytesRead: prefixes.reduce((total, { prefix }) => total + prefix.bytesRead, 0),
+    bytesRead: sourceSelection.bytesRead,
   };
 }

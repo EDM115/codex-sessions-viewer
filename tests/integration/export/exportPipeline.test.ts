@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rm,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,12 +15,15 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import * as z from "zod";
 
+import { getCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import { SessionCacheUpdater } from "../../../server/cache/sourceManifest.ts";
 import type { ViewerPaths } from "../../../server/core/paths.ts";
 import { collectDoctorReport } from "../../../server/export/doctorReport.ts";
 import { runStaticExport } from "../../../server/export/exportPipeline.ts";
 import { CliExportProgress } from "../../../server/export/exportProgress.ts";
+import { discoverSources } from "../../../server/ingestion/discoverSources.ts";
+import { refreshLiveCatalog } from "../../../server/live/catalogBuilder.ts";
 import {
   hydrateStaticInspectorRecords,
   staticInspectorChunkSchema,
@@ -55,6 +59,78 @@ afterEach(async () => {
 });
 
 describe("static export pipeline", () => {
+  it("selects the same newest stable complete duplicate as the live catalog", async () => {
+    const root = await temporaryRoot();
+    const codexHome = join(root, "codex-home");
+    const active = join(codexHome, "sessions", "active.jsonl");
+    const archived = join(codexHome, "archived_sessions", "archived.jsonl");
+    const generatedRoot = join(root, ".generated");
+    const outputRoot = join(root, ".output", "public");
+    const paths = viewerPaths(root);
+    await Promise.all([
+      mkdir(join(codexHome, "sessions"), { recursive: true }),
+      mkdir(join(codexHome, "archived_sessions"), { recursive: true }),
+    ]);
+    const fixture = await readFile(
+      new URL("../../fixtures/rollouts/modern.jsonl", import.meta.url),
+      "utf8",
+    );
+    await Promise.all([
+      writeFile(active, fixture.replace("Build the parser", "Active older"), "utf8"),
+      writeFile(archived, fixture.replace("Build the parser", "Archived winner"), "utf8"),
+    ]);
+    const now = Date.now() / 1_000;
+    await Promise.all([utimes(active, now - 20, now - 20), utimes(archived, now - 10, now - 10)]);
+    const discovery = await discoverSources(codexHome);
+    const liveDatabase = openCacheDatabase(":memory:");
+    const live = await refreshLiveCatalog({
+      database: liveDatabase,
+      discovery,
+      sessionIndexEntries: [],
+      globalState: { projects: [], pinnedThreadIds: [] },
+      stateSnapshot: { threads: [], sections: [], spawnEdges: [] },
+    });
+    liveDatabase.close();
+
+    const exported = await runStaticExport({
+      cwd: root,
+      codexHome,
+      generatedRoot,
+      outputRoot,
+      paths,
+      offline: true,
+      index: false,
+      async generate({ outputRoot: generatedOutput }) {
+        await mkdir(generatedOutput, { recursive: true });
+        await writeFile(join(generatedOutput, "index.html"), "duplicate parity", "utf8");
+      },
+    });
+    const staticDatabase = openCacheDatabase(paths.cacheDatabase);
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const cached = getCachedSession(staticDatabase, sessionId);
+    staticDatabase.close();
+
+    expect(live.rows).toEqual([
+      expect.objectContaining({
+        summary: expect.objectContaining({ sourcePath: archived, scope: "archived" }),
+      }),
+    ]);
+    expect(exported).toMatchObject({
+      discovered: 1,
+      transformed: 1,
+      failed: 0,
+      diagnosticCounts: { "source.duplicate_session": 1 },
+    });
+    expect(cached?.summary).toMatchObject({
+      sourcePath: archived,
+      scope: "archived",
+      preview: "Archived winner",
+    });
+    expect(
+      await readFile(join(outputRoot, "downloads", "archived", `${sessionId}.md`), "utf8"),
+    ).toContain("Archived winner");
+  }, 30_000);
+
   it("reads Codex sources unchanged, incrementally reuses them, and publishes the final offline data", async () => {
     const root = await temporaryRoot();
     const codexHome = join(root, "codex-home");
@@ -163,7 +239,12 @@ describe("static export pipeline", () => {
     expect(progressOutput.join("")).toContain("Finalizing the offline search index");
     await expect(collectDoctorReport({ cwd: root, codexHome, paths })).resolves.toMatchObject({
       capabilities: { offline: true },
-      offlineOutput: { status: "available", sessionCount: 1, missingFiles: [] },
+      offlineOutput: {
+        structuralStatus: "present",
+        integrityStatus: "not-checked",
+        sessionCount: 1,
+        missingFiles: [],
+      },
     });
   }, 30_000);
 
@@ -208,7 +289,11 @@ describe("static export pipeline", () => {
     await expect(lstat(join(outputRoot, "pagefind"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(collectDoctorReport({ cwd: root, codexHome, paths })).resolves.toMatchObject({
       capabilities: { offline: true },
-      offlineOutput: { status: "available", searchIndex: "disabled" },
+      offlineOutput: {
+        structuralStatus: "present",
+        integrityStatus: "not-checked",
+        searchIndex: "disabled",
+      },
     });
   }, 30_000);
 
@@ -375,7 +460,11 @@ describe("static export pipeline", () => {
       archivedSessions: 1,
       cache: { status: "missing", sessionCount: 0, diagnosticCount: 0 },
       capabilities: { live: true, export: true, offline: false },
-      offlineOutput: { status: "incomplete", sessionCount: 0 },
+      offlineOutput: {
+        structuralStatus: "incomplete",
+        integrityStatus: "not-checked",
+        sessionCount: 0,
+      },
     });
     await expect(lstat(paths.cacheDir)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readFile(source)).toEqual(before);

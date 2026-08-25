@@ -12,6 +12,7 @@
 - **Depends on**: plans/001-restore-coverage-gate.md
 - **Category**: security
 - **Planned at**: commit df97571, 2026-08-19
+- **Implementation status**: IN PROGRESS — checkpointed for handoff on 2026-08-20
 
 ## Why this matters
 
@@ -112,6 +113,55 @@ If Nuxt output supports hashes/nonces consistently in live and generated modes, 
 ## STOP conditions
 
 Stop if the policy requires unsafe-eval; if a remote origin must be allowed for normal offline operation; if tests cannot distinguish live and offline headers; if nonce/hash support requires an unbounded HTML rewriter or major Nuxt integration; if browser behavior breaks and the only proposed response is default-src *; or if the server would bind beyond loopback.
+
+## Implementation handoff — 2026-08-20
+
+### Product decision
+
+The user confirmed that this is strictly a localhost-only developer tool and will not be hosted, tunneled, or exposed to other machines. Keep browser containment proportionate to that model. Do not add authentication, HSTS, rate limiting, a CORS framework, CSP reporting, remote/deployment controls, or other hosted-service machinery. The useful boundary is local transcript content rendered in the developer's browser.
+
+### Completed implementation
+
+- Added `server/core/securityHeaders.ts` with one frozen shared header record and CSP string.
+- Applied the shared headers to all Nuxt routes through `nuxt.config.ts` and to offline responses through `scripts/offline.ts`.
+- The policy contains `default-src 'self'`, `base-uri 'none'`, `object-src 'none'`, `frame-ancestors 'none'`, `form-action 'none'`, and `connect-src 'self'`; denies unused browser capabilities; prevents framing and MIME sniffing; suppresses referrer and indexing behavior; and contains no `unsafe-eval`, remote HTTP(S) origin, or wildcard source.
+- Retained `script-src 'self' 'unsafe-inline'` only for Nuxt's generated inline import map/bootstrap and `style-src 'self' 'unsafe-inline'` only for Vue's runtime style attributes. Local/data/blob media and local/data fonts are allowed. `worker-src` is currently self-only because the Pagefind inventory found no blob worker requirement.
+- Exported an offline server factory, canonicalized its root with `realpath`, preserved file containment/cache semantics, and applied the shared policy to success plus 400/404/405/500 responses.
+- Added exact policy tests in `tests/unit/securityHeaders.test.ts` and real offline response coverage in `tests/integration/live/contentBoundary.test.ts` for HTML, JavaScript, CSS, JSON, WOFF2, MP3, HEAD, caching, and error responses.
+- Extended `tests/e2e/release.spec.ts` to assert the live header record, detect CSP console violations, and retain the no-external-request/no-session-creation checks.
+- Documented the deliberately local-only policy and necessary inline allowances in `README.md`.
+- A browser trace confirmed that the CSP does not block Nuxt assets, local fonts, hydration resources, or same-origin API traffic. Do not loosen the policy to address the E2E failure below.
+
+### Verification completed
+
+- `pnpm exec vitest run --project node tests/unit/securityHeaders.test.ts tests/integration/live/contentBoundary.test.ts` passed: 2 files, 12 tests.
+- `pnpm offline -- --help` passed, confirming the imported offline module no longer executes its CLI entrypoint accidentally.
+- `pnpm exec vitest run --project node tests/integration/live/runtime.test.ts` passed after adding the cold-start regression: 1 file, 5 tests.
+- Three focused elevated runs of `pnpm exec playwright test tests/e2e/content-rendering.spec.ts --grep "renders code and tables"` built successfully but failed at the first content assertion because server-side session-detail loading returned a generic 404. The trace showed correct containment headers and no CSP violation.
+
+### Open regression and current diagnosis
+
+Plan 005's deferred catalog startup allows a direct `/session/:id` SSR request to issue session-detail API calls before the initial catalog exists. The first trace failed on `/api/sessions/:id`; an attempted Nitro page-request-hook wait was ineffective and was fully reverted. A wait was then placed at the actual session-detail API boundary.
+
+`server/live/requestContext.ts` now exports `useCatalogReadyLiveViewerRuntime`, which starts/awaits the runtime's idempotent initial reconciliation only while status is `preparing`. The index, navigator, turns, and inspector endpoints under `server/api/sessions/[id]/` use it. Root-library requests remain shell-first and non-blocking. `tests/integration/live/runtime.test.ts` now proves that two concurrent cold session reads sharing deferred startup succeed.
+
+The E2E failure nevertheless remains intermittent across sibling SSR calls: one trace failed on navigator, and the latest failed on the session index. After hydration, `/api/status` reports `ready` and `/api/projects` reports the expected active `viewer` project, so discovery/catalog startup succeeds. Because the runtime-level concurrent regression passes, the next step is to expose or capture the underlying exception currently swallowed by the broad `catch` blocks in the four session-detail endpoints, ideally through a focused Nitro endpoint integration or temporary diagnostic logging during the single E2E. Do not make further policy changes and do not convert the generic 404 into a permanent disclosure of internal errors.
+
+### Exact continuation sequence
+
+1. Inspect the underlying session-detail endpoint exception during the focused E2E and fix the narrow SSR/API race.
+2. Rerun `pnpm exec vitest run --project node tests/unit/securityHeaders.test.ts tests/integration/live/contentBoundary.test.ts tests/integration/live/runtime.test.ts`.
+3. Rerun the single failing Playwright scenario elevated; then run `pnpm test:e2e` elevated when it passes.
+4. Run the one and only Plan 010 formatter write pass over all Plan 010 and cold-start files: `pnpm exec oxfmt server/core/securityHeaders.ts nuxt.config.ts scripts/offline.ts server/live/requestContext.ts server/api/sessions/[id]/index.get.ts server/api/sessions/[id]/navigator.get.ts server/api/sessions/[id]/turns.get.ts server/api/sessions/[id]/inspector.get.ts tests/unit/securityHeaders.test.ts tests/integration/live/contentBoundary.test.ts tests/integration/live/runtime.test.ts tests/e2e/release.spec.ts README.md plans/010-add-browser-containment.md`.
+5. Run the complete Plan 010 gates in the documented order: coverage, format check, typecheck, lint, unit tests, integration tests, build, and E2E. Elevate build/E2E only for the documented Windows sandbox/readlink boundary.
+6. Check every Done criterion, change only Plan 010's status row in `plans/README.md` from TODO to DONE, then begin Plan 011.
+
+### Important untouched state
+
+- The Plan 010 `oxfmt` write pass has not been run. Do not run it more than once for this plan.
+- The complete Plan 010 gate matrix has not been run.
+- Plan 010 remains TODO in `plans/README.md`; Plan 011 has not started.
+- No branch, worktree, stage, commit, push, deletion, or `.output` regeneration was performed for this handoff.
 
 ## Maintenance notes
 

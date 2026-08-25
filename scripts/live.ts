@@ -9,12 +9,14 @@ Usage: pnpm live [options]
 
 Options:
   --codex-home <path>  Read sessions from this Codex home
+  --media-root <path>  Trust local attachments under this root (repeatable)
   -p, --port <number>  Listen on this loopback port
   --help               Show this help and exit`;
 
 interface LiveArguments {
   codexHome?: string | undefined;
   port?: number | undefined;
+  trustedMediaRoots?: string[] | undefined;
 }
 
 function optionValue(args: readonly string[], index: number, option: string): string {
@@ -42,6 +44,11 @@ function parseArguments(args: readonly string[]): LiveArguments {
       index += 1;
     } else if (argument.startsWith("--codex-home=")) {
       parsed.codexHome = argument.slice("--codex-home=".length);
+    } else if (argument === "--media-root") {
+      (parsed.trustedMediaRoots ??= []).push(optionValue(args, index, argument));
+      index += 1;
+    } else if (argument.startsWith("--media-root=")) {
+      (parsed.trustedMediaRoots ??= []).push(argument.slice("--media-root=".length));
     } else if (argument === "--port" || argument === "-p") {
       parsed.port = portValue(optionValue(args, index, argument));
       index += 1;
@@ -54,10 +61,17 @@ function parseArguments(args: readonly string[]): LiveArguments {
   if (parsed.codexHome === "") {
     throw new Error("--codex-home requires a value");
   }
+  if (parsed.trustedMediaRoots?.some((path) => path === "")) {
+    throw new Error("--media-root requires a value");
+  }
   return parsed;
 }
 
-async function runNuxt(codexHome: string, port: number): Promise<void> {
+async function runNuxt(
+  codexHome: string,
+  port: number,
+  trustedMediaRoots: readonly string[] | undefined,
+): Promise<void> {
   const pnpmEntrypoint = process.env["npm_execpath"]?.trim();
   const javascriptEntrypoint = pnpmEntrypoint !== undefined && /\.[cm]?js$/iu.test(pnpmEntrypoint);
   const command = javascriptEntrypoint
@@ -74,6 +88,8 @@ async function runNuxt(codexHome: string, port: number): Promise<void> {
         CODEX_VIEWER_MODE: "live",
         CODEX_VIEWER_CODEX_HOME: codexHome,
         CODEX_VIEWER_PORT: String(port),
+        CODEX_VIEWER_MEDIA_ROOTS:
+          trustedMediaRoots === undefined ? "" : JSON.stringify(trustedMediaRoots),
       },
       stdio: "inherit",
       windowsHide: true,
@@ -109,7 +125,7 @@ async function main(): Promise<void> {
   }
   console.log(`Starting Codex Sessions Viewer on http://${HOST}:${config.settings.port}`);
   console.log(`Reading ${config.settings.codexHome} in read-only mode.`);
-  await runNuxt(config.settings.codexHome, config.settings.port);
+  await runNuxt(config.settings.codexHome, config.settings.port, config.settings.trustedMediaRoots);
 }
 
 await main().catch((error: unknown) => {

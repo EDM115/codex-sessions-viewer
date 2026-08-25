@@ -4,7 +4,11 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { loadServerViewerConfig, saveServerViewerConfig } from "../../../server/core/config.ts";
+import {
+  loadServerViewerConfig,
+  resolvedTrustedMediaRoots,
+  saveServerViewerConfig,
+} from "../../../server/core/config.ts";
 import type { ViewerPaths } from "../../../server/core/paths.ts";
 
 const temporaryDirectories: string[] = [];
@@ -74,6 +78,7 @@ describe("server viewer configuration", () => {
     expect(loaded.codexHomeSource).toBe("cli");
     expect(loaded.onboardingRequired).toBe(false);
     expect(loaded.diagnostics).toEqual([]);
+    expect(resolvedTrustedMediaRoots(loaded.settings)).toEqual([join(cliHome, "attachments")]);
   });
 
   it("recovers from invalid JSON without overwriting it", async () => {
@@ -138,6 +143,32 @@ describe("server viewer configuration", () => {
         fetchFavicons: true,
       },
     });
+  });
+
+  it("preserves explicitly approved absolute media roots", async () => {
+    const { root, paths } = await createFixture();
+    const codexHome = join(root, ".codex");
+    const mediaRoot = join(root, "selected-attachments");
+    await Promise.all([
+      mkdir(codexHome, { recursive: true }),
+      mkdir(mediaRoot, { recursive: true }),
+    ]);
+
+    await expect(
+      saveServerViewerConfig(
+        {
+          codexHome,
+          port: 4_300,
+          fetchFavicons: true,
+          trustedMediaRoots: [mediaRoot],
+        },
+        paths,
+      ),
+    ).resolves.toEqual({ written: true, diagnostics: [] });
+    const loaded = await loadServerViewerConfig({ paths, homeDir: root });
+
+    expect(loaded.settings.trustedMediaRoots).toEqual([mediaRoot]);
+    expect(resolvedTrustedMediaRoots(loaded.settings)).toEqual([mediaRoot]);
   });
 
   it("refuses to persist a missing Codex-home path", async () => {

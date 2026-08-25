@@ -5,6 +5,7 @@ import {
   catalogSession,
   listCatalogProjects,
   listCatalogSessions,
+  markCatalogSessionReady,
   removeCatalogSource,
   setCatalogMaterialization,
   upsertCatalogSessions,
@@ -215,6 +216,59 @@ describe("session catalog store", () => {
           models: ["gpt-5.6-sol"],
         },
       });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("marks existing catalog rows ready only when revision and path both match", () => {
+    const database = openCacheDatabase(":memory:");
+    const current = catalogInput("fenced", { sourceRevision: "catalog:expected" });
+    const hydrated = summary("fenced", {
+      title: "Hydrated conversation",
+      revision: "sha256:normalized",
+      turnCount: 4,
+    });
+
+    try {
+      upsertCatalogSessions(database, [current]);
+      expect(
+        markCatalogSessionReady(database, hydrated, {
+          sourceRevision: "catalog:stale",
+          sourcePath: current.summary.sourcePath,
+        }),
+      ).toBe(false);
+      expect(
+        markCatalogSessionReady(database, hydrated, {
+          sourceRevision: "catalog:expected",
+          sourcePath: `${current.summary.sourcePath}.moved`,
+        }),
+      ).toBe(false);
+      expect(catalogSession(database, "fenced")).toMatchObject({
+        materialization: "cold",
+        summary: { title: "Session fenced", turnCount: 0 },
+      });
+
+      expect(
+        markCatalogSessionReady(database, hydrated, {
+          sourceRevision: "catalog:expected",
+          sourcePath: current.summary.sourcePath,
+        }),
+      ).toBe(true);
+      expect(catalogSession(database, "fenced")).toMatchObject({
+        materialization: "ready",
+        sourceRevision: "catalog:expected",
+        summary: { title: "Hydrated conversation", turnCount: 4 },
+      });
+
+      upsertCatalogSessions(database, [catalogInput("auxiliary", { kind: "auxiliary" })]);
+      expect(
+        markCatalogSessionReady(database, summary("auxiliary"), {
+          sourceRevision: "catalog:auxiliary",
+          sourcePath: summary("auxiliary").sourcePath,
+        }),
+      ).toBe(false);
+      expect(catalogSession(database, "auxiliary")?.materialization).toBe("cold");
     } finally {
       database.close();
     }

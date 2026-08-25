@@ -52,7 +52,9 @@ const inspectorChunkSchema = z.object({
   rawRecords: z.record(z.string(), z.object({ id: z.string() }).passthrough()),
 });
 const assetManifestSchema = z.object({
-  assets: z.array(z.object({ id: z.string(), url: z.string().nullable() })),
+  assets: z.array(
+    z.object({ id: z.string(), url: z.string().nullable(), originalPath: z.string().nullable() }),
+  ),
 });
 const faviconManifestSchema = z.object({
   favicons: z.array(z.object({ origin: z.string(), url: z.string() })),
@@ -329,6 +331,8 @@ describe("static repository payloads", () => {
     const publicRoot = join(root, "public");
     const cacheRoot = join(root, "cache");
     const assetBytes = Buffer.from("local attachment bytes");
+    const legacyDataBody = "A".repeat(10_000);
+    const legacyDataUrl = `data:image/png;base64,${legacyDataBody}`;
     const faviconBytes = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
       "base64",
@@ -353,7 +357,7 @@ describe("static repository payloads", () => {
         width: null,
         height: null,
         status: "available",
-        originalPath: "C:\\Codex\\attachment.bin",
+        originalPath: legacyDataUrl,
         cachePath: assetPath,
         error: null,
       });
@@ -395,14 +399,24 @@ describe("static repository payloads", () => {
       const assetManifest = assetManifestSchema.parse(
         JSON.parse(await readFile(join(generatedRoot, "payloads", "assets.json"), "utf8")),
       );
+      const assetManifestText = await readFile(
+        join(generatedRoot, "payloads", "assets.json"),
+        "utf8",
+      );
       const faviconManifest = faviconManifestSchema.parse(
         JSON.parse(await readFile(join(generatedRoot, "payloads", "favicons.json"), "utf8")),
       );
 
       expect(result).toEqual({ assetCount: 1, faviconCount: 1, failedCount: 0 });
       expect(assetManifest.assets).toEqual([
-        expect.objectContaining({ id: "asset-used", url: `/assets/${assetHash}.bin` }),
+        expect.objectContaining({
+          id: "asset-used",
+          url: `/assets/${assetHash}.bin`,
+          originalPath: `data:image/png;base64;sha256=${createHash("sha256").update(legacyDataUrl).digest("hex")}`,
+        }),
       ]);
+      expect(assetManifestText).not.toContain(legacyDataBody);
+      expect(assetManifestText.length).toBeLessThan(2_048);
       expect(faviconManifest.favicons).toEqual([
         expect.objectContaining({
           origin: "https://example.com",

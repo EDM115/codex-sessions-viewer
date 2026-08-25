@@ -50,19 +50,18 @@ function duration(value: number | null): string | null {
 }
 
 function localMediaLink(media: MediaActivity): string | null {
-  if (media.sourcePath === null) {
+  if (media.reference.kind !== "local-file" && media.reference.kind !== "remote") {
     return null;
   }
   const label = `${media.mediaType[0]!.toUpperCase()}${media.mediaType.slice(1)}`;
+  const source = media.reference.kind === "local-file" ? media.reference.path : media.reference.url;
   let url: string;
   try {
-    url = media.sourcePath.startsWith("file:")
-      ? new URL(media.sourcePath).href
-      : pathToFileURL(media.sourcePath).href;
+    url = media.reference.kind === "remote" ? new URL(source).href : pathToFileURL(source).href;
   } catch {
-    url = media.sourcePath;
+    url = source;
   }
-  return `- [${label}: \`${media.sourcePath.replaceAll("`", "\\`")}\`](${url})`;
+  return `- [${label}: \`${source.replaceAll("`", "\\`")}\`](${url})`;
 }
 
 export function serializeUserPrompt(

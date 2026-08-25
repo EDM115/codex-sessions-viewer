@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  discoverReferencedLocalMedia,
+  discoverReferencedMedia,
   discoverSources,
 } from "../../../server/ingestion/discoverSources.ts";
 import {
@@ -66,7 +66,7 @@ describe("Codex source discovery", () => {
     expect(JSON.stringify(result)).not.toContain("secret-rollout.jsonl");
   });
 
-  it("discovers local media lazily only from normalized media activities", () => {
+  it("discovers typed media lazily only from normalized media activities", () => {
     const activities = [
       {
         id: "media-1",
@@ -76,7 +76,11 @@ describe("Codex source discovery", () => {
         kind: "media",
         assetId: "asset-1",
         mediaType: "image",
-        sourcePath: "C:\\Users\\viewer\\image.png",
+        reference: {
+          kind: "local-file",
+          path: "C:\\Users\\viewer\\image.png",
+          provenance: "user-message",
+        },
       },
       {
         id: "status-1",
@@ -95,20 +99,97 @@ describe("Codex source discovery", () => {
         kind: "media",
         assetId: "asset-2",
         mediaType: "audio",
-        sourcePath: null,
+        reference: {
+          kind: "invalid",
+          reason: "missing",
+          preview: "",
+          sourceHash: null,
+        },
+      },
+      {
+        id: "media-3",
+        turnId: "turn-1",
+        createdAt: null,
+        rawEventIds: ["event-4"],
+        kind: "media",
+        assetId: "asset-3",
+        mediaType: "image",
+        reference: {
+          kind: "data",
+          mimeType: "image/png",
+          encoding: "base64",
+          payload: "AA==",
+          sourceHash: "a".repeat(64),
+        },
+      },
+      {
+        id: "media-4",
+        turnId: "turn-1",
+        createdAt: null,
+        rawEventIds: ["event-5"],
+        kind: "media",
+        assetId: "asset-4",
+        mediaType: "image",
+        reference: { kind: "remote", url: "https://example.test/image.png" },
+      },
+      {
+        id: "media-5",
+        turnId: "turn-1",
+        createdAt: null,
+        rawEventIds: ["event-6"],
+        kind: "media",
+        assetId: "asset-5",
+        mediaType: "image",
+        reference: {
+          kind: "asset",
+          mimeType: "image/png",
+          byteSize: 1,
+          sha256: "a".repeat(64),
+        },
       },
     ] satisfies ConversationActivity[];
 
-    const references = discoverReferencedLocalMedia(activities);
+    const references = discoverReferencedMedia(activities);
 
     expect(references).toEqual([
       {
         assetId: "asset-1",
         mediaType: "image",
-        path: "C:\\Users\\viewer\\image.png",
+        reference: {
+          kind: "local-file",
+          path: "C:\\Users\\viewer\\image.png",
+          provenance: "user-message",
+        },
+      },
+      {
+        assetId: "asset-2",
+        mediaType: "audio",
+        reference: {
+          kind: "invalid",
+          reason: "missing",
+          preview: "",
+          sourceHash: null,
+        },
+      },
+      {
+        assetId: "asset-3",
+        mediaType: "image",
+        reference: {
+          kind: "data",
+          mimeType: "image/png",
+          encoding: "base64",
+          payload: "AA==",
+          sourceHash: "a".repeat(64),
+        },
+      },
+      {
+        assetId: "asset-4",
+        mediaType: "image",
+        reference: { kind: "remote", url: "https://example.test/image.png" },
       },
     ]);
     expect(JSON.stringify(references)).not.toContain("unreferenced-secret.png");
+    expect(JSON.stringify(references)).not.toContain('"kind":"asset"');
   });
 });
 

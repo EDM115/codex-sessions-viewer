@@ -8,6 +8,7 @@ import type { ResolvedAsset } from "#shared/types/repository.ts";
 import RichTextRenderer from "../content/RichTextRenderer.vue";
 import ConversationReasoning from "./ConversationReasoning.vue";
 import ConversationToolRow from "./ConversationToolRow.vue";
+import { mediaReferenceText } from "./format.ts";
 
 const props = defineProps<{
   activity?: ConversationActivity | undefined;
@@ -37,7 +38,7 @@ function activityLabel(activity: ConversationActivity): string {
     return activity.summary ?? "Conversation compacted";
   }
   if (activity.kind === "media") {
-    return `${activity.mediaType} · ${activity.sourcePath ?? activity.assetId}`;
+    return `${activity.mediaType} · ${mediaReferenceText(activity)}`;
   }
   if (activity.kind === "unknown") {
     return `Unknown protocol event · ${activity.eventType}`;

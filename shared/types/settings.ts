@@ -11,6 +11,7 @@ export interface ServerViewerSettings {
   codexHome: string;
   port: number;
   fetchFavicons: boolean;
+  trustedMediaRoots?: string[] | undefined;
 }
 
 export interface PresentationSettings {
@@ -56,6 +57,19 @@ export const serverViewerSettingsSchema = z.strictObject({
   codexHome: z.string().trim().min(1),
   port: z.int().min(1).max(65_535),
   fetchFavicons: z.boolean(),
+  trustedMediaRoots: z
+    .array(
+      z
+        .string()
+        .trim()
+        .min(1)
+        .max(4_096)
+        .refine((path) => /^(?:[a-z]:[\\/]|\\\\|\/)/iu.test(path), {
+          error: "Trusted media roots must be absolute local paths",
+        }),
+    )
+    .max(32)
+    .optional(),
 });
 
 export const presentationSettingsSchema = z.strictObject({

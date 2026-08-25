@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { basename } from "node:path";
 
 import {
   conversationSummarySchema,
   conversationTurnSchema,
+  MAX_MEDIA_BYTES,
+  MAX_MEDIA_REFERENCE_PREVIEW_LENGTH,
   type ActivityStatus,
   type CompactionActivity,
   type ConversationActivity,
@@ -13,6 +16,8 @@ import {
   type JsonObject,
   type JsonValue,
   type MediaActivity,
+  type MediaReference,
+  type MediaReferenceProvenance,
   type PatchActivity,
   type PlanActivity,
   type ReasoningActivity,
@@ -44,7 +49,7 @@ import { createUnknownActivity, sanitizeUnknownPayload } from "./unknownEvents.t
 const filenameUuidPattern =
   /([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?=\.jsonl$)/i;
 const epochTimestamp = "1970-01-01T00:00:00.000Z";
-export const NORMALIZATION_PARSER_VERSION = 3;
+export const NORMALIZATION_PARSER_VERSION = 4;
 
 export interface NormalizeSessionInput {
   records: readonly JsonlRecord[];
@@ -252,21 +257,153 @@ function missingSessionIdDiagnostic(path: string): ViewerDiagnostic {
   });
 }
 
+function mediaReferenceHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function invalidMediaReference(
+  value: string | null,
+  reason: Extract<MediaReference, { kind: "invalid" }>["reason"],
+): MediaReference {
+  return {
+    kind: "invalid",
+    reason,
+    preview: value?.slice(0, MAX_MEDIA_REFERENCE_PREVIEW_LENGTH) ?? "",
+    sourceHash: value === null ? null : mediaReferenceHash(value),
+  };
+}
+
+function isAbsoluteLocalPath(value: string): boolean {
+  return /^(?:[a-z]:[\\/]|\\\\|\/)/iu.test(value);
+}
+
+function percentDecodedSize(payload: string): number | null {
+  let size = 0;
+  for (let index = 0; index < payload.length;) {
+    if (payload[index] === "%") {
+      if (!/^[\da-f]{2}$/iu.test(payload.slice(index + 1, index + 3))) {
+        return null;
+      }
+      size += 1;
+      index += 3;
+    } else {
+      const codePoint = payload.codePointAt(index);
+      if (codePoint === undefined) {
+        return null;
+      }
+      const character = String.fromCodePoint(codePoint);
+      size += Buffer.byteLength(character);
+      index += character.length;
+    }
+    if (size > MAX_MEDIA_BYTES) {
+      return size;
+    }
+  }
+  return size;
+}
+
+function supportedDataMime(mediaType: MediaActivity["mediaType"], mimeType: string): boolean {
+  if (!mimeType.startsWith("image/") && !mimeType.startsWith("audio/")) {
+    return false;
+  }
+  return mediaType === "file" || mimeType.startsWith(`${mediaType}/`);
+}
+
+function classifyDataReference(
+  value: string,
+  mediaType: MediaActivity["mediaType"],
+): MediaReference {
+  const separator = value.indexOf(",");
+  if (separator < 6) {
+    return invalidMediaReference(value, "malformed-data");
+  }
+  const header = value.slice(5, separator);
+  const [declaredMimeType, ...parameters] = header.split(";");
+  const mimeType = declaredMimeType?.trim().toLowerCase() ?? "";
+  if (
+    mimeType === "" ||
+    !supportedDataMime(mediaType, mimeType) ||
+    parameters.some((parameter) => parameter !== "base64" && !parameter.startsWith("charset=")) ||
+    parameters.filter((parameter) => parameter === "base64").length > 1
+  ) {
+    return invalidMediaReference(value, "unsupported-media-type");
+  }
+  const payload = value.slice(separator + 1);
+  const encoding = parameters.includes("base64") ? "base64" : "percent";
+  let decodedSize: number | null;
+  if (encoding === "base64") {
+    if (payload.length % 4 !== 0 || !/^[a-z\d+/]*={0,2}$/iu.test(payload)) {
+      return invalidMediaReference(value, "malformed-data");
+    }
+    const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+    decodedSize = (payload.length / 4) * 3 - padding;
+  } else {
+    decodedSize = percentDecodedSize(payload);
+    if (decodedSize === null) {
+      return invalidMediaReference(value, "malformed-data");
+    }
+  }
+  if (decodedSize > MAX_MEDIA_BYTES) {
+    return invalidMediaReference(value, "oversized-data");
+  }
+  return {
+    kind: "data",
+    mimeType,
+    encoding,
+    payload,
+    sourceHash: mediaReferenceHash(value),
+  };
+}
+
+function classifyMediaReference(
+  value: string | null,
+  mediaType: MediaActivity["mediaType"],
+  provenance: MediaReferenceProvenance,
+): MediaReference {
+  if (value === null) {
+    return invalidMediaReference(null, "missing");
+  }
+  const normalized = value.trim();
+  if (normalized === "") {
+    return invalidMediaReference(value, "empty");
+  }
+  if (normalized.startsWith("data:")) {
+    return classifyDataReference(normalized, mediaType);
+  }
+  if (isAbsoluteLocalPath(normalized)) {
+    return normalized.length <= 4_096
+      ? { kind: "local-file", path: normalized, provenance }
+      : invalidMediaReference(normalized, "malformed-path");
+  }
+  try {
+    const url = new URL(normalized);
+    if ((url.protocol === "http:" || url.protocol === "https:") && normalized.length <= 2_048) {
+      return { kind: "remote", url: normalized };
+    }
+    return invalidMediaReference(normalized, "unsupported-scheme");
+  } catch {
+    return invalidMediaReference(normalized, "relative-path");
+  }
+}
+
 function attachmentSources(
   event: CodexEvent,
-): Array<{ mediaType: MediaActivity["mediaType"]; path: string | null }> {
+): Array<{ mediaType: MediaActivity["mediaType"]; reference: MediaReference }> {
   const payload = payloadObject(event);
   if (payload === null) {
     return [];
   }
-  const sources: Array<{ mediaType: MediaActivity["mediaType"]; path: string | null }> = [];
+  const sources: Array<{ mediaType: MediaActivity["mediaType"]; reference: MediaReference }> = [];
   if (event.type === "event_msg" && event.payloadType === "user_message") {
     for (const key of ["local_images", "images"] as const) {
       const values = payload[key];
       if (Array.isArray(values)) {
         for (const value of values) {
           if (typeof value === "string") {
-            sources.push({ mediaType: "image", path: value });
+            sources.push({
+              mediaType: "image",
+              reference: classifyMediaReference(value, "image", "user-message"),
+            });
           }
         }
       }
@@ -276,7 +413,10 @@ function attachmentSources(
       if (Array.isArray(values)) {
         for (const value of values) {
           if (typeof value === "string") {
-            sources.push({ mediaType: "audio", path: value });
+            sources.push({
+              mediaType: "audio",
+              reference: classifyMediaReference(value, "audio", "user-message"),
+            });
           }
         }
       }
@@ -290,7 +430,10 @@ function attachmentSources(
     for (const item of payload["content"]) {
       const content = objectValue(item);
       if (content?.["type"] === "input_image" && typeof content["image_url"] === "string") {
-        sources.push({ mediaType: "image", path: content["image_url"] });
+        sources.push({
+          mediaType: "image",
+          reference: classifyMediaReference(content["image_url"], "image", "response-input"),
+        });
       }
     }
   }
@@ -402,7 +545,7 @@ function normalizeMessages(
           kind: "media",
           assetId: attachmentIds[index]!,
           mediaType: source.mediaType,
-          sourcePath: source.path,
+          reference: source.reference,
         })),
       );
       return {
@@ -737,7 +880,7 @@ function normalizeGeneratedMedia(event: CodexEvent, turnId: string): MediaActivi
       kind: "media",
       assetId: `asset-${stringValue(payload["call_id"]) ?? event.id}`,
       mediaType: "image",
-      sourcePath: stringValue(payload["saved_path"]),
+      reference: classifyMediaReference(stringValue(payload["saved_path"]), "image", "generated"),
     };
   }
   if (event.type === "response_item" && event.payloadType === "image_generation_call") {
@@ -749,7 +892,7 @@ function normalizeGeneratedMedia(event: CodexEvent, turnId: string): MediaActivi
       kind: "media",
       assetId: `asset-${stringValue(payload["id"]) ?? event.id}`,
       mediaType: "image",
-      sourcePath: null,
+      reference: invalidMediaReference(null, "missing"),
     };
   }
   return null;
@@ -915,29 +1058,41 @@ function tokenDelta(current: TokenUsage | null, previous: TokenUsage | null): To
   };
 }
 
-function latestSettingsBefore(
+interface ThreadSettingsEvidence {
+  model: string | null;
+  effort: string | null;
+}
+
+function settingsEvidenceByTurn(
   events: readonly CodexEvent[],
-  offset: number,
-): { model: string | null; effort: string | null } {
+  turns: readonly AssembledTurnEvents[],
+): ReadonlyMap<AssembledTurnEvents, ThreadSettingsEvidence> {
   let model: string | null = null;
   let effort: string | null = null;
-  for (const event of events) {
-    if (event.byteStart > offset) {
-      break;
+  let eventIndex = 0;
+  const evidence = new Map<AssembledTurnEvents, ThreadSettingsEvidence>();
+  const turnOffsets = turns
+    .map((turn, index) => ({ turn, index, offset: turn.events[0]?.event.byteStart ?? 0 }))
+    .toSorted((left, right) => left.offset - right.offset || left.index - right.index);
+  for (const { turn, offset } of turnOffsets) {
+    while (eventIndex < events.length && events[eventIndex]!.byteStart <= offset) {
+      const event = events[eventIndex]!;
+      eventIndex += 1;
+      if (event.type !== "event_msg" || event.payloadType !== "thread_settings_applied") {
+        continue;
+      }
+      const settings = objectValue(payloadObject(event)?.["thread_settings"]);
+      model = stringValue(settings?.["model"]) ?? model;
+      effort = stringValue(settings?.["reasoning_effort"]) ?? effort;
     }
-    if (event.type !== "event_msg" || event.payloadType !== "thread_settings_applied") {
-      continue;
-    }
-    const settings = objectValue(payloadObject(event)?.["thread_settings"]);
-    model = stringValue(settings?.["model"]) ?? model;
-    effort = stringValue(settings?.["reasoning_effort"]) ?? effort;
+    evidence.set(turn, { model, effort });
   }
-  return { model, effort };
+  return evidence;
 }
 
 function turnModelEvidence(
   turn: AssembledTurnEvents,
-  allEvents: readonly CodexEvent[],
+  fallback: ThreadSettingsEvidence,
 ): { models: string[]; efforts: string[] } {
   const models: string[] = [];
   const efforts: string[] = [];
@@ -956,7 +1111,6 @@ function turnModelEvidence(
     }
   }
   if (models.length === 0 || efforts.length === 0) {
-    const fallback = latestSettingsBefore(allEvents, turn.events[0]?.event.byteStart ?? 0);
     if (models.length === 0 && fallback.model !== null) {
       models.push(fallback.model);
     }
@@ -1002,13 +1156,27 @@ function sessionTimestamps(
   events: readonly CodexEvent[],
   metaTimestamp: string | null,
 ): { createdAt: string; updatedAt: string } {
-  const timestamps = events
-    .map(({ timestamp }) => timestamp)
-    .filter((value): value is string => value !== null)
-    .toSorted((left, right) => Date.parse(left) - Date.parse(right));
+  let earliest: string | null = null;
+  let earliestTime = Number.POSITIVE_INFINITY;
+  let latest: string | null = null;
+  let latestTime = Number.NEGATIVE_INFINITY;
+  for (const { timestamp } of events) {
+    if (timestamp === null) {
+      continue;
+    }
+    const time = Date.parse(timestamp);
+    if (time < earliestTime) {
+      earliest = timestamp;
+      earliestTime = time;
+    }
+    if (time >= latestTime) {
+      latest = timestamp;
+      latestTime = time;
+    }
+  }
   return {
-    createdAt: metaTimestamp ?? timestamps[0] ?? epochTimestamp,
-    updatedAt: timestamps.at(-1) ?? metaTimestamp ?? epochTimestamp,
+    createdAt: metaTimestamp ?? earliest ?? epochTimestamp,
+    updatedAt: latest ?? metaTimestamp ?? epochTimestamp,
   };
 }
 
@@ -1024,6 +1192,7 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
     }
   }
   const meta = sessionMeta(events);
+  const timestamps = sessionTimestamps(events, meta.timestamp);
   const sessionId = meta.id ?? filenameSessionId(input.sourcePath);
   if (sessionId === null) {
     diagnostics.push(missingSessionIdDiagnostic(input.sourcePath));
@@ -1050,7 +1219,8 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
   const pairedTools = pairToolCalls(assembly.turns.flatMap(({ events: turnEvents }) => turnEvents));
   const consumedToolEventIds = new Set(pairedTools.consumedEventIds);
   const seenActivities = new Map<string, ConversationActivity>();
-  const fallbackTimestamp = sessionTimestamps(events, meta.timestamp).createdAt;
+  const settingsByTurn = settingsEvidenceByTurn(events, assembly.turns);
+  const fallbackTimestamp = timestamps.createdAt;
   const turns: ConversationTurn[] = [];
   let previousTokens: TokenUsage | null = null;
   for (const assembled of assembly.turns) {
@@ -1065,7 +1235,13 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
       const reconciled = reconcileActivity(activity, seenActivities, eventOffsets);
       return reconciled === null ? [] : [reconciled];
     });
-    const evidence = turnModelEvidence(assembled, events);
+    const evidence = turnModelEvidence(
+      assembled,
+      settingsByTurn.get(assembled) ?? {
+        model: null,
+        effort: null,
+      },
+    );
     const metrics = turnMetrics(assembled);
     const cumulativeTokens = tokenSnapshot(assembled);
     const delta = tokenDelta(cumulativeTokens, previousTokens);
@@ -1137,7 +1313,6 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
       toolCounts[name] = (toolCounts[name] ?? 0) + count;
     }
   }
-  const timestamps = sessionTimestamps(events, meta.timestamp);
   const summary = conversationSummarySchema.parse({
     id: sessionId,
     title: metadata.title,

@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { replaceCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { searchCachedSessions } from "../../../server/cache/searchStore.ts";
+import {
+  countCachedSearchResults,
+  searchCachedSessions,
+} from "../../../server/cache/searchStore.ts";
 import { createViewerDiagnostic } from "../../../shared/types/diagnostics.ts";
 import { searchResponseSchema } from "../../../shared/types/repository.ts";
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
@@ -117,6 +120,31 @@ describe("cached full-text search", () => {
         total: 0,
       });
       expect(() => searchCachedSessions(database, { scope: "active", query: '"' })).not.toThrow();
+      const projectId = database
+        .prepare("SELECT project_id FROM session_catalog WHERE id = ?")
+        .get(active.summary.id)?.["project_id"];
+      expect(typeof projectId).toBe("string");
+      for (const query of [
+        { scope: "active" as const, query: "parser" },
+        { scope: "archived" as const, query: "Legacy prompt" },
+        { scope: "active" as const, query: "parser", projectId: String(projectId) },
+        { scope: "active" as const, query: "parser", model: "gpt-exact-1" },
+        { scope: "active" as const, query: "parser", cwd: "C:\\work\\viewer" },
+        { scope: "active" as const, query: "parser", tool: "filesystem.read_file" },
+        { scope: "active" as const, query: "parser", hasMedia: true },
+        { scope: "active" as const, query: " " },
+      ]) {
+        expect(countCachedSearchResults(database, query)).toBe(
+          searchCachedSessions(database, query).total,
+        );
+      }
+      expect(
+        countCachedSearchResults(database, {
+          scope: "active",
+          query: "parser",
+          projectId: "missing-project",
+        }),
+      ).toBe(0);
     } finally {
       database.close();
     }

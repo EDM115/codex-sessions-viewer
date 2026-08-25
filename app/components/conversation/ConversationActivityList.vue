@@ -9,6 +9,7 @@ import type {
 } from "#shared/types/conversation.ts";
 
 import ConversationToolRow from "./ConversationToolRow.vue";
+import { mediaReferenceText } from "./format.ts";
 
 const props = defineProps<{
   activities: ConversationActivity[];
@@ -77,7 +78,7 @@ function workLabel(activity: Exclude<ConversationActivity, ReasoningActivity>): 
     return activity.summary ?? "Conversation compacted";
   }
   if (activity.kind === "media") {
-    return `${activity.mediaType} · ${activity.sourcePath ?? activity.assetId}`;
+    return `${activity.mediaType} · ${mediaReferenceText(activity)}`;
   }
   return "Activity";
 }

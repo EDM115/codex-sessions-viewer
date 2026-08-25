@@ -1,9 +1,11 @@
-import { mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
+import { selectSessionSources } from "../../../server/ingestion/selectSessionSources.ts";
 import {
   readSessionMetaPrefix,
   type SessionMetaPrefixFile,
@@ -102,5 +104,82 @@ describe("readSessionMetaPrefix", () => {
     });
 
     expect(result).toMatchObject({ status: "changed", meta: null });
+  });
+
+  it("fully reads only duplicate groups and excludes changing or incomplete candidates", async () => {
+    const root = await mkdtemp(join(tmpdir(), "viewer-source-selection-"));
+    const active = join(root, "sessions", "active.jsonl");
+    const archived = join(root, "archived_sessions", "archived.jsonl");
+    const incomplete = join(root, "sessions", "incomplete.jsonl");
+    const changing = join(root, "sessions", "changing.jsonl");
+    const unique = join(root, "sessions", "unique.jsonl");
+    await Promise.all([
+      mkdir(join(root, "sessions"), { recursive: true }),
+      mkdir(join(root, "archived_sessions"), { recursive: true }),
+    ]);
+    const fixture = await readFile(
+      join(process.cwd(), "tests", "fixtures", "rollouts", "modern.jsonl"),
+      "utf8",
+    );
+    await Promise.all([
+      writeFile(active, fixture.replace("Build the parser", "Active older"), "utf8"),
+      writeFile(archived, fixture.replace("Build the parser", "Archived winner"), "utf8"),
+      writeFile(incomplete, fixture.trimEnd(), "utf8"),
+      writeFile(changing, fixture.replace("Build the parser", "Changing newest"), "utf8"),
+      writeFile(
+        unique,
+        fixture.replaceAll(
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222",
+        ),
+        "utf8",
+      ),
+    ]);
+    const now = Date.now() / 1_000;
+    await Promise.all([
+      utimes(active, now - 50, now - 50),
+      utimes(archived, now - 40, now - 40),
+      utimes(incomplete, now - 30, now - 30),
+      utimes(changing, now - 20, now - 20),
+      utimes(unique, now - 10, now - 10),
+    ]);
+    const readPrefix = vi.fn<typeof readSessionMetaPrefix>(readSessionMetaPrefix);
+    const readJsonl = vi.fn<typeof readStableJsonl>(async (path, options) => {
+      const result = await readStableJsonl(path, options);
+      return path === changing
+        ? { ...result, read: { status: "changed", retry: true, bytesRead: 0 } }
+        : result;
+    });
+
+    try {
+      const result = await selectSessionSources(
+        [
+          { path: active, scope: "active" },
+          { path: archived, scope: "archived" },
+          { path: incomplete, scope: "active" },
+          { path: changing, scope: "active" },
+          { path: unique, scope: "active" },
+        ],
+        { readPrefix, readJsonl },
+      );
+
+      expect(readPrefix).toHaveBeenCalledTimes(5);
+      expect(readPrefix.mock.calls.every(([, maxBytes]) => maxBytes === 4_096)).toBe(true);
+      expect(readJsonl).toHaveBeenCalledTimes(4);
+      expect(readJsonl.mock.calls.map(([path]) => path)).not.toContain(unique);
+      expect(result.selected.map(({ source }) => source)).toEqual([
+        { path: archived, scope: "archived" },
+        { path: unique, scope: "active" },
+      ]);
+      expect(result.diagnostics).toEqual([
+        expect.objectContaining({
+          code: "source.duplicate_session",
+          details: { candidateCount: 4, selectedPath: archived },
+        }),
+      ]);
+      expect(result.selected.every((entry) => !("records" in entry))).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

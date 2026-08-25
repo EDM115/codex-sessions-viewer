@@ -238,6 +238,7 @@ export class StaticConversationRepository implements ConversationRepository {
   private libraryPromise: Promise<StaticLibraryPayload | null> | null = null;
   private pagefindPromise: Promise<PagefindBrowserApi> | null = null;
   private faviconPromise: Promise<ReadonlyMap<string, string>> | null = null;
+  private assetManifestPromise: Promise<ReadonlyMap<string, ResolvedAsset>> | null = null;
   private deepSearchSequence = 0;
   private readonly deepSearchJobs = new Map<string, DeepSearchJob>();
 
@@ -407,8 +408,7 @@ export class StaticConversationRepository implements ConversationRepository {
   }
 
   async resolveAsset(assetId: string): Promise<ResolvedAsset> {
-    const manifest = assetManifestSchema.parse(await this.requester("/payloads/assets.json"));
-    const asset = manifest.assets.find(({ id }) => id === assetId);
+    const asset = (await this.assets()).get(assetId);
     if (asset === undefined) {
       throw new Error("Asset not found in the static payloads.");
     }
@@ -465,5 +465,24 @@ export class StaticConversationRepository implements ConversationRepository {
         throw error;
       });
     return this.faviconPromise;
+  }
+
+  private assets(): Promise<ReadonlyMap<string, ResolvedAsset>> {
+    this.assetManifestPromise ??= this.requester("/payloads/assets.json")
+      .then((value) => {
+        const assets = new Map<string, ResolvedAsset>();
+        for (const asset of assetManifestSchema.parse(value).assets) {
+          if (assets.has(asset.id)) {
+            throw new Error(`Asset manifest contains duplicate static asset ID ${asset.id}.`);
+          }
+          assets.set(asset.id, asset);
+        }
+        return assets;
+      })
+      .catch((error: unknown) => {
+        this.assetManifestPromise = null;
+        throw error;
+      });
+    return this.assetManifestPromise;
   }
 }

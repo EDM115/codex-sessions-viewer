@@ -3,6 +3,8 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@nuxt/test-utils/playwright";
 import type { Page } from "@playwright/test";
 
+import { browserSecurityHeaders } from "../../server/core/securityHeaders.ts";
+
 declare global {
   interface Window {
     viewerReleaseVitals: { cls: number; lcp: number };
@@ -85,8 +87,18 @@ test("blocks external automatic requests and exposes no session creation action"
   page,
   goto,
 }) => {
+  const cspViolations: string[] = [];
+  page.on("console", (message) => {
+    if (/content security policy|violates the following directive/iu.test(message.text())) {
+      cspViolations.push(message.text());
+    }
+  });
   await goto("/", { waitUntil: "hydration" });
   const localOrigin = new URL(page.url()).origin;
+  const liveResponse = await page.request.get(localOrigin);
+  for (const [header, value] of Object.entries(browserSecurityHeaders)) {
+    expect(liveResponse.headers()[header.toLowerCase()]).toBe(value);
+  }
   const externalRequests: string[] = [];
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
@@ -100,6 +112,7 @@ test("blocks external automatic requests and exposes no session creation action"
   await page.reload({ waitUntil: "networkidle" });
 
   expect(externalRequests).toEqual([]);
+  expect(cspViolations).toEqual([]);
   await expect(page.getByRole("button", { name: /create|new session/iu })).toHaveCount(0);
   const settings = page.getByRole("link", { name: "Open Settings" });
   await expect(settings).toHaveCount(1);

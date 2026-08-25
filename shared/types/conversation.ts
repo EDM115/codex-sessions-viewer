@@ -2,6 +2,10 @@ import * as z from "zod";
 
 import { richTextDocumentSchema, type RichTextDocument } from "./richText.ts";
 
+export const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
+export const MAX_MEDIA_REFERENCE_PREVIEW_LENGTH = 160;
+export const MAX_DATA_REFERENCE_PAYLOAD_LENGTH = MAX_MEDIA_BYTES * 3;
+
 export type ConversationScope = "active" | "archived";
 export type MessageRole = "user" | "assistant";
 export type DisclosureDefault = "collapsed" | "expanded";
@@ -174,11 +178,53 @@ export interface CompactionActivity extends ConversationActivityBase {
   summary: string | null;
 }
 
+export type MediaReferenceProvenance = "user-message" | "response-input" | "generated";
+export type InvalidMediaReferenceReason =
+  | "empty"
+  | "extraction-failed"
+  | "malformed-data"
+  | "malformed-path"
+  | "missing"
+  | "oversized-data"
+  | "relative-path"
+  | "unsupported-media-type"
+  | "unsupported-scheme";
+
+export type MediaReference =
+  | {
+      kind: "local-file";
+      path: string;
+      provenance: MediaReferenceProvenance;
+    }
+  | {
+      kind: "data";
+      mimeType: string;
+      encoding: "base64" | "percent";
+      payload: string;
+      sourceHash: string;
+    }
+  | {
+      kind: "remote";
+      url: string;
+    }
+  | {
+      kind: "asset";
+      mimeType: string;
+      byteSize: number;
+      sha256: string;
+    }
+  | {
+      kind: "invalid";
+      reason: InvalidMediaReferenceReason;
+      preview: string;
+      sourceHash: string | null;
+    };
+
 export interface MediaActivity extends ConversationActivityBase {
   kind: "media";
   assetId: string;
   mediaType: "image" | "audio" | "video" | "file";
-  sourcePath: string | null;
+  reference: MediaReference;
 }
 
 export interface UnknownActivity extends ConversationActivityBase {
@@ -243,6 +289,46 @@ export const disclosureDefaultSchema = z.enum(["collapsed", "expanded"]);
 export const viewerThemeSchema = z.enum(["midnight-glass", "quiet-precision", "editorial-archive"]);
 export const isoTimestampSchema = z.iso.datetime({ offset: true });
 export const sha256Schema = z.string().regex(/^[a-f\d]{64}$/i);
+export const mediaReferenceSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("local-file"),
+    path: z.string().min(1).max(4_096),
+    provenance: z.enum(["user-message", "response-input", "generated"]),
+  }),
+  z.strictObject({
+    kind: z.literal("data"),
+    mimeType: z.string().min(1).max(255),
+    encoding: z.enum(["base64", "percent"]),
+    payload: z.string().max(MAX_DATA_REFERENCE_PAYLOAD_LENGTH),
+    sourceHash: sha256Schema,
+  }),
+  z.strictObject({
+    kind: z.literal("remote"),
+    url: z.url().max(2_048),
+  }),
+  z.strictObject({
+    kind: z.literal("asset"),
+    mimeType: z.string().min(1).max(255),
+    byteSize: z.int().nonnegative(),
+    sha256: sha256Schema,
+  }),
+  z.strictObject({
+    kind: z.literal("invalid"),
+    reason: z.enum([
+      "empty",
+      "extraction-failed",
+      "malformed-data",
+      "malformed-path",
+      "missing",
+      "oversized-data",
+      "relative-path",
+      "unsupported-media-type",
+      "unsupported-scheme",
+    ]),
+    preview: z.string().max(MAX_MEDIA_REFERENCE_PREVIEW_LENGTH),
+    sourceHash: sha256Schema.nullable(),
+  }),
+]);
 
 export const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
@@ -434,7 +520,7 @@ export const conversationActivitySchema = z.discriminatedUnion("kind", [
     kind: z.literal("media"),
     assetId: z.string().min(1),
     mediaType: z.enum(["image", "audio", "video", "file"]),
-    sourcePath: z.string().nullable(),
+    reference: mediaReferenceSchema,
   }),
   z.strictObject({
     ...activityBaseShape,

@@ -1,4 +1,13 @@
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,9 +15,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
+import { discoverSources } from "../../../server/ingestion/discoverSources.ts";
 import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
+import { readSessionMetaPrefix } from "../../../server/ingestion/sessionMetaPrefix.ts";
+import type { WatchSourcesOptions } from "../../../server/ingestion/watchSources.ts";
 import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
 import { coalesceSourceWatchBatches, LiveReconciler } from "../../../server/live/reconciler.ts";
+import { readSessionIndex } from "../../../server/metadata/sessionIndex.ts";
 import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
 
 const temporaryRoots: string[] = [];
@@ -182,6 +195,153 @@ describe("live reconciliation", () => {
       expect(readJsonl).toHaveBeenCalledOnce();
       await reconciler.reconcileNow("unchanged");
       expect(readJsonl).toHaveBeenCalledOnce();
+    } finally {
+      await reconciler.close();
+      database.close();
+    }
+  });
+
+  it("consumes rollout and metadata watcher details without broad discovery, prefix reads, or invalidations", async () => {
+    const { codexHome, rollout, cacheDir } = await createCodexHome();
+    const database = openCacheDatabase(":memory:");
+    const bus = new InvalidationBus();
+    const events: ViewerInvalidation[] = [];
+    const discover = vi.fn(discoverSources);
+    const readPrefix = vi.fn(readSessionMetaPrefix);
+    const readIndex = vi.fn(readSessionIndex);
+    let watcherOptions!: WatchSourcesOptions;
+    const reconciler = new LiveReconciler({
+      bus,
+      cacheDir,
+      codexHome,
+      database,
+      reconciliationIntervalMs: 60_000,
+      discover,
+      readPrefix,
+      readSessionIndex: readIndex,
+      watch(options) {
+        watcherOptions = options;
+        return { ready: new Promise<void>(() => undefined), close: async () => undefined };
+      },
+    });
+
+    try {
+      await reconciler.start();
+      const id = String(database.prepare("SELECT id FROM session_catalog").get()?.["id"]);
+      bus.subscribe((event) => events.push(event));
+
+      await reconciler.reconcileNow("unchanged");
+      expect(readPrefix).toHaveBeenCalledOnce();
+      expect(events.filter(({ type }) => type === "library.updated")).toEqual([]);
+      const discoveryCallsBeforeBatches = discover.mock.calls.length;
+
+      await appendFile(rollout, "\n", "utf8");
+      await watcherOptions.onBatch({
+        observedAt: "2026-08-20T10:00:00.000Z",
+        changes: [{ source: "rollout", scope: "active", path: rollout, kind: "changed" }],
+      });
+      await vi.waitFor(() => {
+        expect(events).toContainEqual({
+          type: "library.updated",
+          ids: [id],
+          revision: expect.any(String),
+        });
+      });
+      expect(discover).toHaveBeenCalledTimes(discoveryCallsBeforeBatches);
+      expect(readPrefix).toHaveBeenCalledTimes(2);
+
+      events.splice(0);
+      const sessionIndexPath = join(codexHome, "session_index.jsonl");
+      await writeFile(
+        sessionIndexPath,
+        `${JSON.stringify({
+          id,
+          thread_name: "Renamed from watcher metadata",
+          updated_at: "2026-08-20T10:00:01.000Z",
+        })}\n`,
+        "utf8",
+      );
+      await watcherOptions.onBatch({
+        observedAt: "2026-08-20T10:00:01.000Z",
+        changes: [{ source: "session-index", path: sessionIndexPath, kind: "added" }],
+      });
+      await vi.waitFor(() => {
+        expect(database.prepare("SELECT title FROM session_catalog WHERE id = ?").get(id)).toEqual({
+          title: "Renamed from watcher metadata",
+        });
+      });
+      expect(discover).toHaveBeenCalledTimes(discoveryCallsBeforeBatches);
+      expect(readPrefix).toHaveBeenCalledTimes(2);
+      expect(readIndex).toHaveBeenCalledOnce();
+      expect(events).toEqual([
+        { type: "library.updated", ids: [id], revision: expect.any(String) },
+      ]);
+
+      events.splice(0);
+      await rm(rollout);
+      await watcherOptions.onBatch({
+        observedAt: "2026-08-20T10:00:02.000Z",
+        changes: [{ source: "rollout", scope: "active", path: rollout, kind: "removed" }],
+      });
+      await vi.waitFor(() => {
+        expect(database.prepare("SELECT count(*) AS count FROM session_catalog").get()).toEqual({
+          count: 0,
+        });
+      });
+      expect(discover).toHaveBeenCalledTimes(discoveryCallsBeforeBatches);
+      expect(readPrefix).toHaveBeenCalledTimes(2);
+      expect(events).toEqual([
+        { type: "library.updated", ids: [id], revision: expect.any(String) },
+      ]);
+    } finally {
+      await reconciler.close();
+      database.close();
+    }
+  });
+
+  it("verifies a content-identical touch through the source manifest without catalog invalidation", async () => {
+    const { codexHome, rollout, cacheDir } = await createCodexHome();
+    const database = openCacheDatabase(":memory:");
+    const bus = new InvalidationBus();
+    const events: ViewerInvalidation[] = [];
+    const readPrefix = vi.fn(readSessionMetaPrefix);
+    let watcherOptions!: WatchSourcesOptions;
+    const reconciler = new LiveReconciler({
+      bus,
+      cacheDir,
+      codexHome,
+      database,
+      reconciliationIntervalMs: 60_000,
+      readPrefix,
+      watch(options) {
+        watcherOptions = options;
+        return { ready: new Promise<void>(() => undefined), close: async () => undefined };
+      },
+    });
+
+    try {
+      await reconciler.start();
+      const id = String(database.prepare("SELECT id FROM session_catalog").get()?.["id"]);
+      await expect(reconciler.prepareSessions([id])).resolves.toEqual([
+        { id, state: "ready", error: null },
+      ]);
+      bus.subscribe((event) => events.push(event));
+      const before = await stat(rollout);
+      await utimes(rollout, before.atime, new Date(before.mtimeMs + 5_000));
+
+      await watcherOptions.onBatch({
+        observedAt: "2026-08-20T10:00:02.000Z",
+        changes: [{ source: "rollout", scope: "active", path: rollout, kind: "changed" }],
+      });
+      await reconciler.reconcileNow("after-identical-touch");
+
+      expect(readPrefix).toHaveBeenCalledOnce();
+      expect(events.filter(({ type }) => type === "library.updated")).toEqual([]);
+      const manifestMtime = database
+        .prepare("SELECT mtime_ms FROM source_files WHERE path = ?")
+        .get(rollout)?.["mtime_ms"];
+      expect(typeof manifestMtime).toBe("number");
+      expect(Math.abs(Number(manifestMtime) - (before.mtimeMs + 5_000))).toBeLessThan(2);
     } finally {
       await reconciler.close();
       database.close();

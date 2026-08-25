@@ -1,33 +1,49 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import { fileTypeFromBuffer } from "file-type";
 
+import {
+  MAX_MEDIA_BYTES,
+  type MediaActivity,
+  type MediaReference,
+} from "../../shared/types/conversation.ts";
 import type { EmbeddedMediaSource } from "../../shared/types/richText.ts";
 import { upsertCachedAsset } from "../cache/assetStore.ts";
-import type { ReferencedLocalMediaSource } from "../ingestion/discoverSources.ts";
+import type { ReferencedMediaSource } from "../ingestion/discoverSources.ts";
 import { readStableBytes } from "../ingestion/stableRead.ts";
 import { sanitizeSvg } from "./sanitizeSvg.ts";
 
-const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
+const MAX_MEDIA_ERROR_LENGTH = 512;
+const MAX_ORIGINAL_REFERENCE_LENGTH = 4_096;
 
 export interface MediaStoreOptions {
   assetRoot: string;
   sessionId: string | null;
+  trustedMediaRoots?: readonly string[] | undefined;
+  readSource?: typeof readStableBytes | undefined;
 }
 
 export interface StoredMediaResult {
   assetId: string;
   status: "available" | "missing" | "error";
   cachePath: string | null;
+  mimeType: string | null;
+  byteSize: number | null;
+  sha256: string | null;
 }
 
 interface PreparedMedia {
   bytes: Buffer;
-  mimeType: string | null;
+  mimeType: string;
   extension: string;
+}
+
+interface TrustedMediaRoot {
+  configuredPath: string;
+  canonicalPath: string;
 }
 
 function isMissing(error: unknown): boolean {
@@ -35,7 +51,7 @@ function isMissing(error: unknown): boolean {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return (error instanceof Error ? error.message : String(error)).slice(0, MAX_MEDIA_ERROR_LENGTH);
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -101,11 +117,182 @@ async function preparedMedia(bytes: Buffer, declaredMimeType?: string): Promise<
     return { bytes: Buffer.from(sanitized), mimeType: "image/svg+xml", extension: "svg" };
   }
   const detected = await fileTypeFromBuffer(bytes);
+  if (detected === undefined) {
+    throw new Error("Referenced media has an unknown file type.");
+  }
+  if (declaredMimeType !== undefined && detected.mime !== declaredMimeType) {
+    throw new Error("Referenced media does not match its declared MIME type.");
+  }
   return {
     bytes,
-    mimeType: detected?.mime ?? declaredMimeType ?? null,
-    extension: detected?.ext ?? "bin",
+    mimeType: detected.mime,
+    extension: detected.ext,
   };
+}
+
+function compatibleMediaType(mediaType: MediaActivity["mediaType"], mimeType: string): boolean {
+  return mediaType === "file" || mimeType.startsWith(`${mediaType}/`);
+}
+
+function assertCompatibleMediaType(
+  mediaType: MediaActivity["mediaType"],
+  media: PreparedMedia,
+): void {
+  if (!compatibleMediaType(mediaType, media.mimeType)) {
+    throw new Error("Referenced media does not match its declared media type.");
+  }
+}
+
+function isWithinRoot(root: string, candidate: string): boolean {
+  const fromRoot = relative(resolve(root), resolve(candidate));
+  return (
+    fromRoot === "" ||
+    (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot))
+  );
+}
+
+function sameResolvedPath(left: string, right: string): boolean {
+  return process.platform === "win32"
+    ? resolve(left).toLowerCase() === resolve(right).toLowerCase()
+    : resolve(left) === resolve(right);
+}
+
+async function resolveTrustedMediaRoots(paths: readonly string[]): Promise<TrustedMediaRoot[]> {
+  const roots: TrustedMediaRoot[] = [];
+  for (const path of paths) {
+    if (!isAbsolute(path)) {
+      continue;
+    }
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- Roots are user-approved and validated independently.
+      const metadata = await lstat(path);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        continue;
+      }
+      // oxlint-disable-next-line no-await-in-loop -- Canonical roots are required before candidate containment checks.
+      roots.push({ configuredPath: resolve(path), canonicalPath: await realpath(path) });
+    } catch {
+      // A missing optional attachment root simply authorizes no files beneath it.
+    }
+  }
+  return roots;
+}
+
+function percentDecodedSize(payload: string): number {
+  let size = 0;
+  for (let index = 0; index < payload.length;) {
+    if (payload[index] === "%") {
+      const encoded = payload.slice(index + 1, index + 3);
+      if (!/^[\da-f]{2}$/iu.test(encoded)) {
+        throw new Error("Embedded media contains malformed percent encoding.");
+      }
+      size += 1;
+      index += 3;
+    } else {
+      const codePoint = payload.codePointAt(index);
+      if (codePoint === undefined) {
+        throw new Error("Embedded media contains malformed text.");
+      }
+      const character = String.fromCodePoint(codePoint);
+      size += Buffer.byteLength(character);
+      index += character.length;
+    }
+    if (size > MAX_MEDIA_BYTES) {
+      throw new Error("Embedded media exceeds the 64 MiB limit.");
+    }
+  }
+  return size;
+}
+
+function decodeDataReference(reference: Extract<MediaReference, { kind: "data" }>): Buffer {
+  if (reference.encoding === "base64") {
+    if (reference.payload.length % 4 !== 0 || !/^[a-z\d+/]*={0,2}$/iu.test(reference.payload)) {
+      throw new Error("Embedded media contains malformed base64 encoding.");
+    }
+    const padding = reference.payload.endsWith("==") ? 2 : reference.payload.endsWith("=") ? 1 : 0;
+    const expectedSize = (reference.payload.length / 4) * 3 - padding;
+    if (expectedSize > MAX_MEDIA_BYTES) {
+      throw new Error("Embedded media exceeds the 64 MiB limit.");
+    }
+    const bytes = Buffer.from(reference.payload, "base64");
+    if (bytes.byteLength !== expectedSize) {
+      throw new Error("Embedded media contains malformed base64 encoding.");
+    }
+    return bytes;
+  }
+
+  const size = percentDecodedSize(reference.payload);
+  const bytes = Buffer.allocUnsafe(size);
+  let offset = 0;
+  for (let index = 0; index < reference.payload.length;) {
+    if (reference.payload[index] === "%") {
+      bytes[offset] = Number.parseInt(reference.payload.slice(index + 1, index + 3), 16);
+      offset += 1;
+      index += 3;
+    } else {
+      const codePoint = reference.payload.codePointAt(index)!;
+      const character = String.fromCodePoint(codePoint);
+      offset += Buffer.from(character).copy(bytes, offset);
+      index += character.length;
+    }
+  }
+  return bytes;
+}
+
+function boundedOriginalReference(reference: MediaReference): string | null {
+  let value: string | null;
+  if (reference.kind === "local-file") {
+    value = reference.path;
+  } else if (reference.kind === "remote") {
+    value = reference.url;
+  } else if (reference.kind === "data") {
+    value = `data:${reference.mimeType};${reference.encoding};sha256=${reference.sourceHash}`;
+  } else if (reference.kind === "invalid") {
+    value = reference.preview;
+  } else {
+    value = null;
+  }
+  return value?.slice(0, MAX_ORIGINAL_REFERENCE_LENGTH) ?? null;
+}
+
+async function prepareLocalMedia(
+  reference: Extract<MediaReference, { kind: "local-file" }>,
+  mediaType: MediaActivity["mediaType"],
+  trustedRoots: readonly TrustedMediaRoot[],
+  readSource: typeof readStableBytes,
+): Promise<PreparedMedia> {
+  const candidate = resolve(reference.path);
+  const trustedRoot = trustedRoots.find((root) => isWithinRoot(root.configuredPath, candidate));
+  if (trustedRoot === undefined) {
+    throw new Error("Referenced media is outside the configured trusted media roots.");
+  }
+  const metadata = await lstat(candidate);
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink > 1 ||
+    metadata.size > MAX_MEDIA_BYTES
+  ) {
+    throw new Error("Referenced media is not an unlinked regular file within the 64 MiB limit.");
+  }
+  const canonical = await realpath(candidate);
+  const expectedCanonical = resolve(
+    trustedRoot.canonicalPath,
+    relative(trustedRoot.configuredPath, candidate),
+  );
+  if (
+    !sameResolvedPath(canonical, expectedCanonical) ||
+    !isWithinRoot(trustedRoot.canonicalPath, canonical)
+  ) {
+    throw new Error("Referenced media resolves outside the configured trusted media roots.");
+  }
+  const read = await readSource(candidate, { endExclusive: metadata.size });
+  if (read.read.status !== "stable") {
+    throw new Error("Referenced media changed while it was being copied.");
+  }
+  const media = await preparedMedia(read.bytes);
+  assertCompatibleMediaType(mediaType, media);
+  return media;
 }
 
 function writeAssetRecord(
@@ -135,35 +322,52 @@ function writeAssetRecord(
     cachePath: input.cachePath,
     error: input.error,
   });
-  return { assetId: input.assetId, status: input.status, cachePath: input.cachePath };
+  return {
+    assetId: input.assetId,
+    status: input.status,
+    cachePath: input.cachePath,
+    mimeType: input.media?.mimeType ?? null,
+    byteSize: input.media?.bytes.byteLength ?? null,
+    sha256: input.sha256,
+  };
 }
 
 export async function storeReferencedMedia(
   database: DatabaseSync,
-  references: readonly ReferencedLocalMediaSource[],
+  references: readonly ReferencedMediaSource[],
   options: MediaStoreOptions,
 ): Promise<StoredMediaResult[]> {
   const results: StoredMediaResult[] = [];
+  const trustedRoots = await resolveTrustedMediaRoots(options.trustedMediaRoots ?? []);
   for (const reference of references) {
     try {
-      // oxlint-disable-next-line no-await-in-loop -- Each source is copied and integrity-checked before its cache row is exposed.
-      const metadata = await stat(reference.path);
-      if (!metadata.isFile() || metadata.size > MAX_MEDIA_BYTES) {
-        throw new Error("Referenced media is not a regular file within the 64 MiB limit.");
+      if (reference.reference.kind === "remote") {
+        throw new Error("Remote media is not fetched by the offline viewer.");
       }
-      // oxlint-disable-next-line no-await-in-loop -- Stable reads must complete before the corresponding cache row is written.
-      const read = await readStableBytes(reference.path, { endExclusive: metadata.size });
-      if (read.read.status !== "stable") {
-        throw new Error("Referenced media changed while it was being copied.");
+      if (reference.reference.kind === "invalid") {
+        throw new Error(`Invalid media reference: ${reference.reference.reason}.`);
       }
-      // oxlint-disable-next-line no-await-in-loop -- MIME sniffing and SVG sanitization are bounded by MAX_MEDIA_BYTES.
-      const media = await preparedMedia(read.bytes);
+      const media =
+        reference.reference.kind === "data"
+          ? // oxlint-disable-next-line no-await-in-loop -- Data decoding and MIME validation are bounded before storage.
+            await preparedMedia(
+              decodeDataReference(reference.reference),
+              reference.reference.mimeType,
+            )
+          : // oxlint-disable-next-line no-await-in-loop -- Each approved local source is copied and verified before exposure.
+            await prepareLocalMedia(
+              reference.reference,
+              reference.mediaType,
+              trustedRoots,
+              options.readSource ?? readStableBytes,
+            );
+      assertCompatibleMediaType(reference.mediaType, media);
       // oxlint-disable-next-line no-await-in-loop -- Content-addressed writes are intentionally ordered with cache metadata writes.
       const stored = await writeContentAddressed(options.assetRoot, media);
       results.push(
         writeAssetRecord(database, {
           assetId: reference.assetId,
-          originalPath: reference.path,
+          originalPath: boundedOriginalReference(reference.reference),
           status: "available",
           media,
           cachePath: stored.cachePath,
@@ -176,7 +380,7 @@ export async function storeReferencedMedia(
       results.push(
         writeAssetRecord(database, {
           assetId: reference.assetId,
-          originalPath: reference.path,
+          originalPath: boundedOriginalReference(reference.reference),
           status: isMissing(error) ? "missing" : "error",
           media: null,
           cachePath: null,

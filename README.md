@@ -77,7 +77,7 @@ Static turn payloads are bounded by both turn count and an approximate byte budg
 pnpm offline [--port <number>]
 ```
 
-This server reads `.output/public`, binds only to `127.0.0.1`, accepts `GET` and `HEAD`, prevents path escape after real-path resolution, and applies no-index and content-type safety headers. It never starts live ingestion or favicon fetching.
+This server reads `.output/public`, binds only to `127.0.0.1`, accepts `GET` and `HEAD`, prevents path escape after real-path resolution, and applies the same local-only content, framing, MIME, referrer, and indexing policy as the live viewer. The CSP permits only same-origin application code and connections plus the inline Nuxt bootstrap, Vue-managed styles, local fonts, and local/data/blob media required by the UI; it does not allow remote origins or evaluated code. The server never starts live ingestion or favicon fetching.
 
 ### Diagnostics
 
@@ -85,7 +85,7 @@ This server reads `.output/public`, binds only to `127.0.0.1`, accepts `GET` and
 pnpm run doctor [--codex-home <path>]
 ```
 
-Doctor is read-only. It reports discovered active and archived sources, catalog roots/subagents/auxiliaries, cold/queued/loading/ready/failed materialization counts, normalized payloads and parser diagnostics separately, state-snapshot availability, static-output completeness, and whether Pagefind is present or disabled.
+Doctor is read-only. It reports discovered active and archived sources, catalog roots/subagents/auxiliaries, cold/queued/loading/ready/failed materialization counts, normalized payloads and parser diagnostics separately, state-snapshot availability, static-output structural presence, and whether Pagefind is present or disabled. Doctor does not check publication integrity; run `pnpm verify:output` for the authoritative semantic verification.
 
 ### Generated-output verification
 
@@ -127,19 +127,32 @@ Presentation preferences such as theme, disclosure defaults, timestamps, code wr
 
 The source follows Nuxt 4 ownership boundaries: browser code in `app/`, server-only code in `server/`, universal contracts and algorithms in `shared/`, Jiti command entrypoints in `scripts/`, and verification in `tests/`.
 
-Run the release checks with:
+Run the normal source checks with:
 
 ```powershell
-pnpm exec nuxt prepare
-pnpm test
-pnpm test:integration
-pnpm test:performance
-pnpm coverage
-pnpm typecheck
-pnpm lint
-pnpm build
-pnpm test:e2e
+pnpm verify:source
 ```
+
+For complete local release readiness, including the production build and browser checks, run:
+
+```powershell
+pnpm verify:release
+```
+
+The composed gates stream each child command's output, stop at the first failure, and run in this order:
+
+1. `pnpm exec nuxt prepare`
+2. `pnpm format:check`
+3. `pnpm typecheck`
+4. `pnpm lint`
+5. `pnpm test`
+6. `pnpm test:integration`
+7. `pnpm test:performance`
+8. `pnpm coverage`
+9. `pnpm build` (release gate only)
+10. `pnpm test:e2e` (release gate only)
+
+`pnpm verify:output [--output <path>]` remains separate: it verifies the semantic integrity of a newly generated representative publication, while `doctor` reports only structural presence. Do not treat an arbitrary stale `.output` directory as release evidence.
 
 Vitest separates Node, Pagefind, performance, UI, and Nuxt-owned suites. Pagefind integration is intentionally isolated from parallel files on Windows because its own atomic index rename can collide across workers. `tsconfig.custom.json` type-checks non-default entrypoints and tests; Nuxt remains the owner of application, server, and shared source typing.
 

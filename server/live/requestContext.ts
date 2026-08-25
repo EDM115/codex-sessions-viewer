@@ -19,3 +19,11 @@ export function useLiveViewerRuntime(event: H3Event): LiveViewerRuntime {
   }
   return runtime;
 }
+
+export async function useCatalogReadyLiveViewerRuntime(event: H3Event): Promise<LiveViewerRuntime> {
+  const runtime = useLiveViewerRuntime(event);
+  if (runtime.status.state === "preparing") {
+    await runtime.startInitialReconciliation();
+  }
+  return runtime;
+}

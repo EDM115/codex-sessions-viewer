@@ -682,6 +682,21 @@ async function publishContentFile(
   return `/${directory}/${cached.name}`;
 }
 
+function boundedPublishedOriginalPath(value: string | null): string | null {
+  if (value === null) {
+    return null;
+  }
+  if (value.startsWith("data:")) {
+    const separator = value.indexOf(",");
+    if (separator >= 0) {
+      const header = value.slice(5, separator).slice(0, 255);
+      const hash = createHash("sha256").update(value).digest("hex");
+      return `data:${header};sha256=${hash}`;
+    }
+  }
+  return value.slice(0, 4_096);
+}
+
 export async function publishCachedContent(
   database: DatabaseSync,
   options: PublishCachedContentOptions,
@@ -733,7 +748,7 @@ export async function publishCachedContent(
       width: rowNumber(row, "width"),
       height: rowNumber(row, "height"),
       status,
-      originalPath: rowText(row, "original_path"),
+      originalPath: boundedPublishedOriginalPath(rowText(row, "original_path")),
     });
   }
   const faviconQuery = database.prepare(`

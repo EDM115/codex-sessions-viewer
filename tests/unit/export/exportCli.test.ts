@@ -9,6 +9,9 @@ describe("static export command arguments", () => {
         "--codex-home",
         "C:\\Codex home",
         "--output=C:\\viewer output",
+        "--media-root",
+        "C:\\Codex home\\attachments",
+        "--media-root=D:\\Selected media",
         "--offline",
         "--force",
         "--no-index",
@@ -19,6 +22,7 @@ describe("static export command arguments", () => {
       offline: true,
       force: true,
       index: false,
+      trustedMediaRoots: ["C:\\Codex home\\attachments", "D:\\Selected media"],
     });
     expect(parseExportArguments([])).toEqual({ offline: false, force: false, index: true });
   });
@@ -29,6 +33,7 @@ describe("static export command arguments", () => {
     expect(() => parseExportArguments(["--codex-home", "--force"])).toThrow("requires a value");
     expect(() => parseExportArguments(["--codex-home="])).toThrow("requires a value");
     expect(() => parseExportArguments(["--output="])).toThrow("requires a value");
+    expect(() => parseExportArguments(["--media-root="])).toThrow("requires a value");
     expect(() => parseDoctorArguments(["--codex-home"])).toThrow("requires a value");
     expect(() => parseDoctorArguments(["--codex-home", "--force"])).toThrow("requires a value");
   });

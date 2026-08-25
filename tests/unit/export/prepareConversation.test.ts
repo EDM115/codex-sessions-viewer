@@ -103,8 +103,8 @@ describe("conversation export preparation", () => {
         expect.arrayContaining([expect.objectContaining({ type: "element", tagName: "strong" })]),
       );
       expect(prepared.assetIds).toEqual(new Set(["asset-raw-870-0", "asset-image-1"]));
-      expect(getCachedAsset(database, "asset-raw-870-0")).toMatchObject({ status: "missing" });
-      expect(getCachedAsset(database, "asset-image-1")).toMatchObject({ status: "missing" });
+      expect(getCachedAsset(database, "asset-raw-870-0")).toMatchObject({ status: "error" });
+      expect(getCachedAsset(database, "asset-image-1")).toMatchObject({ status: "error" });
       expect(prepared.faviconResults).toEqual([
         expect.objectContaining({ origin: "https://nuxt.com", status: "fallback", pending: false }),
       ]);
@@ -179,6 +179,66 @@ describe("conversation export preparation", () => {
       );
       expect(prepared.faviconOrigins).toEqual(new Set());
       expect(prepared.faviconResults).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("stores protocol data media and replaces its payload with bounded asset metadata", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-viewer-prepare-export-"));
+    temporaryDirectories.push(root);
+    const conversation = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: join(root, "modern.jsonl"),
+      scope: "active",
+      revision: "sha256:fixture",
+    });
+    const media = conversation.turns
+      .flatMap(({ activities }) => activities)
+      .find((activity) => activity.kind === "media");
+    if (media === undefined || media.kind !== "media") {
+      throw new Error("Expected a media activity.");
+    }
+    const payload =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    media.reference = {
+      kind: "data",
+      mimeType: "image/png",
+      encoding: "base64",
+      payload,
+      sourceHash: "e".repeat(64),
+    };
+    const database = openCacheDatabase(":memory:");
+    replaceCachedSession(database, {
+      session: conversation,
+      diagnostics: [],
+      source: cachedSource(conversation),
+    });
+
+    try {
+      const prepared = await prepareConversationForExport(database, conversation, {
+        mediaRoot: join(root, "media-cache"),
+        faviconRoot: join(root, "favicon-cache"),
+        offline: true,
+      });
+      const preparedMedia = prepared.conversation.turns
+        .flatMap(({ activities }) => activities)
+        .find((activity) => activity.kind === "media" && activity.assetId === media.assetId);
+
+      expect(preparedMedia).toMatchObject({
+        kind: "media",
+        reference: {
+          kind: "asset",
+          mimeType: "image/png",
+          byteSize: 68,
+          sha256: expect.stringMatching(/^[a-f\d]{64}$/u),
+        },
+      });
+      expect(getCachedAsset(database, media.assetId)).toMatchObject({
+        status: "available",
+        originalPath: `data:image/png;base64;sha256=${"e".repeat(64)}`,
+      });
+      expect(JSON.stringify(preparedMedia)).not.toContain(payload);
     } finally {
       database.close();
     }

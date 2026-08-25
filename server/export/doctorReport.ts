@@ -34,7 +34,8 @@ export interface DoctorCacheReport {
 }
 
 export interface DoctorOfflineOutputReport {
-  status: "available" | "missing" | "incomplete";
+  structuralStatus: "present" | "missing" | "incomplete";
+  integrityStatus: "not-checked";
   sessionCount: number;
   missingFiles: string[];
   searchIndex: "pagefind" | "disabled" | "unknown";
@@ -269,9 +270,15 @@ function offlineSessionEntries(value: unknown): OfflineSessionEntry[] | null {
   return entries;
 }
 
-async function inspectOfflineOutput(publicRoot: string): Promise<DoctorOfflineOutputReport> {
+export async function inspectOfflineOutput(publicRoot: string): Promise<DoctorOfflineOutputReport> {
   if (!(await directoryExists(publicRoot))) {
-    return { status: "missing", sessionCount: 0, missingFiles: [], searchIndex: "unknown" };
+    return {
+      structuralStatus: "missing",
+      integrityStatus: "not-checked",
+      sessionCount: 0,
+      missingFiles: [],
+      searchIndex: "unknown",
+    };
   }
   const missingFiles: string[] = [];
   const requireFile = async (relativePath: string): Promise<void> => {
@@ -313,7 +320,13 @@ async function inspectOfflineOutput(publicRoot: string): Promise<DoctorOfflineOu
   }
   if (sessions === null) {
     missingFiles.push("payloads/sessions/index.json");
-    return { status: "incomplete", sessionCount: 0, missingFiles, searchIndex };
+    return {
+      structuralStatus: "incomplete",
+      integrityStatus: "not-checked",
+      sessionCount: 0,
+      missingFiles,
+      searchIndex,
+    };
   }
 
   await Promise.all(
@@ -361,11 +374,20 @@ async function inspectOfflineOutput(publicRoot: string): Promise<DoctorOfflineOu
     }),
   );
   return {
-    status: missingFiles.length === 0 ? "available" : "incomplete",
+    structuralStatus: missingFiles.length === 0 ? "present" : "incomplete",
+    integrityStatus: "not-checked",
     sessionCount: sessions.length,
     missingFiles: missingFiles.toSorted(),
     searchIndex,
   };
+}
+
+export function formatDoctorOfflineOutput(report: DoctorOfflineOutputReport): string[] {
+  const sessions = `${report.sessionCount} session${report.sessionCount === 1 ? "" : "s"}`;
+  return [
+    `Offline output: structurally ${report.structuralStatus} (${sessions}, search ${report.searchIndex}).`,
+    "Integrity: not checked; run pnpm verify:output for publication verification.",
+  ];
 }
 
 export async function collectDoctorReport(
@@ -398,7 +420,7 @@ export async function collectDoctorReport(
     capabilities: {
       live: true,
       export: true,
-      offline: offlineOutput.status === "available",
+      offline: offlineOutput.structuralStatus === "present",
     },
     diagnostics: [...config.diagnostics, ...discovery.diagnostics, ...cache.diagnostics].map(
       ({ code, severity, area, message, path }) => ({ code, severity, area, message, path }),

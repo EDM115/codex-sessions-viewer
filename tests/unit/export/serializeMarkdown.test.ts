@@ -129,7 +129,11 @@ describe("Markdown copy serializers", () => {
         kind: "media",
         assetId: "asset-1",
         mediaType: "audio",
-        sourcePath: "C:\\Recordings\\sample.wav",
+        reference: {
+          kind: "local-file",
+          path: "C:\\Recordings\\sample.wav",
+          provenance: "user-message",
+        },
       },
     ];
 
@@ -282,7 +286,12 @@ describe("Markdown copy serializers", () => {
         kind: "media",
         assetId: "asset",
         mediaType: "file",
-        sourcePath: null,
+        reference: {
+          kind: "invalid",
+          reason: "missing",
+          preview: "",
+          sourceHash: null,
+        },
       },
       {
         ...base,
@@ -291,7 +300,11 @@ describe("Markdown copy serializers", () => {
         kind: "media",
         assetId: "asset",
         mediaType: "image",
-        sourcePath: "file:///C:/images/a%20b.png",
+        reference: {
+          kind: "local-file",
+          path: "C:/images/a b.png",
+          provenance: "user-message",
+        },
       },
       {
         ...base,
@@ -330,7 +343,7 @@ describe("Markdown copy serializers", () => {
     expect(markdown).toContain("- [ ] Next");
     expect(markdown).toContain("Reviewed the cache.");
     expect(markdown).toContain("Earlier context.");
-    expect(markdown).toContain("file:///C:/images/a%20b.png");
+    expect(markdown).toContain("C:/images/a b.png");
     expect(markdown).toContain("Untimed response.");
     expect(markdown).not.toContain("reasoning-empty");
     expect(markdown).not.toContain("future");

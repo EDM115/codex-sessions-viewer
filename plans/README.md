@@ -7,17 +7,17 @@ These files are handoff plans, not implementation. The Codex rollout archive rem
 
 | Plan | Title                                                   | Priority | Effort | Risk | Depends on | Status |
 | ---- | ------------------------------------------------------- | -------- | ------ | ---- | ---------- | ------ |
-| 001  | Restore a reliable coverage gate                        | P1       | M      | MED  | —          | TODO   |
-| 002  | Classify and constrain media references                 | P1       | M      | MED  | 001        | TODO   |
-| 003  | Fence materialization commits by source revision        | P1       | M      | MED  | 001        | TODO   |
-| 004  | Select duplicate session sources consistently           | P1       | M      | MED  | 001        | TODO   |
-| 005  | Reconcile and invalidate only changed catalog state     | P1       | M      | MED  | 003, 004   | TODO   |
-| 006  | Cache and index the static asset manifest               | P2       | S      | LOW  | 002        | TODO   |
-| 007  | Linearize session normalization state derivation        | P2       | S–M    | LOW  | 001        | TODO   |
-| 008  | Bound deep-search result recounting                     | P2       | S–M    | MED  | 005        | TODO   |
-| 009  | Separate static-output presence from verified integrity | P2       | S      | LOW  | 001        | TODO   |
-| 010  | Add tested browser-containment headers                  | P3       | M      | MED  | 001        | TODO   |
-| 011  | Compose the release checks into one local gate          | P3       | S      | LOW  | 001, 009   | TODO   |
+| 001  | Restore a reliable coverage gate                        | P1       | M      | MED  | —          | DONE   |
+| 002  | Classify and constrain media references                 | P1       | M      | MED  | 001        | DONE   |
+| 003  | Fence materialization commits by source revision        | P1       | M      | MED  | 001        | DONE   |
+| 004  | Select duplicate session sources consistently           | P1       | M      | MED  | 001        | DONE   |
+| 005  | Reconcile and invalidate only changed catalog state     | P1       | M      | MED  | 003, 004   | DONE   |
+| 006  | Cache and index the static asset manifest               | P2       | S      | LOW  | 002        | DONE   |
+| 007  | Linearize session normalization state derivation        | P2       | S–M    | LOW  | 001        | DONE   |
+| 008  | Bound deep-search result recounting                     | P2       | S–M    | MED  | 005        | DONE   |
+| 009  | Separate static-output presence from verified integrity | P2       | S      | LOW  | 001        | DONE   |
+| 010  | Add tested browser-containment headers                  | P3       | M      | MED  | 001        | DONE   |
+| 011  | Compose the release checks into one local gate          | P3       | S      | LOW  | 001, 009   | DONE   |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale).
 

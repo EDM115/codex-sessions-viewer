@@ -131,7 +131,12 @@ function activityVariants(): ConversationActivity[] {
       kind: "media",
       assetId: "asset-1",
       mediaType: "image",
-      sourcePath: null,
+      reference: {
+        kind: "invalid",
+        reason: "missing",
+        preview: "",
+        sourceHash: null,
+      },
     },
     { ...base, id: "unknown", kind: "unknown", eventType: "future", payload: null },
   ];
@@ -206,7 +211,14 @@ describe("conversation presentation", () => {
         return { ...activity, summary: "Earlier context" };
       }
       if (activity.kind === "media") {
-        return { ...activity, sourcePath: "diagram.png" };
+        return {
+          ...activity,
+          reference: {
+            kind: "local-file" as const,
+            path: "C:/diagram.png",
+            provenance: "user-message" as const,
+          },
+        };
       }
       return activity;
     });
@@ -254,7 +266,11 @@ describe("conversation presentation", () => {
         rawEventIds: [],
         assetId: "asset-2",
         mediaType: "file",
-        sourcePath: "report.txt",
+        reference: {
+          kind: "local-file",
+          path: "C:/report.txt",
+          provenance: "user-message",
+        },
       },
     ];
     const text = agentWorkText(value);
@@ -268,7 +284,7 @@ describe("conversation presentation", () => {
     expect(text).toContain("Agent · failed");
     expect(text).toContain("Status · succeeded");
     expect(text).toContain("Conversation compacted\nEarlier context");
-    expect(text).toContain("Media · file\nreport.txt");
+    expect(text).toContain("Media · file\nC:/report.txt");
     expect(text).not.toContain("The parser is ready.");
     expect(text).not.toContain("future");
   });

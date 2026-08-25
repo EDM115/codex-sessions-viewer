@@ -12,8 +12,9 @@ import {
   setCatalogMaterialization,
 } from "../cache/catalogStore.ts";
 import { getCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
-import { searchCachedSessions } from "../cache/searchStore.ts";
+import { countCachedSearchResults } from "../cache/searchStore.ts";
 import {
+  CACHE_PARSER_VERSION,
   getSourceManifestEntry,
   SessionCacheUpdater,
   type StableJsonlReader,
@@ -25,6 +26,11 @@ import {
   type SourceDiscoveryResult,
 } from "../ingestion/discoverSources.ts";
 import { readStableJsonl } from "../ingestion/jsonlStream.ts";
+import {
+  observeSessionMetaSource,
+  readSessionMetaPrefix,
+  type SessionMetaPrefixObservation,
+} from "../ingestion/sessionMetaPrefix.ts";
 import {
   watchSources,
   type SourceChange,
@@ -85,9 +91,25 @@ export interface LiveReconcilerOptions {
   debounceMs?: number | undefined;
   reconciliationIntervalMs?: number | undefined;
   readJsonl?: StableJsonlReader | undefined;
+  discover?: typeof discoverSources | undefined;
+  readPrefix?: typeof readSessionMetaPrefix | undefined;
+  observeSource?: ((path: string) => Promise<SessionMetaPrefixObservation>) | undefined;
+  readSessionIndex?: typeof readSessionIndex | undefined;
+  readGlobalState?: typeof readGlobalState | undefined;
+  snapshotStateDatabase?: typeof snapshotStateDatabase | undefined;
+  readRetainedStateSnapshot?: typeof readRetainedStateSnapshot | undefined;
+  countSearchResults?: typeof countCachedSearchResults | undefined;
   fetchFavicons?: boolean | undefined;
+  trustedMediaRoots?: readonly string[] | undefined;
   watch?: ((options: WatchSourcesOptions) => SourceWatcher) | undefined;
   onError?: ((error: unknown) => void) | undefined;
+}
+
+interface LiveMetadataReaders {
+  readSessionIndex: typeof readSessionIndex;
+  readGlobalState: typeof readGlobalState;
+  snapshotStateDatabase: typeof snapshotStateDatabase;
+  readRetainedStateSnapshot: typeof readRetainedStateSnapshot;
 }
 
 function changedTurnIds(before: NormalizedSession | null, after: NormalizedSession): string[] {
@@ -108,34 +130,116 @@ async function loadMetadata(
   discovery: SourceDiscoveryResult,
   cacheDir: string,
   freshStateSnapshot: boolean,
+  readers: LiveMetadataReaders,
 ): Promise<LiveMetadata> {
   const diagnostics: ViewerDiagnostic[] = [];
   let sessionIndexEntries: SessionIndexEntry[] = [];
   let globalState: GlobalStateMetadata = { projects: [], pinnedThreadIds: [] };
   let stateSnapshot: StateMetadataSnapshot | null = null;
   if (discovery.metadata.sessionIndex !== null) {
-    const result = await readSessionIndex(discovery.metadata.sessionIndex);
+    const result = await readers.readSessionIndex(discovery.metadata.sessionIndex);
     sessionIndexEntries = result.entries;
     diagnostics.push(...result.diagnostics);
   }
   if (discovery.metadata.globalState !== null) {
-    const result = await readGlobalState(discovery.metadata.globalState);
+    const result = await readers.readGlobalState(discovery.metadata.globalState);
     globalState = result.metadata;
     diagnostics.push(...result.diagnostics);
   }
   if (discovery.metadata.stateDatabase !== null) {
     const snapshotRoot = join(cacheDir, "state-snapshots");
     const result = freshStateSnapshot
-      ? await snapshotStateDatabase({
+      ? await readers.snapshotStateDatabase({
           sourceDatabase: discovery.metadata.stateDatabase,
           sourceWal: discovery.metadata.stateWal ?? `${discovery.metadata.stateDatabase}-wal`,
           snapshotRoot,
         })
-      : await readRetainedStateSnapshot(snapshotRoot);
+      : await readers.readRetainedStateSnapshot(snapshotRoot);
     stateSnapshot = result.metadata;
     diagnostics.push(...result.diagnostics);
   }
   return { sessionIndexEntries, globalState, stateSnapshot, diagnostics };
+}
+
+async function loadChangedMetadata(
+  discovery: SourceDiscoveryResult,
+  cacheDir: string,
+  previous: LiveMetadata,
+  changedSources: ReadonlySet<SourceChange["source"]>,
+  readers: LiveMetadataReaders,
+): Promise<LiveMetadata> {
+  let sessionIndexEntries = previous.sessionIndexEntries;
+  let globalState = previous.globalState;
+  let stateSnapshot = previous.stateSnapshot;
+  const diagnostics: ViewerDiagnostic[] = [];
+  if (changedSources.has("session-index")) {
+    if (discovery.metadata.sessionIndex === null) {
+      sessionIndexEntries = [];
+    } else {
+      const result = await readers.readSessionIndex(discovery.metadata.sessionIndex);
+      sessionIndexEntries = result.entries;
+      diagnostics.push(...result.diagnostics);
+    }
+  }
+  if (changedSources.has("global-state")) {
+    if (discovery.metadata.globalState === null) {
+      globalState = { projects: [], pinnedThreadIds: [] };
+    } else {
+      const result = await readers.readGlobalState(discovery.metadata.globalState);
+      globalState = result.metadata;
+      diagnostics.push(...result.diagnostics);
+    }
+  }
+  if (changedSources.has("state-database") || changedSources.has("state-wal")) {
+    if (discovery.metadata.stateDatabase === null) {
+      stateSnapshot = null;
+    } else {
+      const result = await readers.snapshotStateDatabase({
+        sourceDatabase: discovery.metadata.stateDatabase,
+        sourceWal: discovery.metadata.stateWal ?? `${discovery.metadata.stateDatabase}-wal`,
+        snapshotRoot: join(cacheDir, "state-snapshots"),
+      });
+      stateSnapshot = result.metadata;
+      diagnostics.push(...result.diagnostics);
+    }
+  }
+  return { sessionIndexEntries, globalState, stateSnapshot, diagnostics };
+}
+
+function sourcePathKey(path: string): string {
+  const normalized = resolve(path);
+  return process.platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
+}
+
+function discoveryAfterBatch(
+  previous: SourceDiscoveryResult,
+  batch: SourceWatchBatch,
+): SourceDiscoveryResult {
+  const rollouts = new Map(previous.rollouts.map((source) => [sourcePathKey(source.path), source]));
+  const metadata = { ...previous.metadata };
+  const metadataKeys = {
+    "global-state": "globalState",
+    "session-index": "sessionIndex",
+    "state-database": "stateDatabase",
+    "state-wal": "stateWal",
+  } as const;
+  for (const change of batch.changes) {
+    if (change.source === "rollout") {
+      const key = sourcePathKey(change.path);
+      if (change.kind === "removed") {
+        rollouts.delete(key);
+      } else {
+        rollouts.set(key, { path: resolve(change.path), scope: change.scope });
+      }
+      continue;
+    }
+    metadata[metadataKeys[change.source]] = change.kind === "removed" ? null : resolve(change.path);
+  }
+  return {
+    rollouts: [...rollouts.values()].toSorted((left, right) => left.path.localeCompare(right.path)),
+    metadata,
+    diagnostics: previous.diagnostics,
+  };
 }
 
 export class LiveReconciler {
@@ -146,10 +250,16 @@ export class LiveReconciler {
   readonly #debounceMs: number | undefined;
   readonly #reconciliationIntervalMs: number;
   readonly #fetchFavicons: boolean;
+  readonly #trustedMediaRoots: readonly string[];
   readonly #watch: (options: WatchSourcesOptions) => SourceWatcher;
   readonly #onError: ((error: unknown) => void) | undefined;
   readonly #updater: SessionCacheUpdater;
   readonly #readJsonl: StableJsonlReader;
+  readonly #discover: typeof discoverSources;
+  readonly #readPrefix: typeof readSessionMetaPrefix;
+  readonly #observeSource: (path: string) => Promise<SessionMetaPrefixObservation>;
+  readonly #metadataReaders: LiveMetadataReaders;
+  readonly #countSearchResults: typeof countCachedSearchResults;
   readonly #materializationQueue: MaterializationQueue;
   readonly #knownFaviconOrigins = new Map<string, string>();
   readonly #deepSearchJobs = new Map<string, DeepSearchJob>();
@@ -159,6 +269,7 @@ export class LiveReconciler {
     stateSnapshot: null,
     diagnostics: [],
   };
+  #discovery: SourceDiscoveryResult | null = null;
   #watcher: SourceWatcher | null = null;
   #interval: NodeJS.Timeout | null = null;
   #queue = Promise.resolve();
@@ -180,9 +291,20 @@ export class LiveReconciler {
     this.#debounceMs = options.debounceMs;
     this.#reconciliationIntervalMs = interval;
     this.#fetchFavicons = options.fetchFavicons ?? true;
+    this.#trustedMediaRoots = options.trustedMediaRoots ?? [join(this.#codexHome, "attachments")];
     this.#watch = options.watch ?? watchSources;
     this.#onError = options.onError;
     this.#readJsonl = options.readJsonl ?? readStableJsonl;
+    this.#discover = options.discover ?? discoverSources;
+    this.#readPrefix = options.readPrefix ?? readSessionMetaPrefix;
+    this.#observeSource = options.observeSource ?? observeSessionMetaSource;
+    this.#metadataReaders = {
+      readSessionIndex: options.readSessionIndex ?? readSessionIndex,
+      readGlobalState: options.readGlobalState ?? readGlobalState,
+      snapshotStateDatabase: options.snapshotStateDatabase ?? snapshotStateDatabase,
+      readRetainedStateSnapshot: options.readRetainedStateSnapshot ?? readRetainedStateSnapshot,
+    };
+    this.#countSearchResults = options.countSearchResults ?? countCachedSearchResults;
     this.#updater = new SessionCacheUpdater(this.#database, {
       retainLiveSources: false,
       readJsonl: options.readJsonl,
@@ -224,6 +346,7 @@ export class LiveReconciler {
       faviconRoot: join(this.#cacheDir, "favicons"),
       offline: !this.#fetchFavicons,
       mode: "live",
+      trustedMediaRoots: this.#trustedMediaRoots,
     });
     updateCachedSessionRichContent(this.#database, prepared.conversation);
     for (const origin of prepared.faviconOrigins) {
@@ -296,19 +419,36 @@ export class LiveReconciler {
   async #updateSource(
     source: DiscoveredRolloutSource,
     expectedSessionId: string,
+    expectedCatalogSourceRevision: string,
     force: boolean,
     announce: boolean,
   ): Promise<PreparationResult> {
     const manifest = getSourceManifestEntry(this.#database, source.path);
     const before =
-      announce && manifest?.sessionId
+      announce &&
+      manifest?.sessionId !== null &&
+      manifest?.sessionId !== undefined &&
+      manifest.fingerprint.parserVersion === CACHE_PARSER_VERSION
         ? getCachedSession(this.#database, manifest.sessionId, { includeRawEvents: false })
         : null;
     const result = await this.#updater.update(source, {
       force,
+      expectedCatalogSessionId: expectedSessionId,
+      expectedCatalogSourceRevision,
       sessionIndexEntries: this.#metadata.sessionIndexEntries,
       stateSnapshot: this.#metadata.stateSnapshot,
     });
+    if (result.status === "stale-catalog") {
+      return { id: expectedSessionId, state: "loading", error: null };
+    }
+    const currentCatalog = catalogSession(this.#database, expectedSessionId);
+    if (
+      currentCatalog === null ||
+      currentCatalog.sourceRevision !== expectedCatalogSourceRevision ||
+      currentCatalog.summary.sourcePath !== source.path
+    ) {
+      return { id: expectedSessionId, state: "loading", error: null };
+    }
     if (result.status === "failed") {
       if (announce) {
         this.#publish({
@@ -357,6 +497,14 @@ export class LiveReconciler {
     } catch (error) {
       this.#onError?.(error);
     }
+    const catalogAfterPreparation = catalogSession(this.#database, expectedSessionId);
+    if (
+      catalogAfterPreparation === null ||
+      catalogAfterPreparation.sourceRevision !== expectedCatalogSourceRevision ||
+      catalogAfterPreparation.summary.sourcePath !== source.path
+    ) {
+      return { id: expectedSessionId, state: "loading", error: null };
+    }
     if (!announce) {
       return { id: expectedSessionId, state: "ready", error: null };
     }
@@ -375,41 +523,70 @@ export class LiveReconciler {
   }
 
   async #materialize(id: string, _priority: MaterializationPriority): Promise<PreparationResult> {
-    const catalog = catalogSession(this.#database, id);
-    if (catalog === null || catalog.kind === "auxiliary") {
-      return { id, state: "failed", error: "Conversation not found." };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const catalog = catalogSession(this.#database, id);
+      if (catalog === null || catalog.kind === "auxiliary") {
+        return { id, state: "failed", error: "Conversation not found." };
+      }
+      if (catalog.materialization === "ready" && getCachedSession(this.#database, id) !== null) {
+        return { id, state: "ready", error: null };
+      }
+      setCatalogMaterialization(this.#database, id, "loading", null);
+      let result: PreparationResult;
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- The materialization retry is intentionally sequential and bounded to two attempts.
+        result = await this.#updateSource(
+          { path: catalog.summary.sourcePath, scope: catalog.summary.scope },
+          id,
+          catalog.sourceRevision,
+          false,
+          true,
+        );
+      } catch (error) {
+        result = {
+          id,
+          state: "failed",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      const latest = catalogSession(this.#database, id);
+      if (
+        result.state === "loading" ||
+        latest === null ||
+        latest.sourceRevision !== catalog.sourceRevision ||
+        latest.summary.sourcePath !== catalog.summary.sourcePath
+      ) {
+        continue;
+      }
+      if (latest.materialization !== result.state) {
+        setCatalogMaterialization(
+          this.#database,
+          id,
+          result.state === "ready" ? "ready" : "failed",
+          result.error,
+        );
+      }
+      this.#publish({
+        type: "library.updated",
+        ids: [id],
+        revision: this.#nextRevision(),
+      });
+      return result;
     }
-    if (catalog.materialization === "ready" && getCachedSession(this.#database, id) !== null) {
-      return { id, state: "ready", error: null };
+    const latest = catalogSession(this.#database, id);
+    if (latest !== null && latest.kind !== "auxiliary" && latest.materialization === "loading") {
+      setCatalogMaterialization(this.#database, id, "cold", null);
     }
-    setCatalogMaterialization(this.#database, id, "loading", null);
-    let result: PreparationResult;
-    try {
-      result = await this.#updateSource(
-        { path: catalog.summary.sourcePath, scope: catalog.summary.scope },
-        id,
-        false,
-        true,
-      );
-    } catch (error) {
-      result = {
-        id,
-        state: "failed",
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-    setCatalogMaterialization(
-      this.#database,
-      id,
-      result.state === "ready" ? "ready" : "failed",
-      result.error,
-    );
     this.#publish({
       type: "library.updated",
       ids: [id],
       revision: this.#nextRevision(),
     });
-    return result;
+    return {
+      id,
+      state: "cold",
+      error: "The conversation changed again during materialization; retry is required.",
+    };
   }
 
   async prepareSessions(
@@ -474,23 +651,29 @@ export class LiveReconciler {
       )
       .all(...values)
       .flatMap((row) => (typeof row["id"] === "string" ? [row["id"]] : []));
+    let resultCount = 0;
+    let countError: string | null = null;
+    try {
+      resultCount = this.#countSearchResults(this.#database, query);
+    } catch (error) {
+      countError = error instanceof Error ? error.message : String(error);
+    }
     const job: DeepSearchJob = {
       id,
       scope: query.scope,
       query: query.query,
-      state: sessionIds.length === 0 ? "completed" : "queued",
+      state: countError === null ? (sessionIds.length === 0 ? "completed" : "queued") : "failed",
       total: sessionIds.length,
       completed: 0,
       failed: 0,
-      resultCount: searchCachedSessions(this.#database, { ...query, cursor: undefined, limit: 1 })
-        .total,
-      error: null,
+      resultCount,
+      error: countError,
       createdAt: now,
       updatedAt: now,
     };
     this.#deepSearchJobs.set(id, job);
     this.#publish({ type: "search.updated", ids: [id], revision: this.#nextRevision() });
-    if (sessionIds.length > 0) {
+    if (sessionIds.length > 0 && countError === null) {
       void this.#runDeepSearch(id, query, sessionIds).catch((error: unknown) => {
         const current = this.#deepSearchJobs.get(id);
         if (current !== undefined && current.state !== "cancelled") {
@@ -541,11 +724,6 @@ export class LiveReconciler {
         ...current,
         completed,
         failed,
-        resultCount: searchCachedSessions(this.#database, {
-          ...query,
-          cursor: undefined,
-          limit: 1,
-        }).total,
         updatedAt: new Date().toISOString(),
       };
       this.#deepSearchJobs.set(id, updated);
@@ -553,11 +731,23 @@ export class LiveReconciler {
     }
     const current = this.#deepSearchJobs.get(id);
     if (current !== undefined && current.state !== "cancelled") {
-      this.#deepSearchJobs.set(id, {
-        ...current,
-        state: "completed",
-        updatedAt: new Date().toISOString(),
-      });
+      let terminal: DeepSearchJob;
+      try {
+        terminal = {
+          ...current,
+          state: "completed",
+          resultCount: this.#countSearchResults(this.#database, query),
+          updatedAt: new Date().toISOString(),
+        };
+      } catch (error) {
+        terminal = {
+          ...current,
+          state: "failed",
+          error: error instanceof Error ? error.message : String(error),
+          updatedAt: new Date().toISOString(),
+        };
+      }
+      this.#deepSearchJobs.set(id, terminal);
       this.#publish({ type: "search.updated", ids: [id], revision: this.#nextRevision() });
     }
   }
@@ -582,7 +772,11 @@ export class LiveReconciler {
     return true;
   }
 
-  async #reconcileAll(announce: boolean, freshStateSnapshot = true): Promise<void> {
+  async #refreshCatalog(
+    discovery: SourceDiscoveryResult,
+    metadata: LiveMetadata,
+    announce: boolean,
+  ): Promise<void> {
     const readyBefore = new Map(
       this.#database
         .prepare(
@@ -595,8 +789,7 @@ export class LiveReconciler {
             : [],
         ),
     );
-    const discovery = await discoverSources(this.#codexHome);
-    const metadata = await loadMetadata(discovery, this.#cacheDir, freshStateSnapshot);
+    this.#discovery = discovery;
     this.#metadata = metadata;
     const refreshed = await refreshLiveCatalog({
       database: this.#database,
@@ -604,19 +797,24 @@ export class LiveReconciler {
       sessionIndexEntries: metadata.sessionIndexEntries,
       globalState: metadata.globalState,
       stateSnapshot: metadata.stateSnapshot,
+      readPrefix: this.#readPrefix,
+      readJsonl: this.#readJsonl,
+      observeSource: this.#observeSource,
     });
-    if (announce && (refreshed.rows.length > 0 || refreshed.removedIds.length > 0)) {
+    if (announce && (refreshed.changedIds.length > 0 || refreshed.removedIds.length > 0)) {
       this.#publish({
         type: "library.updated",
-        ids: [...refreshed.rows.map(({ summary }) => summary.id), ...refreshed.removedIds],
+        ids: [...new Set([...refreshed.changedIds, ...refreshed.removedIds])].toSorted(),
         revision: this.#nextRevision(),
       });
     }
+    const changedIds = new Set(refreshed.changedIds);
     const hotIds = announce
       ? refreshed.rows
           .filter(
             (row) =>
               row.kind !== "auxiliary" &&
+              changedIds.has(row.summary.id) &&
               readyBefore.has(row.summary.id) &&
               readyBefore.get(row.summary.id) !== row.sourceRevision,
           )
@@ -637,9 +835,32 @@ export class LiveReconciler {
     }
   }
 
+  async #reconcileAll(announce: boolean, freshStateSnapshot = true): Promise<void> {
+    const discovery = await this.#discover(this.#codexHome);
+    const metadata = await loadMetadata(
+      discovery,
+      this.#cacheDir,
+      freshStateSnapshot,
+      this.#metadataReaders,
+    );
+    await this.#refreshCatalog(discovery, metadata, announce);
+  }
+
   async #processBatch(batch: SourceWatchBatch): Promise<void> {
-    void batch;
-    await this.#reconcileAll(true);
+    if (this.#discovery === null) {
+      await this.#reconcileAll(true);
+      return;
+    }
+    const discovery = discoveryAfterBatch(this.#discovery, batch);
+    const changedSources = new Set(batch.changes.map(({ source }) => source));
+    const metadata = await loadChangedMetadata(
+      discovery,
+      this.#cacheDir,
+      this.#metadata,
+      changedSources,
+      this.#metadataReaders,
+    );
+    await this.#refreshCatalog(discovery, metadata, true);
   }
 
   #enqueue(operation: () => Promise<void>): Promise<void> {

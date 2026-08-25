@@ -79,7 +79,9 @@ const sessionMetaRecordSchema = z.object({
   }),
 });
 
-async function defaultObserveFile(path: string): Promise<SessionMetaPrefixObservation> {
+export async function observeSessionMetaSource(
+  path: string,
+): Promise<SessionMetaPrefixObservation> {
   const stats = await lstat(path, { bigint: true });
   return {
     device: stats.dev,
@@ -195,7 +197,7 @@ export async function readSessionMetaPrefix(
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1024 * 1024) {
     throw new RangeError("maxBytes must be a safe integer between 1 and 1048576");
   }
-  const observeFile = options.observeFile ?? defaultObserveFile;
+  const observeFile = options.observeFile ?? observeSessionMetaSource;
   const openFile = options.openFile ?? defaultOpenFile;
   const before = await observeFile(path);
   if (!before.regular || before.symbolicLink) {

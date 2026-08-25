@@ -4,6 +4,7 @@ export interface ExportArguments {
   offline: boolean;
   force: boolean;
   index: boolean;
+  trustedMediaRoots?: string[] | undefined;
 }
 
 export interface DoctorArguments {
@@ -28,10 +29,16 @@ export function parseExportArguments(args: readonly string[]): ExportArguments {
       parsed.force = true;
     } else if (argument === "--no-index") {
       parsed.index = false;
-    } else if (argument === "--codex-home" || argument === "--output") {
+    } else if (
+      argument === "--codex-home" ||
+      argument === "--output" ||
+      argument === "--media-root"
+    ) {
       const value = optionValue(args, index, argument);
       if (argument === "--codex-home") {
         parsed.codexHome = value;
+      } else if (argument === "--media-root") {
+        (parsed.trustedMediaRoots ??= []).push(value);
       } else {
         parsed.output = value;
       }
@@ -40,6 +47,8 @@ export function parseExportArguments(args: readonly string[]): ExportArguments {
       parsed.codexHome = argument.slice("--codex-home=".length);
     } else if (argument.startsWith("--output=")) {
       parsed.output = argument.slice("--output=".length);
+    } else if (argument.startsWith("--media-root=")) {
+      (parsed.trustedMediaRoots ??= []).push(argument.slice("--media-root=".length));
     } else {
       throw new Error(`Unknown option: ${argument}`);
     }
@@ -49,6 +58,9 @@ export function parseExportArguments(args: readonly string[]): ExportArguments {
   }
   if (parsed.output === "") {
     throw new Error("--output requires a value");
+  }
+  if (parsed.trustedMediaRoots?.some((path) => path === "")) {
+    throw new Error("--media-root requires a value");
   }
   return parsed;
 }

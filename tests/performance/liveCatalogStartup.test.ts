@@ -47,6 +47,12 @@ describe("live catalog startup scale", () => {
     }));
     let concurrentReads = 0;
     let maxConcurrentReads = 0;
+    const revisions = Array.from({ length: 500 }, (_, index) => BigInt(index));
+    const observedPrefix = (index: number) => {
+      const result = prefix(index, 0);
+      result.observation.mtimeNs += revisions[index] ?? 0n;
+      return result;
+    };
     const readPrefix = vi.fn<(path: string, maxBytes: number) => Promise<SessionMetaPrefixResult>>(
       async (path, maxBytes) => {
         concurrentReads += 1;
@@ -54,9 +60,15 @@ describe("live catalog startup scale", () => {
         await Promise.resolve();
         concurrentReads -= 1;
         const index = Number(path.match(/rollout-(\d+)\.jsonl$/u)?.[1]);
-        return prefix(index, maxBytes);
+        const result = observedPrefix(index);
+        result.bytesRead = maxBytes;
+        return result;
       },
     );
+    const observeSource = vi.fn(async (path: string) => {
+      const index = Number(path.match(/rollout-(\d+)\.jsonl$/u)?.[1]);
+      return observedPrefix(index).observation;
+    });
     const startedAt = performance.now();
 
     try {
@@ -76,6 +88,7 @@ describe("live catalog startup scale", () => {
         globalState: { projects: [], pinnedThreadIds: [] },
         stateSnapshot: null,
         readPrefix,
+        observeSource,
       });
 
       expect(result.rows).toHaveLength(500);
@@ -90,6 +103,62 @@ describe("live catalog startup scale", () => {
         count: 0,
       });
       expect(performance.now() - startedAt).toBeLessThan(5_000);
+
+      const changesBefore = database.prepare("SELECT total_changes() AS changes").get()?.[
+        "changes"
+      ];
+      readPrefix.mockClear();
+      observeSource.mockClear();
+      const unchanged = await refreshLiveCatalog({
+        database,
+        discovery: {
+          rollouts,
+          metadata: {
+            sessionIndex: null,
+            globalState: null,
+            stateDatabase: null,
+            stateWal: null,
+          },
+          diagnostics: [],
+        },
+        sessionIndexEntries: [],
+        globalState: { projects: [], pinnedThreadIds: [] },
+        stateSnapshot: null,
+        readPrefix,
+        observeSource,
+      });
+      expect(unchanged.changedIds).toEqual([]);
+      expect(unchanged.bytesRead).toBe(0);
+      expect(readPrefix).not.toHaveBeenCalled();
+      expect(observeSource).toHaveBeenCalledTimes(500);
+      expect(database.prepare("SELECT total_changes() AS changes").get()?.["changes"]).toBe(
+        changesBefore,
+      );
+
+      revisions[217] = 10_000n;
+      readPrefix.mockClear();
+      observeSource.mockClear();
+      const oneChanged = await refreshLiveCatalog({
+        database,
+        discovery: {
+          rollouts,
+          metadata: {
+            sessionIndex: null,
+            globalState: null,
+            stateDatabase: null,
+            stateWal: null,
+          },
+          diagnostics: [],
+        },
+        sessionIndexEntries: [],
+        globalState: { projects: [], pinnedThreadIds: [] },
+        stateSnapshot: null,
+        readPrefix,
+        observeSource,
+      });
+      expect(oneChanged.changedIds).toEqual([sessionId(217)]);
+      expect(readPrefix).toHaveBeenCalledOnce();
+      expect(oneChanged.bytesRead).toBe(4_096);
     } finally {
       database.close();
     }

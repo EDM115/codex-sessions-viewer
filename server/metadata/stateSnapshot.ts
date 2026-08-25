@@ -113,6 +113,8 @@ function isMissing(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
+async function observeRegularFile(path: string): Promise<ObservedFile>;
+async function observeRegularFile(path: string, optional: true): Promise<ObservedFile | null>;
 async function observeRegularFile(path: string, optional = false): Promise<ObservedFile | null> {
   try {
     const pathStats = await lstat(path, { bigint: true });
@@ -133,9 +135,6 @@ async function observeSources(options: StateSnapshotOptions): Promise<ObservedSt
     observeRegularFile(options.sourceDatabase),
     observeRegularFile(options.sourceWal, true),
   ]);
-  if (database === null) {
-    throw new Error("The source state database is unavailable");
-  }
   return { database, wal };
 }
 

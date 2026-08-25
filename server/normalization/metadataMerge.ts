@@ -127,7 +127,13 @@ export function selectPreferredSessionSource(
   const sessionId = candidates[0]!.sessionId;
   const eligible = candidates
     .filter(({ stable, complete }) => stable && complete)
-    .toSorted((left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path));
+    .toSorted(
+      (left, right) =>
+        right.mtimeMs - left.mtimeMs ||
+        normalize(left.path)
+          .toLocaleLowerCase()
+          .localeCompare(normalize(right.path).toLocaleLowerCase()),
+    );
   const selected = eligible[0] ?? null;
   if (candidates.length === 1) {
     return { selected, diagnostics: [] };
@@ -155,3 +161,4 @@ export function selectPreferredSessionSource(
     ],
   };
 }
+import { normalize } from "node:path";

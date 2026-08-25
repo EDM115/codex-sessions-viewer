@@ -2,6 +2,7 @@ import type {
   ConversationActivity,
   ConversationTurn,
   JsonValue,
+  MediaActivity,
 } from "#shared/types/conversation.ts";
 import type { PresentationSettings } from "#shared/types/settings.ts";
 
@@ -19,6 +20,26 @@ export function formatDuration(durationMs: number | null): string | null {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}m ${seconds}s`;
+}
+
+export function mediaReferenceText(activity: MediaActivity): string {
+  const { reference } = activity;
+  if (reference.kind === "local-file") {
+    return reference.path;
+  }
+  if (reference.kind === "remote") {
+    return reference.url;
+  }
+  if (reference.kind === "data") {
+    return `Embedded ${reference.mimeType}`;
+  }
+  if (reference.kind === "asset") {
+    return `${reference.mimeType} · ${reference.sha256.slice(0, 12)}`;
+  }
+  if (reference.reason === "missing") {
+    return activity.assetId;
+  }
+  return reference.preview || reference.reason;
 }
 
 export function formatTimestamp(
@@ -114,7 +135,7 @@ function activityText(activity: ConversationActivity): string | null {
       : `Conversation compacted\n${activity.summary}`;
   }
   if (activity.kind === "media") {
-    return `Media · ${activity.mediaType}\n${activity.sourcePath ?? activity.assetId}`;
+    return `Media · ${activity.mediaType}\n${mediaReferenceText(activity)}`;
   }
   return null;
 }

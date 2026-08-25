@@ -495,7 +495,9 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
   function start(): void {
     unsubscribe = repository.subscribe((event) => {
       if (event.type === "library.updated") {
-        scheduleRefresh();
+        if (event.ids.length > 0) {
+          scheduleRefresh();
+        }
       } else if (
         event.type === "search.updated" &&
         deepSearchJob.value !== null &&

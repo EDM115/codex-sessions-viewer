@@ -459,6 +459,77 @@ describe("conversation repository adapters", () => {
     expect(repository.subscribe(() => undefined)()).toBeUndefined();
   });
 
+  it("loads and indexes one static asset manifest for concurrent and sequential lookups", async () => {
+    const first: ResolvedAsset = {
+      id: "asset-1",
+      url: "/assets/asset-1.png",
+      mimeType: "image/png",
+      byteSize: 1,
+      sha256: "a".repeat(64),
+      width: 1,
+      height: 1,
+      status: "available",
+      originalPath: "first.png",
+    };
+    const second: ResolvedAsset = {
+      ...first,
+      id: "asset-2",
+      url: "/assets/asset-2.png",
+      sha256: "b".repeat(64),
+      originalPath: "second.png",
+    };
+    let resolveManifest!: (value: unknown) => void;
+    const request = vi.fn<RepositoryRequester>(
+      () =>
+        new Promise((resolve) => {
+          resolveManifest = resolve;
+        }),
+    );
+    const repository = new StaticConversationRepository(request);
+
+    const firstPending = repository.resolveAsset(first.id);
+    const secondPending = repository.resolveAsset(second.id);
+    expect(request).toHaveBeenCalledOnce();
+    expect(request).toHaveBeenCalledWith("/payloads/assets.json");
+    resolveManifest({ assets: [first, second] });
+    await expect(Promise.all([firstPending, secondPending])).resolves.toEqual([first, second]);
+    await expect(repository.resolveAsset(second.id)).resolves.toEqual(second);
+    await expect(repository.resolveAsset("missing")).rejects.toThrow("Asset not found");
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("retries a rejected static asset manifest and rejects duplicate IDs deterministically", async () => {
+    const asset: ResolvedAsset = {
+      id: "asset-1",
+      url: "/assets/asset-1.png",
+      mimeType: "image/png",
+      byteSize: 1,
+      sha256: "a".repeat(64),
+      width: 1,
+      height: 1,
+      status: "available",
+      originalPath: "asset.png",
+    };
+    const retryingRequest = vi
+      .fn<RepositoryRequester>()
+      .mockRejectedValueOnce(new Error("Transient manifest failure"))
+      .mockResolvedValueOnce({ assets: [asset] });
+    const retryingRepository = new StaticConversationRepository(retryingRequest);
+
+    await expect(retryingRepository.resolveAsset(asset.id)).rejects.toThrow(
+      "Transient manifest failure",
+    );
+    await expect(retryingRepository.resolveAsset(asset.id)).resolves.toEqual(asset);
+    expect(retryingRequest).toHaveBeenCalledTimes(2);
+
+    const duplicateRepository = new StaticConversationRepository(async () => ({
+      assets: [asset, { ...asset, url: "/assets/duplicate.png" }],
+    }));
+    await expect(duplicateRepository.resolveAsset(asset.id)).rejects.toThrow(
+      "duplicate static asset ID",
+    );
+  });
+
   it("rejects a superseded Pagefind result after the search completes", async () => {
     let resolveSearch!: (response: PagefindSearchResponse) => void;
     const search = vi.fn<PagefindBrowserApi["search"]>(

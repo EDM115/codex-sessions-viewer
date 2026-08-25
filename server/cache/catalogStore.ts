@@ -212,11 +212,11 @@ function writeCatalogSession(
 export function upsertCatalogSessions(
   database: DatabaseSync,
   inputs: readonly CatalogSessionInput[],
-): void {
-  withCacheTransaction(database, () => {
-    const materialized = new Map(
+): string[] {
+  return withCacheTransaction(database, () => {
+    const existingById = new Map(
       database
-        .prepare("SELECT * FROM session_catalog WHERE materialization_state = 'ready'")
+        .prepare("SELECT * FROM session_catalog")
         .all()
         .map((row) => {
           const record = catalogRecord(row);
@@ -224,14 +224,19 @@ export function upsertCatalogSessions(
         }),
     );
     const statement = database.prepare(UPSERT_CATALOG_SQL);
+    const changedIds: string[] = [];
     for (const input of inputs) {
-      const existing = materialized.get(input.summary.id);
+      const existing = existingById.get(input.summary.id);
       const effectiveInput =
-        input.materialization === "cold" && existing?.sourceRevision === input.sourceRevision
+        input.materialization === "cold" &&
+        existing?.sourceRevision === input.sourceRevision &&
+        (existing.materialization === "ready" || existing.materialization === "failed")
           ? {
               ...input,
+              materialization: existing.materialization,
+              error: existing.materialization === "failed" ? existing.error : input.error,
               summary: {
-                ...existing.summary,
+                ...(existing.materialization === "ready" ? existing.summary : input.summary),
                 title: input.summary.title,
                 scope: input.summary.scope,
                 sourcePath: input.summary.sourcePath,
@@ -243,9 +248,18 @@ export function upsertCatalogSessions(
               },
             }
           : input;
+      if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(effectiveInput)) {
+        continue;
+      }
       writeCatalogSession(statement, effectiveInput);
+      changedIds.push(input.summary.id);
     }
+    return changedIds.toSorted();
   });
+}
+
+export function listAllCatalogSessions(database: DatabaseSync): CatalogSessionRecord[] {
+  return database.prepare("SELECT * FROM session_catalog ORDER BY id").all().map(catalogRecord);
 }
 
 export function seedCatalogFromNormalizedSessions(database: DatabaseSync): void {
@@ -452,14 +466,20 @@ export function catalogMaterializedSessionIds(database: DatabaseSync): string[] 
     .map((row) => requiredText(row, "id"));
 }
 
+export interface CatalogReadyFence {
+  sourceRevision: string;
+  sourcePath: string;
+}
+
 export function markCatalogSessionReady(
   database: DatabaseSync,
   summaryInput: ConversationSummary,
-): void {
+  expected?: CatalogReadyFence,
+): boolean {
   let summary = conversationSummarySchema.parse(summaryInput);
   const existing = catalogSession(database, summary.id);
   if (existing?.kind === "auxiliary") {
-    return;
+    return false;
   }
   if (existing !== null) {
     summary = {
@@ -467,29 +487,45 @@ export function markCatalogSessionReady(
       parentThreadId: existing.parentThreadId,
       childThreadIds: existing.summary.childThreadIds,
     };
-    database
-      .prepare(`
-        UPDATE session_catalog
-        SET materialization_state = 'ready', error = NULL, title = ?, created_at = ?,
-          updated_at = ?, cwd = ?, git_origin_url = ?, parent_thread_id = ?,
-          child_count = ?, summary_json = ?
-        WHERE id = ?
-      `)
-      .run(
-        summary.title,
-        summary.createdAt,
-        summary.updatedAt,
-        summary.cwd,
-        summary.gitOriginUrl,
-        summary.parentThreadId,
-        summary.childThreadIds.length,
-        json(summary),
-        summary.id,
-      );
-    return;
+    const values = [
+      summary.title,
+      summary.createdAt,
+      summary.updatedAt,
+      summary.cwd,
+      summary.gitOriginUrl,
+      summary.parentThreadId,
+      summary.childThreadIds.length,
+      json(summary),
+      summary.id,
+    ];
+    const result =
+      expected === undefined
+        ? database
+            .prepare(`
+              UPDATE session_catalog
+              SET materialization_state = 'ready', error = NULL, title = ?, created_at = ?,
+                updated_at = ?, cwd = ?, git_origin_url = ?, parent_thread_id = ?,
+                child_count = ?, summary_json = ?
+              WHERE id = ?
+            `)
+            .run(...values)
+        : database
+            .prepare(`
+              UPDATE session_catalog
+              SET materialization_state = 'ready', error = NULL, title = ?, created_at = ?,
+                updated_at = ?, cwd = ?, git_origin_url = ?, parent_thread_id = ?,
+                child_count = ?, summary_json = ?
+              WHERE id = ? AND source_revision = ? AND source_path = ?
+                AND session_kind <> 'auxiliary'
+            `)
+            .run(...values, expected.sourceRevision, expected.sourcePath);
+    return result.changes === 1;
+  }
+  if (expected !== undefined) {
+    return false;
   }
   if (summary.models.length > 0 && summary.models.every((model) => model === "codex-auto-review")) {
-    return;
+    return false;
   }
   const parent =
     summary.parentThreadId === null ? null : catalogSession(database, summary.parentThreadId);
@@ -527,4 +563,5 @@ export function markCatalogSessionReady(
     sourceRevision: summary.revision,
     error: null,
   });
+  return true;
 }

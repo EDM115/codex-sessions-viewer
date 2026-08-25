@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { browserSecurityHeaders } from "./server/core/securityHeaders.ts";
+
 const viewerMode = process.env.CODEX_VIEWER_MODE === "static" ? "static" : "live";
 const configuredOutput = process.env.CODEX_VIEWER_OUTPUT?.trim();
 const configuredPublicInput = process.env.CODEX_VIEWER_PUBLIC_INPUT?.trim();
@@ -176,9 +178,7 @@ export default defineNuxtConfig({
   },
   routeRules: {
     "/**": {
-      headers: {
-        "X-Robots-Tag": "noindex, nofollow, noarchive",
-      },
+      headers: browserSecurityHeaders,
     },
   },
 });

@@ -9,9 +9,11 @@ import {
   parseVerifyOutputArguments,
   verifyGeneratedOutput,
 } from "../../../server/export/verifyOutput.ts";
-import { writeConversationExport } from "../../../server/export/writeConversationExport.ts";
-import { writeStaticPayloads } from "../../../server/export/writeStaticPayloads.ts";
-import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
+import {
+  driftOutputDiagnosticCount,
+  rewriteOutputJson,
+  writeValidOutputFixture,
+} from "../../fixtures/output.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -24,41 +26,14 @@ afterEach(async () => {
 async function validOutput(): Promise<{ root: string; sessionId: string }> {
   const root = await mkdtemp(join(tmpdir(), "codex-viewer-output-verification-"));
   temporaryDirectories.push(root);
-  const conversation = await normalizedRolloutFixture({
-    name: "modern.jsonl",
-    sourcePath: join(root, "modern.jsonl"),
-    scope: "active",
-    revision: "sha256:verified-output",
-  });
-  conversation.summary.parentThreadId = null;
-  conversation.summary.childThreadIds = [];
-  const sessionId = conversation.summary.id;
-  await writeStaticPayloads([conversation], { generatedRoot: root, chunkSize: 1 });
-  await writeConversationExport(conversation, { generatedRoot: root, publicRoot: root });
-  await Promise.all([
-    mkdir(join(root, "_nuxt"), { recursive: true }),
-    mkdir(join(root, "session", sessionId), { recursive: true }),
-  ]);
-  const html =
-    '<!doctype html><html><head><link rel="stylesheet" href="/_nuxt/app.css"></head><body></body></html>';
-  await Promise.all([
-    writeFile(join(root, "index.html"), html),
-    writeFile(join(root, "session", sessionId, "index.html"), html),
-    writeFile(join(root, "_nuxt", "app.css"), "body { overflow-x: clip; }"),
-    writeFile(join(root, "payloads", "export.json"), '{"version":1,"pagefind":false}\n'),
-    writeFile(join(root, "payloads", "assets.json"), '{"version":1,"assets":[]}\n'),
-    writeFile(join(root, "payloads", "favicons.json"), '{"version":1,"favicons":[]}\n'),
-  ]);
-  return { root, sessionId };
+  return writeValidOutputFixture(root);
 }
 
 async function rewriteJson(
   path: string,
   update: (value: Record<string, unknown>) => void,
 ): Promise<void> {
-  const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-  update(value);
-  await writeFile(path, `${JSON.stringify(value)}\n`);
+  await rewriteOutputJson(path, update);
 }
 
 describe("generated output verification", () => {
@@ -89,6 +64,15 @@ describe("generated output verification", () => {
       searchIndex: false,
       checkedFiles: expect.any(Number),
     });
+  });
+
+  it("rejects diagnostic-count drift in the shared structurally complete fixture", async () => {
+    const { root } = await validOutput();
+    await driftOutputDiagnosticCount(root);
+
+    await expect(verifyGeneratedOutput(root)).rejects.toThrow(
+      "Session diagnostics do not match the indexed diagnostic count",
+    );
   });
 
   it("rejects a turn chunk that no longer matches its navigator", async () => {
