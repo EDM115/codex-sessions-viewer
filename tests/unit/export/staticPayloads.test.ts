@@ -73,6 +73,70 @@ afterEach(async () => {
 });
 
 describe("conversation Markdown files", () => {
+  it("preserves child project and agent identity while tree counts belong only to roots", async () => {
+    const generatedRoot = await temporaryRoot();
+    const root = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: "C:/fixtures/root.jsonl",
+      scope: "active",
+      revision: "root-rev",
+    });
+    root.summary.parentThreadId = null;
+    const child = structuredClone(root);
+    child.summary = {
+      ...child.summary,
+      id: "cross-project-child",
+      parentThreadId: root.summary.id,
+      scope: "archived",
+      cwd: "D:/other-repository",
+      gitOriginUrl: null,
+      sourcePath: "D:/fixtures/child.jsonl",
+    };
+    child.turns = [];
+    child.rawEvents = [
+      {
+        id: "child-meta",
+        turnId: null,
+        type: "session_meta",
+        timestamp: null,
+        payload: {
+          id: child.summary.id,
+          parent_thread_id: root.summary.id,
+          source: {
+            subagent: {
+              thread_spawn: {
+                parent_thread_id: root.summary.id,
+                agent_path: "/root/child",
+                agent_nickname: "Child",
+              },
+            },
+          },
+        },
+      },
+    ];
+    await writeStaticPayloads([root, child], { generatedRoot, writeSessions: false });
+    const library = staticLibraryPayloadSchema.parse(
+      JSON.parse(await readFile(join(generatedRoot, "payloads", "projects.json"), "utf8")),
+    );
+    expect(library.entries[child.summary.id]).toMatchObject({
+      kind: "subagent",
+      parentThreadId: root.summary.id,
+      agentPath: "/root/child",
+      agentNickname: "Child",
+      agentDepth: 1,
+    });
+    expect(library.entries[child.summary.id]?.projectId).not.toBe(
+      library.entries[root.summary.id]?.projectId,
+    );
+    expect(library.entries[root.summary.id]?.childCount).toBe(1);
+    expect(
+      library.projects.reduce(
+        (sum, project) => sum + project.activeCount + project.archivedCount,
+        0,
+      ),
+    ).toBe(1);
+  });
+
   it("writes private and downloadable Markdown atomically and reuses unchanged bytes", async () => {
     const root = await temporaryRoot();
     const generatedRoot = join(root, ".generated");

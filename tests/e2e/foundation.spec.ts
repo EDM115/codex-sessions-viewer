@@ -21,6 +21,11 @@ test("serves rendered HTML", async ({ request }) => {
 
 test("hydrates and performs client-side navigation", async ({ page, goto }) => {
   await goto("/", { waitUntil: "hydration" });
+  const sentinel = await page.evaluate(() => {
+    const token = crypto.randomUUID();
+    Object.defineProperty(window, "navigationSentinel", { value: token });
+    return token;
+  });
   await page.getByRole("link", { name: "Open Settings" }).click();
 
   await expect(page).toHaveURL(/\/settings$/);
@@ -29,6 +34,7 @@ test("hydrates and performs client-side navigation", async ({ page, goto }) => {
   );
   await page.getByRole("link", { name: "Open session library" }).click();
   await expect(page).toHaveURL(/\/$/);
+  expect(await page.evaluate(() => Reflect.get(window, "navigationSentinel"))).toBe(sentinel);
 });
 
 test("keeps active and archived search scoped in the URL and opens exact turns", async ({
@@ -46,28 +52,41 @@ test("keeps active and archived search scoped in the URL and opens exact turns",
     .getByRole("link", { name: /Build the parser/u });
   await expect(activeResult).toHaveAttribute(
     "href",
-    "/session/11111111-1111-4111-8111-111111111111?turn=turn-2#turn-turn-2",
+    "/session/11111111-1111-4111-8111-111111111111?q=Handle+cancellation&turn=turn-2#turn-turn-2",
   );
+  const documents: string[] = [];
+  page.on("request", (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      documents.push(request.url());
+    }
+  });
   await activeResult.click();
-  await expect(page).toHaveURL(/\/session\/11111111-1111-4111-8111-111111111111\?turn=turn-2/u);
-  await expect(page.getByText("Handle cancellation", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(
+    /\/session\/11111111-1111-4111-8111-111111111111\?q=Handle\+cancellation&turn=turn-2/u,
+  );
+  await expect(
+    page.getByLabel("Conversation timeline").getByText("Handle cancellation", { exact: true }),
+  ).toBeVisible();
+  expect(documents).toEqual([]);
+  await expect(search).toHaveValue("Handle cancellation");
 
   await goto("/?scope=archived&q=Legacy+prompt", { waitUntil: "hydration" });
   await expect(page.getByRole("tab", { name: /Archived/u })).toHaveAttribute(
     "aria-selected",
     "true",
   );
+  await page.getByRole("button", { name: "Search unloaded conversations" }).click();
   await expect(page.getByText("1 result for “Legacy prompt”")).toBeAttached();
   const archivedResult = page
     .locator('[aria-label="Search results"]')
     .getByRole("link", { name: /Legacy prompt/u });
   await expect(archivedResult).toHaveAttribute(
     "href",
-    "/session/33333333-3333-4333-8333-333333333333?turn=legacy-turn#turn-legacy-turn",
+    "/session/33333333-3333-4333-8333-333333333333?scope=archived&q=Legacy+prompt&turn=legacy-turn#turn-legacy-turn",
   );
   await archivedResult.click();
   await expect(page).toHaveURL(
-    /\/session\/33333333-3333-4333-8333-333333333333\?turn=legacy-turn/u,
+    /\/session\/33333333-3333-4333-8333-333333333333\?scope=archived&q=Legacy\+prompt&turn=legacy-turn/u,
   );
   await expect(
     page.getByLabel("Conversation timeline").getByText("Legacy prompt", { exact: true }),
@@ -96,14 +115,27 @@ test("opens an exact turn with the virtualized timeline, minimap, and inspector"
     .getByText(/Worked for/)
     .first()
     .click();
-  await expect(page.getByText("filesystem/read_file")).toBeVisible();
+  const toolGroup = page.locator(".conversation-tool-group").first();
+  await expect(toolGroup).toBeVisible();
+  await expect(toolGroup.locator(".conversation-tool-row")).toHaveCount(0);
+  await toolGroup.locator(":scope > summary").click();
+  const toolRow = toolGroup.locator(".conversation-tool-row").first();
+  await expect(toolRow).toContainText("Read file");
+  await expect(toolRow.locator("pre")).toHaveCount(0);
+  await toolRow.locator(".conversation-tool-row__header").click();
+  await expect(toolRow.locator(".conversation-tool-row__output")).toContainText("ok");
+  await expect(toolRow.locator(".conversation-raw pre")).toHaveCount(0);
+  await toolRow.locator(".conversation-raw").first().locator("summary").click();
+  await expect(toolRow.locator(".conversation-raw pre").first()).toContainText("README.md");
+  await expect(toolRow).toContainText("filesystem/read_file");
   const infoButton = page.getByRole("button", { name: "Open message info" }).first();
   await infoButton.click();
   await expect(page.getByRole("dialog", { name: "Info" })).toContainText("gpt-exact-1");
   await expect(
     page.getByRole("dialog", { name: "Info" }).getByText("final", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("Preserved raw protocol records")).toBeVisible();
+  await expect(page.getByText(/Preserved raw protocol records/)).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Info" }).locator("pre")).toHaveCount(0);
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations).toEqual([]);
   await page.getByRole("dialog", { name: "Info" }).press("Escape");
@@ -244,9 +276,13 @@ test("coalesces bursty live invalidations without console errors", async ({ page
         listeners.set(type, [...(listeners.get(type) ?? []), listener]);
       }
 
-      close(): void {
-        listeners.clear();
+      removeEventListener(type: string, listener: EventListener): void {
+        listeners.set(
+          type,
+          (listeners.get(type) ?? []).filter((entry) => entry !== listener),
+        );
       }
+      close(): void {}
     }
     Object.defineProperty(window, "EventSource", { configurable: true, value: MockEventSource });
     Object.defineProperty(window, "viewerEventListenerCount", {

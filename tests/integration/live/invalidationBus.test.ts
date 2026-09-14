@@ -118,7 +118,15 @@ describe("live invalidation bus", () => {
 
       expect(response.status).toBe(200);
       expect(response.headers.get("content-type")).toContain("text/event-stream");
-      expect(new TextDecoder().decode(chunk?.value)).toContain("event: session.updated");
+      const frame = new TextDecoder().decode(chunk?.value);
+      expect(frame).toContain("event: session.updated");
+      expect(frame).toContain("id: sha256:transport");
+      const data = frame.split("\n").find((line) => line.startsWith("data: "));
+      expect(JSON.parse(data!.slice(6))).toEqual({
+        type: "session.updated",
+        ids: ["session-1", "turn-2"],
+        revision: "sha256:transport",
+      });
     } finally {
       abort.abort();
       server.closeAllConnections();

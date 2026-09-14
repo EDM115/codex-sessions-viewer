@@ -18,11 +18,13 @@ import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
 import {
   NORMALIZATION_PARSER_VERSION,
+  createSessionNormalizer,
   normalizeSession,
   type NormalizeSessionInput,
   type NormalizeSessionResult,
+  type NormalizedSession,
 } from "../normalization/normalizeSession.ts";
-import { replaceCachedSession } from "./conversationStore.ts";
+import { hasCachedSession, replaceCachedSession } from "./conversationStore.ts";
 
 export const CACHE_PARSER_VERSION = NORMALIZATION_PARSER_VERSION;
 const PREFIX_PROBE_BYTES = 64;
@@ -43,6 +45,8 @@ export type StableJsonlReader = (
 export interface SessionCacheUpdaterOptions {
   parserVersion?: number | undefined;
   retainLiveSources?: boolean | undefined;
+  maxRetainedSources?: number | undefined;
+  maxRetainedBytes?: number | undefined;
   normalize?: ((input: NormalizeSessionInput) => NormalizeSessionResult) | undefined;
   readJsonl?: StableJsonlReader | undefined;
   sessionIndexEntries?: SessionIndexEntry[] | undefined;
@@ -69,6 +73,7 @@ export type SessionCacheUpdateResult =
       sessionId: string;
       fingerprint: SourceFingerprint;
       diagnostics: ViewerDiagnostic[];
+      changedTurnIds: string[];
     }
   | {
       status: "failed";
@@ -97,6 +102,9 @@ interface LiveSourceState {
   records: JsonlRecord[];
   errors: JsonlParseError[];
   prefixProbe: Buffer;
+  normalize: (input: NormalizeSessionInput) => NormalizeSessionResult;
+  normalized?: NormalizedSession;
+  retainedBytes?: number;
 }
 
 interface ReadCandidate extends LiveSourceState {
@@ -360,9 +368,12 @@ export class SessionCacheUpdater {
   readonly #normalize: (input: NormalizeSessionInput) => NormalizeSessionResult;
   readonly #readJsonl: StableJsonlReader;
   readonly #retainLiveSources: boolean;
+  readonly #maxRetainedSources: number;
+  readonly #maxRetainedBytes: number;
   readonly #defaultSessionIndexEntries: SessionIndexEntry[];
   readonly #defaultStateSnapshot: StateMetadataSnapshot | null;
   readonly #liveSources = new Map<string, LiveSourceState>();
+  readonly #turnBytes = new WeakMap<NormalizedSession["turns"][number], number>();
 
   constructor(database: DatabaseSync, options: SessionCacheUpdaterOptions = {}) {
     this.#database = database;
@@ -370,6 +381,15 @@ export class SessionCacheUpdater {
     this.#normalize = options.normalize ?? normalizeSession;
     this.#readJsonl = options.readJsonl ?? readStableJsonl;
     this.#retainLiveSources = options.retainLiveSources ?? true;
+    this.#maxRetainedSources = options.maxRetainedSources ?? 4;
+    this.#maxRetainedBytes = options.maxRetainedBytes ?? 64 * 1024 * 1024;
+    if (
+      ![this.#maxRetainedSources, this.#maxRetainedBytes].every(
+        (value) => Number.isSafeInteger(value) && value >= 0,
+      )
+    ) {
+      throw new RangeError("Retained source limits must be non-negative safe integers.");
+    }
     this.#defaultSessionIndexEntries = options.sessionIndexEntries ?? [];
     this.#defaultStateSnapshot = options.stateSnapshot ?? null;
     if (!Number.isSafeInteger(this.#parserVersion) || this.#parserVersion <= 0) {
@@ -414,6 +434,7 @@ export class SessionCacheUpdater {
       records: result.records,
       errors: result.errors,
       prefixProbe,
+      normalize: this.#normalize === normalizeSession ? createSessionNormalizer() : this.#normalize,
     };
   }
 
@@ -465,6 +486,8 @@ export class SessionCacheUpdater {
       records: [...live.records, ...result.records],
       errors: [...live.errors, ...result.errors],
       prefixProbe,
+      normalize: live.normalize,
+      ...(live.normalized === undefined ? {} : { normalized: live.normalized }),
     };
   }
 
@@ -474,7 +497,7 @@ export class SessionCacheUpdater {
     mode: "full" | "append" | "memory",
     context: SessionCacheUpdateContext,
   ): SessionCacheUpdateResult {
-    const normalized = this.#normalize({
+    const normalized = candidate.normalize({
       records: candidate.records,
       sourcePath: source.path,
       scope: source.scope,
@@ -484,6 +507,7 @@ export class SessionCacheUpdater {
     });
     const diagnostics = [...normalized.diagnostics, ...parseErrors(source.path, candidate.errors)];
     if (normalized.session === null) {
+      this.#liveSources.delete(source.path);
       replaceSourceFailureDiagnostics(this.#database, source.path, diagnostics);
       return {
         status: "failed",
@@ -495,6 +519,7 @@ export class SessionCacheUpdater {
       context.expectedCatalogSessionId !== undefined &&
       normalized.session.summary.id !== context.expectedCatalogSessionId
     ) {
+      this.#liveSources.delete(source.path);
       const mismatchDiagnostics = [
         cacheFailure(
           source.path,
@@ -520,8 +545,13 @@ export class SessionCacheUpdater {
         identity: candidate.identity,
       },
       expectedCatalogSourceRevision: context.expectedCatalogSourceRevision,
+      ...(mode === "full" || candidate.normalized === undefined
+        ? {}
+        : { previousSession: candidate.normalized }),
     });
     if (replacement.status === "stale-catalog") {
+      // The source-owned memo has observed this candidate; discard it when its commit is rejected.
+      this.#liveSources.delete(source.path);
       return {
         status: "stale-catalog",
         sessionId: normalized.session.summary.id,
@@ -531,10 +561,33 @@ export class SessionCacheUpdater {
       };
     }
     clearSourceFailureDiagnostics(this.#database, source.path);
-    if (this.#retainLiveSources) {
+    candidate.normalized = normalized.session;
+    // Budget encoded input, normalized output and the parser/derivation copies conservatively.
+    candidate.retainedBytes =
+      candidate.fingerprint.size * 8 +
+      candidate.records.length * 256 +
+      normalized.session.turns.reduce((total, turn) => {
+        const bytes = this.#turnBytes.get(turn) ?? Buffer.byteLength(JSON.stringify(turn));
+        this.#turnBytes.set(turn, bytes);
+        return total + bytes * 4;
+      }, 0);
+    this.#liveSources.delete(source.path);
+    if (
+      this.#retainLiveSources &&
+      candidate.retainedBytes <= this.#maxRetainedBytes &&
+      this.#maxRetainedSources > 0
+    ) {
       this.#liveSources.set(source.path, candidate);
-    } else {
-      this.#liveSources.delete(source.path);
+      while (
+        this.#liveSources.size > this.#maxRetainedSources ||
+        this.retention.bytes > this.#maxRetainedBytes
+      ) {
+        const oldest = this.#liveSources.keys().next().value;
+        if (oldest === undefined) {
+          break;
+        }
+        this.#liveSources.delete(oldest);
+      }
     }
     return {
       status: "updated",
@@ -542,6 +595,7 @@ export class SessionCacheUpdater {
       sessionId: normalized.session.summary.id,
       fingerprint: candidate.fingerprint,
       diagnostics,
+      changedTurnIds: replacement.changedTurnIds,
     };
   }
 
@@ -553,9 +607,18 @@ export class SessionCacheUpdater {
     try {
       const observed = await observeSource(source.path);
       const live = this.#liveSources.get(source.path);
+      if (live !== undefined) {
+        this.#liveSources.delete(source.path);
+        this.#liveSources.set(source.path, live);
+      }
+      const normalizedExists =
+        persisted?.sessionId !== null &&
+        persisted?.sessionId !== undefined &&
+        hasCachedSession(this.#database, persisted.sessionId);
       if (
         !context.force &&
         persisted !== null &&
+        normalizedExists &&
         matchesFingerprint(persisted, observed, this.#parserVersion)
       ) {
         return {
@@ -564,7 +627,7 @@ export class SessionCacheUpdater {
           fingerprint: persisted.fingerprint,
         };
       }
-      if (!context.force && persisted !== null) {
+      if (!context.force && persisted !== null && normalizedExists) {
         const fingerprint = await verifyTouchedSource(persisted, observed, this.#parserVersion);
         if (fingerprint !== null) {
           storeTouchedSourceFingerprint(this.#database, persisted, fingerprint);
@@ -604,6 +667,7 @@ export class SessionCacheUpdater {
       }
       return this.#normalizeAndStore(source, candidate, candidate.mode, context);
     } catch (error) {
+      this.#liveSources.delete(source.path);
       const diagnostics = [cacheFailure(source.path, error)];
       replaceSourceFailureDiagnostics(this.#database, source.path, diagnostics);
       return {
@@ -612,5 +676,21 @@ export class SessionCacheUpdater {
         diagnostics,
       };
     }
+  }
+
+  get retention(): { sources: number; bytes: number; maxSources: number; maxBytes: number } {
+    return {
+      sources: this.#liveSources.size,
+      bytes: [...this.#liveSources.values()].reduce(
+        (total, source) => total + (source.retainedBytes ?? 0),
+        0,
+      ),
+      maxSources: this.#maxRetainedSources,
+      maxBytes: this.#maxRetainedBytes,
+    };
+  }
+
+  clear(): void {
+    this.#liveSources.clear();
   }
 }

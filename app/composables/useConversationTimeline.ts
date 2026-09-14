@@ -202,6 +202,16 @@ export function useConversationTimeline(options: ConversationTimelineOptions) {
     return request;
   }
 
+  function cancelTarget(): void {
+    if (targetRequest === null) {
+      return;
+    }
+    windowGeneration += 1;
+    targetRequest = null;
+    loadingTarget.value = false;
+    pendingTurnId.value = null;
+  }
+
   async function refresh(
     anchorTurnId = turns.value.at(-1)?.id,
     beforeApply?: () => void,
@@ -271,6 +281,7 @@ export function useConversationTimeline(options: ConversationTimelineOptions) {
     ) => loadDirection("before", beforeApply, afterApply),
     loadAfter: () => loadDirection("after"),
     loadTarget,
+    cancelTarget,
     refresh,
   } as const;
 }

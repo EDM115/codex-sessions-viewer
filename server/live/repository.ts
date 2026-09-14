@@ -8,6 +8,7 @@ import {
   type SearchQuery,
   type SessionListQuery,
   type TurnChunkQuery,
+  type TurnChunk,
 } from "../../shared/types/repository.ts";
 import { getCachedAsset } from "../cache/assetStore.ts";
 import { catalogSession, listCatalogProjects, listCatalogSessions } from "../cache/catalogStore.ts";
@@ -23,6 +24,7 @@ import { InvalidationBus } from "./invalidationBus.ts";
 export interface LiveRepositoryMaterializer {
   prepareSessions(ids: readonly string[]): ReturnType<ConversationRepository["prepareSessions"]>;
   ensureMaterialized(id: string): Promise<void>;
+  prepareTurnChunk?(chunk: TurnChunk): Promise<TurnChunk>;
   cancelOwner(owner: string): void;
   startDeepSearch(query: SearchQuery): DeepSearchJob;
   getDeepSearch(id: string): DeepSearchJob | null;
@@ -127,16 +129,46 @@ export class LiveConversationRepository implements ConversationRepository {
   }
 
   async getTurns(id: string, query: TurnChunkQuery) {
-    await this.#materializer.ensureMaterialized(id);
-    const chunk = getCachedTurnChunk(this.#database, id, query);
-    if (chunk === null) {
-      throw new Error("Session or turn chunk not found");
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- A source revision race gets one bounded retry.
+      await this.#materializer.ensureMaterialized(id);
+      const chunk = getCachedTurnChunk(this.#database, id, query);
+      if (chunk === null) {
+        throw new Error("Session or turn chunk not found");
+      }
+      try {
+        if (this.#materializer.prepareTurnChunk === undefined) {
+          return chunk;
+        }
+        // oxlint-disable-next-line no-await-in-loop -- Rich preparation is revision-fenced and retries only after a concurrent change.
+        return await this.#materializer.prepareTurnChunk(chunk);
+      } catch (error) {
+        if (
+          attempt > 0 ||
+          getCachedSessionSummary(this.#database, id)?.revision === chunk.revision
+        ) {
+          throw error;
+        }
+      }
     }
-    return chunk;
+    throw new Error("The conversation changed repeatedly while its page was prepared.");
   }
 
   async getInspector(id: string, target: InspectorTarget) {
     await this.#materializer.ensureMaterialized(id);
+    if (this.#materializer.prepareTurnChunk !== undefined) {
+      const turnId =
+        target.type === "turn"
+          ? target.id
+          : this.#database
+              .prepare(
+                `SELECT turn_id FROM ${target.type === "message" ? "messages" : "activities"} WHERE session_id = ? AND id = ?`,
+              )
+              .get(id, target.id)?.["turn_id"];
+      if (typeof turnId === "string") {
+        await this.getTurns(id, { targetTurnId: turnId, limit: 1 });
+      }
+    }
     const record = getCachedInspector(this.#database, id, target);
     if (record === null) {
       throw new Error("Inspector target not found");

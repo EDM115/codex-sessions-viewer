@@ -4,18 +4,18 @@ import type { DatabaseSync } from "node:sqlite";
 
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { DeepSearchJob, PreparationResult } from "../../shared/types/library.ts";
-import type { SearchQuery, ViewerInvalidation } from "../../shared/types/repository.ts";
+import type { SearchQuery, ViewerInvalidation, TurnChunk } from "../../shared/types/repository.ts";
 import {
   catalogSession,
   listCatalogAuxiliaryChildren,
   listCatalogChildren,
   setCatalogMaterialization,
 } from "../cache/catalogStore.ts";
-import { getCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
+import { hasCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
+import { getCachedSessionSummary, getCachedTurnsInRange } from "../cache/repositoryStore.ts";
 import { countCachedSearchResults } from "../cache/searchStore.ts";
 import {
   CACHE_PARSER_VERSION,
-  getSourceManifestEntry,
   SessionCacheUpdater,
   type StableJsonlReader,
 } from "../cache/sourceManifest.ts";
@@ -47,6 +47,7 @@ import {
 } from "../metadata/stateSnapshot.ts";
 import {
   attachGuardianEvidence,
+  guardianActionHash,
   parseGuardianTurn,
   type GuardianReview,
 } from "../normalization/guardianEvidence.ts";
@@ -110,20 +111,6 @@ interface LiveMetadataReaders {
   readGlobalState: typeof readGlobalState;
   snapshotStateDatabase: typeof snapshotStateDatabase;
   readRetainedStateSnapshot: typeof readRetainedStateSnapshot;
-}
-
-function changedTurnIds(before: NormalizedSession | null, after: NormalizedSession): string[] {
-  if (before === null) {
-    return after.turns.map(({ id }) => id);
-  }
-  const previous = new Map(before.turns.map((turn) => [turn.id, JSON.stringify(turn)]));
-  const currentIds = new Set(after.turns.map(({ id }) => id));
-  return [
-    ...after.turns
-      .filter((turn) => previous.get(turn.id) !== JSON.stringify(turn))
-      .map(({ id }) => id),
-    ...before.turns.filter(({ id }) => !currentIds.has(id)).map(({ id }) => id),
-  ];
 }
 
 async function loadMetadata(
@@ -262,6 +249,7 @@ export class LiveReconciler {
   readonly #countSearchResults: typeof countCachedSearchResults;
   readonly #materializationQueue: MaterializationQueue;
   readonly #knownFaviconOrigins = new Map<string, string>();
+  readonly #richPreparations = new Map<string, Promise<void>>();
   readonly #deepSearchJobs = new Map<string, DeepSearchJob>();
   #metadata: LiveMetadata = {
     sessionIndexEntries: [],
@@ -306,7 +294,8 @@ export class LiveReconciler {
     };
     this.#countSearchResults = options.countSearchResults ?? countCachedSearchResults;
     this.#updater = new SessionCacheUpdater(this.#database, {
-      retainLiveSources: false,
+      maxRetainedSources: 4,
+      maxRetainedBytes: 64 * 1024 * 1024,
       readJsonl: options.readJsonl,
     });
     this.#materializationQueue = new MaterializationQueue((id, priority) =>
@@ -340,7 +329,20 @@ export class LiveReconciler {
     this.#bus.publish(event);
   }
 
-  async #prepareRichContent(session: NormalizedSession): Promise<NormalizedSession> {
+  #richEvidenceRevision(sessionId: string): string {
+    return JSON.stringify(
+      this.#database
+        .prepare(
+          "SELECT id, source_revision, source_path, parent_thread_id, agent_path, agent_nickname FROM session_catalog WHERE id = ? OR parent_thread_id = ? ORDER BY id",
+        )
+        .all(sessionId, sessionId),
+    );
+  }
+
+  async #prepareRichContent(
+    session: NormalizedSession,
+    evidenceRevision: string,
+  ): Promise<NormalizedSession> {
     const prepared = await prepareConversationForExport(this.#database, session, {
       mediaRoot: join(this.#cacheDir, "assets"),
       faviconRoot: join(this.#cacheDir, "favicons"),
@@ -348,6 +350,9 @@ export class LiveReconciler {
       mode: "live",
       trustedMediaRoots: this.#trustedMediaRoots,
     });
+    if (evidenceRevision !== this.#richEvidenceRevision(session.summary.id)) {
+      throw new Error("The conversation evidence changed during rich preparation.");
+    }
     updateCachedSessionRichContent(this.#database, prepared.conversation);
     for (const origin of prepared.faviconOrigins) {
       this.#knownFaviconOrigins.set(this.#faviconKey(origin), origin);
@@ -357,11 +362,11 @@ export class LiveReconciler {
         continue;
       }
       void favicon.backgroundRefresh
-        .then(() => {
-          if (!this.#closed) {
+        .then((resolution) => {
+          if (!this.#closed && resolution.status === "available") {
             this.#publish({
-              type: "session.updated",
-              ids: [session.summary.id],
+              type: "favicon.updated",
+              ids: [favicon.origin],
               revision: this.#nextRevision(),
             });
           }
@@ -390,14 +395,18 @@ export class LiveReconciler {
 
   async #attachGuardianReviews(session: NormalizedSession): Promise<void> {
     const reviews = await this.#guardianReviews(session.summary.id);
-    if (reviews.length === 0) {
-      return;
-    }
+    const count = this.#database.prepare(
+      "SELECT count(*) AS count FROM activities WHERE session_id = ? AND guardian_input_hash = ?",
+    );
+    const uniqueReviews = reviews.filter(
+      (review) =>
+        count.get(session.summary.id, guardianActionHash(review.reviewedAction))?.["count"] === 1,
+    );
     attachGuardianEvidence(
       session.turns.flatMap(({ activities }) =>
         activities.filter((activity) => activity.kind === "tool"),
       ),
-      reviews,
+      uniqueReviews,
     );
   }
 
@@ -423,14 +432,6 @@ export class LiveReconciler {
     force: boolean,
     announce: boolean,
   ): Promise<PreparationResult> {
-    const manifest = getSourceManifestEntry(this.#database, source.path);
-    const before =
-      announce &&
-      manifest?.sessionId !== null &&
-      manifest?.sessionId !== undefined &&
-      manifest.fingerprint.parserVersion === CACHE_PARSER_VERSION
-        ? getCachedSession(this.#database, manifest.sessionId, { includeRawEvents: false })
-        : null;
     const result = await this.#updater.update(source, {
       force,
       expectedCatalogSessionId: expectedSessionId,
@@ -467,7 +468,7 @@ export class LiveReconciler {
     }
     if (result.status === "unchanged") {
       return result.sessionId !== null &&
-        getCachedSession(this.#database, result.sessionId) !== null
+        hasCachedSession(this.#database, result.sessionId, CACHE_PARSER_VERSION)
         ? { id: expectedSessionId, state: "ready", error: null }
         : {
             id: expectedSessionId,
@@ -482,20 +483,13 @@ export class LiveReconciler {
         error: `The rollout materialized as unexpected session ${result.sessionId}.`,
       };
     }
-    let after = getCachedSession(this.#database, result.sessionId, { includeRawEvents: false });
+    const after = getCachedSessionSummary(this.#database, result.sessionId);
     if (after === null) {
       return {
         id: expectedSessionId,
         state: "failed",
         error: "The normalized conversation was not committed to the viewer cache.",
       };
-    }
-    try {
-      await this.#attachGuardianReviews(after);
-      this.#enrichSubagents(after);
-      after = await this.#prepareRichContent(after);
-    } catch (error) {
-      this.#onError?.(error);
     }
     const catalogAfterPreparation = catalogSession(this.#database, expectedSessionId);
     if (
@@ -508,16 +502,10 @@ export class LiveReconciler {
     if (!announce) {
       return { id: expectedSessionId, state: "ready", error: null };
     }
-    const turnIds = changedTurnIds(before, after);
-    this.#publish({
-      type: "library.updated",
-      ids: [result.sessionId],
-      revision: after.summary.revision,
-    });
     this.#publish({
       type: "session.updated",
-      ids: [result.sessionId, ...turnIds],
-      revision: after.summary.revision,
+      ids: [result.sessionId, ...result.changedTurnIds],
+      revision: after.revision,
     });
     return { id: expectedSessionId, state: "ready", error: null };
   }
@@ -528,7 +516,10 @@ export class LiveReconciler {
       if (catalog === null || catalog.kind === "auxiliary") {
         return { id, state: "failed", error: "Conversation not found." };
       }
-      if (catalog.materialization === "ready" && getCachedSession(this.#database, id) !== null) {
+      if (
+        catalog.materialization === "ready" &&
+        hasCachedSession(this.#database, id, CACHE_PARSER_VERSION)
+      ) {
         return { id, state: "ready", error: null };
       }
       setCatalogMaterialization(this.#database, id, "loading", null);
@@ -602,7 +593,7 @@ export class LiveReconciler {
         immediate.set(id, { id, state: "failed", error: "Conversation not found." });
       } else if (
         catalog.materialization === "ready" &&
-        getCachedSession(this.#database, id) !== null
+        hasCachedSession(this.#database, id, CACHE_PARSER_VERSION)
       ) {
         immediate.set(id, { id, state: "ready", error: null });
       } else {
@@ -632,6 +623,94 @@ export class LiveReconciler {
     }
   }
 
+  /** Normalization is ready independently of rich rendering; only the requested page enters this path. */
+  async prepareTurnChunk(chunk: TurnChunk): Promise<TurnChunk> {
+    if (chunk.turns.length === 0) {
+      return chunk;
+    }
+    const ready = new Set(
+      this.#database
+        .prepare(
+          `SELECT id FROM turns WHERE session_id = ? AND rich_revision IS NOT NULL AND id IN (${chunk.turns.map(() => "?").join(",")})`,
+        )
+        .all(chunk.sessionId, ...chunk.turns.map(({ id }) => id))
+        .map((row) => String(row["id"])),
+    );
+    if (ready.size === chunk.turns.length) {
+      return chunk;
+    }
+    const keys = chunk.turns.map(({ id }) => JSON.stringify([chunk.sessionId, chunk.revision, id]));
+    const pending = new Set<Promise<void>>();
+    const missing = chunk.turns.filter((turn, index) => {
+      if (ready.has(turn.id)) {
+        return false;
+      }
+      const existing = this.#richPreparations.get(keys[index]!);
+      if (existing === undefined) {
+        return true;
+      }
+      pending.add(existing);
+      return false;
+    });
+    if (missing.length > 0) {
+      const missingKeys = missing.map(({ id }) =>
+        JSON.stringify([chunk.sessionId, chunk.revision, id]),
+      );
+      const preparation = this.#prepareTurnChunk({ ...chunk, turns: missing }).finally(() => {
+        for (const key of missingKeys) {
+          this.#richPreparations.delete(key);
+        }
+      });
+      for (const key of missingKeys) {
+        this.#richPreparations.set(key, preparation);
+      }
+      pending.add(preparation);
+    }
+    await Promise.all(pending);
+    const revision = this.#database
+      .prepare("SELECT revision FROM sessions WHERE id = ?")
+      .get(chunk.sessionId)?.["revision"];
+    if (revision !== chunk.revision) {
+      throw new Error("The conversation changed during rich preparation; retry the page.");
+    }
+    return {
+      ...chunk,
+      turns: getCachedTurnsInRange(
+        this.#database,
+        chunk.sessionId,
+        chunk.turns[0]!.index,
+        chunk.turns.length,
+      ),
+    };
+  }
+
+  async #prepareTurnChunk(chunk: TurnChunk): Promise<void> {
+    const summary = getCachedSessionSummary(this.#database, chunk.sessionId);
+    if (summary === null || summary.revision !== chunk.revision) {
+      throw new Error("The conversation changed before rich preparation.");
+    }
+    const check = this.#database.prepare(
+      "SELECT rich_revision FROM turns WHERE session_id = ? AND id = ?",
+    );
+    const turns = chunk.turns.filter(
+      ({ id }) => check.get(chunk.sessionId, id)?.["rich_revision"] == null,
+    );
+    if (turns.length === 0) {
+      return;
+    }
+    const session: NormalizedSession = { summary, turns, rawEvents: [] };
+    const evidenceRevision = this.#richEvidenceRevision(chunk.sessionId);
+    if (turns.some(({ activities }) => activities.some(({ kind }) => kind === "tool"))) {
+      await this.#attachGuardianReviews(session);
+    }
+    this.#enrichSubagents(session);
+    await this.#prepareRichContent(session, evidenceRevision);
+  }
+
+  get retainedSourceState(): SessionCacheUpdater["retention"] {
+    return this.#updater.retention;
+  }
+
   cancelOwner(owner: string): void {
     this.#materializationQueue.cancelOwner(owner);
   }
@@ -640,7 +719,11 @@ export class LiveReconciler {
     const id = randomUUID();
     const now = new Date().toISOString();
     const values: string[] = [query.scope];
-    const filters = ["scope = ?", "session_kind = 'root'", "materialization_state <> 'ready'"];
+    const filters = [
+      "scope = ?",
+      "session_kind <> 'auxiliary'",
+      "materialization_state <> 'ready'",
+    ];
     if (query.projectId !== undefined) {
       filters.push("project_id = ?");
       values.push(query.projectId);
@@ -776,6 +859,7 @@ export class LiveReconciler {
     discovery: SourceDiscoveryResult,
     metadata: LiveMetadata,
     announce: boolean,
+    changedSourcePaths?: readonly string[],
   ): Promise<void> {
     const readyBefore = new Map(
       this.#database
@@ -789,6 +873,14 @@ export class LiveReconciler {
             : [],
         ),
     );
+    const previousParents = new Map(
+      this.#database
+        .prepare(
+          "SELECT id, parent_thread_id FROM session_catalog WHERE parent_thread_id IS NOT NULL",
+        )
+        .all()
+        .map((row) => [String(row["id"]), String(row["parent_thread_id"])]),
+    );
     this.#discovery = discovery;
     this.#metadata = metadata;
     const refreshed = await refreshLiveCatalog({
@@ -800,6 +892,7 @@ export class LiveReconciler {
       readPrefix: this.#readPrefix,
       readJsonl: this.#readJsonl,
       observeSource: this.#observeSource,
+      changedSourcePaths,
     });
     if (announce && (refreshed.changedIds.length > 0 || refreshed.removedIds.length > 0)) {
       this.#publish({
@@ -809,6 +902,26 @@ export class LiveReconciler {
       });
     }
     const changedIds = new Set(refreshed.changedIds);
+    const evidenceParents = new Set<string>();
+    for (const id of [...refreshed.changedIds, ...refreshed.removedIds]) {
+      const previousParent = previousParents.get(id);
+      if (previousParent !== undefined) {
+        evidenceParents.add(previousParent);
+      }
+    }
+    for (const row of refreshed.rows) {
+      if (changedIds.has(row.summary.id) && row.parentThreadId !== null) {
+        evidenceParents.add(row.parentThreadId);
+      }
+    }
+    for (const parentId of evidenceParents) {
+      this.#database
+        .prepare("UPDATE turns SET rich_revision = NULL WHERE session_id = ?")
+        .run(parentId);
+      if (announce && readyBefore.has(parentId)) {
+        this.#publish({ type: "session.updated", ids: [parentId], revision: this.#nextRevision() });
+      }
+    }
     const hotIds = announce
       ? refreshed.rows
           .filter(
@@ -860,7 +973,12 @@ export class LiveReconciler {
       changedSources,
       this.#metadataReaders,
     );
-    await this.#refreshCatalog(discovery, metadata, true);
+    await this.#refreshCatalog(
+      discovery,
+      metadata,
+      true,
+      batch.changes.filter(({ source }) => source === "rollout").map(({ path }) => path),
+    );
   }
 
   #enqueue(operation: () => Promise<void>): Promise<void> {
@@ -937,11 +1055,10 @@ export class LiveReconciler {
     this.#started = true;
     this.#scheduleBatchDrain();
     void watcherReady
-      .then(() => this.reconcileNow("watcher-ready"))
+      .then(() =>
+        this.#closed ? undefined : this.reconcileNow("watcher-ready-and-fresh-state-snapshot"),
+      )
       .catch((error: unknown) => this.#onError?.(error));
-    void this.reconcileNow("fresh-state-snapshot").catch((error: unknown) => {
-      this.#onError?.(error);
-    });
     this.#interval = setInterval(() => {
       void this.reconcileNow("periodic").catch((error: unknown) => {
         this.#onError?.(error);
@@ -963,6 +1080,8 @@ export class LiveReconciler {
     await this.#watcher?.close();
     await this.#queue;
     await materializationClosing;
+    await Promise.allSettled(this.#richPreparations.values());
+    this.#updater.clear();
     this.#watcher = null;
   }
 }

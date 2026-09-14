@@ -1,4 +1,13 @@
-export const CACHE_SCHEMA_VERSION = 2;
+export const CACHE_SCHEMA_VERSION = 3;
+
+export const STRUCTURAL_EVIDENCE_SCHEMA_SQL = `
+  ALTER TABLE session_catalog ADD COLUMN structural_evidence_json TEXT;
+  ALTER TABLE turns ADD COLUMN rich_revision TEXT;
+  ALTER TABLE turns ADD COLUMN final_assistant_message_id TEXT;
+  ALTER TABLE activities ADD COLUMN guardian_input_hash TEXT;
+  CREATE INDEX activities_guardian_input_idx ON activities(session_id, guardian_input_hash);
+  UPDATE turns SET final_assistant_message_id = CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.finalAssistantMessageId') ELSE NULL END;
+`;
 
 export const INITIAL_CACHE_SCHEMA_SQL = `
   CREATE TABLE source_files (

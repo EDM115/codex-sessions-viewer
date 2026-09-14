@@ -42,14 +42,15 @@ import {
   type TurnScopedEvent,
 } from "./eventSchema.ts";
 import { mergeSessionMetadata } from "./metadataMerge.ts";
-import { pairToolCalls } from "./toolPairing.ts";
+import { classifySessionStructure } from "./subagentTopology.ts";
+import { pairToolCalls, type ToolPairingMemo } from "./toolPairing.ts";
 import { assembleTurnEvents, type AssembledTurnEvents } from "./turnAssembler.ts";
 import { createUnknownActivity, sanitizeUnknownPayload } from "./unknownEvents.ts";
 
 const filenameUuidPattern =
   /([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?=\.jsonl$)/i;
 const epochTimestamp = "1970-01-01T00:00:00.000Z";
-export const NORMALIZATION_PARSER_VERSION = 4;
+export const NORMALIZATION_PARSER_VERSION = 5;
 
 export interface NormalizeSessionInput {
   records: readonly JsonlRecord[];
@@ -220,9 +221,10 @@ function sessionMeta(events: readonly CodexEvent[]): SessionMetaEvidence {
     evidence.timestamp ??= payload.timestamp ?? event.timestamp;
     evidence.cwd = nonEmpty(payload.cwd) ?? evidence.cwd;
     evidence.parentThreadId =
-      nonEmpty(payload.parent_thread_id) ??
-      nonEmpty(payload.forked_from_id) ??
-      evidence.parentThreadId;
+      classifySessionStructure({
+        source: payloadObject(event)?.["source"] ?? null,
+        parentThreadId: nonEmpty(payload.parent_thread_id),
+      }).parentThreadId ?? evidence.parentThreadId;
     evidence.gitBranch = nonEmpty(payload.git?.branch) ?? evidence.gitBranch;
     evidence.gitSha = nonEmpty(payload.git?.commit_hash) ?? evidence.gitSha;
     evidence.gitOriginUrl = nonEmpty(payload.git?.repository_url) ?? evidence.gitOriginUrl;
@@ -1180,11 +1182,48 @@ function sessionTimestamps(
   };
 }
 
-export function normalizeSession(input: NormalizeSessionInput): NormalizeSessionResult {
+interface NormalizationMemo {
+  records: WeakMap<JsonlRecord, ReturnType<typeof parseCodexEvent>>;
+  raw: WeakMap<CodexEvent, JsonValue>;
+  turns: Map<
+    string,
+    {
+      key: string;
+      messages: ReturnType<typeof normalizeMessages>;
+      activities: ConversationActivity[];
+    }
+  >;
+  validated: Map<string, { key: string; turn: ConversationTurn }>;
+  identities: WeakMap<CodexEvent, number>;
+  sequence: number;
+  tools: ToolPairingMemo;
+}
+
+/** A source-owned memo: the updater's count and byte LRU bounds its lifetime. */
+export function createSessionNormalizer(): (
+  input: NormalizeSessionInput,
+) => NormalizeSessionResult {
+  const memo: NormalizationMemo = {
+    records: new WeakMap(),
+    raw: new WeakMap(),
+    turns: new Map(),
+    validated: new Map(),
+    identities: new WeakMap(),
+    sequence: 0,
+    tools: { decoded: new WeakMap(), pairs: new Map() },
+  };
+  return (input) => normalizeSession(input, memo);
+}
+
+export function normalizeSession(
+  input: NormalizeSessionInput,
+  memo?: NormalizationMemo,
+): NormalizeSessionResult {
   const diagnostics: ViewerDiagnostic[] = [];
   const events: CodexEvent[] = [];
   for (const record of input.records) {
-    const parsed = parseCodexEvent(record);
+    const parsed = memo?.records.get(record) ?? parseCodexEvent(record);
+    memo?.records.set(record, parsed);
     if (parsed.success) {
       events.push(parsed.event);
     } else {
@@ -1216,25 +1255,55 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
     target.events.push(...unscopedUnknownEvents.map((event) => ({ event, turnId: target.id })));
   }
   const eventOffsets = new Map(events.map((event) => [event.id, event.byteStart]));
-  const pairedTools = pairToolCalls(assembly.turns.flatMap(({ events: turnEvents }) => turnEvents));
+  const eventIdentities = new Map(
+    events.map((event) => {
+      let identity = memo?.identities.get(event);
+      if (identity === undefined && memo !== undefined) {
+        identity = ++memo.sequence;
+        memo.identities.set(event, identity);
+      }
+      return [event.id, identity ?? event.id];
+    }),
+  );
+  const pairedTools = pairToolCalls(
+    assembly.turns.flatMap(({ events: turnEvents }) => turnEvents),
+    memo?.tools,
+  );
   const consumedToolEventIds = new Set(pairedTools.consumedEventIds);
   const seenActivities = new Map<string, ConversationActivity>();
   const settingsByTurn = settingsEvidenceByTurn(events, assembly.turns);
   const fallbackTimestamp = timestamps.createdAt;
   const turns: ConversationTurn[] = [];
+  const nextMemoTurns: NormalizationMemo["turns"] = new Map();
+  const toolsByTurn = new Map<string, ConversationActivity[]>();
+  for (const activity of pairedTools.activities) {
+    const group = toolsByTurn.get(activity.turnId) ?? [];
+    group.push(activity);
+    toolsByTurn.set(activity.turnId, group);
+  }
   let previousTokens: TokenUsage | null = null;
   for (const assembled of assembly.turns) {
-    const messages = normalizeMessages(assembled, fallbackTimestamp);
-    const activities = normalizeActivities(
-      assembled,
-      messages.media,
-      eventOffsets,
-      pairedTools.activities,
-      consumedToolEventIds,
-    ).flatMap((activity) => {
-      const reconciled = reconcileActivity(activity, seenActivities, eventOffsets);
-      return reconciled === null ? [] : [reconciled];
-    });
+    const tools = toolsByTurn.get(assembled.id) ?? [];
+    // Late outputs can change an earlier turn's paired tool without adding a scoped event there.
+    const key = JSON.stringify([
+      fallbackTimestamp,
+      assembled.events.map(({ event }) => eventIdentities.get(event.id)),
+      tools.map(({ id, rawEventIds }) => [id, rawEventIds.map((id) => eventIdentities.get(id))]),
+    ]);
+    const cached = memo?.turns.get(assembled.id);
+    const reusable = cached?.key === key ? cached : undefined;
+    const messages = reusable?.messages ?? normalizeMessages(assembled, fallbackTimestamp);
+    const localActivities =
+      reusable?.activities ??
+      normalizeActivities(assembled, messages.media, eventOffsets, tools, consumedToolEventIds);
+    nextMemoTurns.set(assembled.id, { key, messages, activities: localActivities });
+    // Reconciliation mutates only the outer activity and its raw-event list, never memoized payloads.
+    const activities = localActivities
+      .map((activity) => ({ ...activity, rawEventIds: [...activity.rawEventIds] }))
+      .flatMap((activity) => {
+        const reconciled = reconcileActivity(activity, seenActivities, eventOffsets);
+        return reconciled === null ? [] : [reconciled];
+      });
     const evidence = turnModelEvidence(
       assembled,
       settingsByTurn.get(assembled) ?? {
@@ -1284,8 +1353,27 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
       diagnosticIds: [],
     });
   }
+  const nextValidated: NormalizationMemo["validated"] = new Map();
   turns.forEach((turn, index) => {
-    turns[index] = conversationTurnSchema.parse(turn);
+    // Compact dependencies include cross-turn reconciliation and cumulative-token effects.
+    const key = JSON.stringify([
+      nextMemoTurns.get(turn.id)?.key,
+      turn.index,
+      turn.models,
+      turn.reasoningEfforts,
+      turn.tokenDelta,
+      turn.activities.map((activity) => [
+        activity.id,
+        activity.rawEventIds,
+        ...(activity.kind === "web_search"
+          ? [activity.query, activity.status, activity.resultCount]
+          : []),
+      ]),
+    ]);
+    const cached = memo?.validated.get(turn.id);
+    const validated = cached?.key === key ? cached.turn : conversationTurnSchema.parse(turn);
+    turns[index] = validated;
+    nextValidated.set(turn.id, { key, turn: validated });
   });
 
   const preview =
@@ -1346,13 +1434,22 @@ export function normalizeSession(input: NormalizeSessionInput): NormalizeSession
       turnIds.set(event.id, turn.id);
     }
   }
-  const rawEvents = events.map((event): NormalizedRawEvent => ({
-    id: event.id,
-    turnId: turnIds.get(event.id) ?? null,
-    type: codexEventType(event),
-    timestamp: event.timestamp,
-    payload: sanitizeUnknownPayload(event.raw),
-  }));
+  const rawEvents = events.map((event): NormalizedRawEvent => {
+    const payload = memo?.raw.get(event) ?? sanitizeUnknownPayload(event.raw);
+    memo?.raw.set(event, payload);
+    return {
+      id: event.id,
+      turnId: turnIds.get(event.id) ?? null,
+      type: codexEventType(event),
+      timestamp: event.timestamp,
+      payload,
+    };
+  });
+
+  if (memo !== undefined) {
+    memo.turns = nextMemoTurns;
+    memo.validated = nextValidated;
+  }
 
   return { session: { summary, turns, rawEvents }, diagnostics };
 }

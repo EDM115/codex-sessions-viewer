@@ -1,5 +1,5 @@
-import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import RichTextRenderer from "../../../app/components/content/RichTextRenderer.vue";
 import type { ResolvedAsset } from "../../../shared/types/repository.ts";
@@ -13,6 +13,7 @@ const mermaidMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("mermaid", () => ({ default: mermaidMocks }));
+enableAutoUnmount(afterEach);
 
 function document(children: RichTextDocument["children"]): RichTextDocument {
   return { type: "document", children };
@@ -38,6 +39,7 @@ describe("Task 11 Mermaid and inline media", () => {
     expect(mermaidMocks.render).not.toHaveBeenCalled();
 
     await wrapper.get('[role="tab"][aria-label="Preview Mermaid diagram"]').trigger("click");
+    await vi.dynamicImportSettled();
     await flushPromises();
 
     expect(mermaidMocks.initialize).toHaveBeenCalledWith(
@@ -69,6 +71,7 @@ describe("Task 11 Mermaid and inline media", () => {
     });
 
     await wrapper.get('[role="tab"][aria-label="Preview Mermaid diagram"]').trigger("click");
+    await vi.dynamicImportSettled();
     await flushPromises();
 
     expect(wrapper.get('[role="status"]').text()).toContain("Mermaid preview failed");
@@ -114,6 +117,7 @@ describe("Task 11 Mermaid and inline media", () => {
         resolveAsset,
       },
     });
+    await vi.dynamicImportSettled();
     await flushPromises();
 
     const image = wrapper.get('img[alt="Architecture diagram"]');
@@ -165,6 +169,7 @@ describe("Task 11 Mermaid and inline media", () => {
         }),
       },
     });
+    await vi.dynamicImportSettled();
     await flushPromises();
 
     expect(wrapper.get("audio").attributes()).toMatchObject({
@@ -179,22 +184,24 @@ describe("Task 11 Mermaid and inline media", () => {
   });
 
   it("renders cached files, missing sources, unavailable assets, and resolver failures without remote fetches", async () => {
-    const resolveAsset = vi.fn(async (assetId: string): Promise<ResolvedAsset> => {
-      if (assetId === "asset-reject") {
-        throw new Error("cache unavailable");
-      }
-      return {
-        id: assetId,
-        url: assetId === "asset-file" ? "/api/assets/asset-file/content" : null,
-        mimeType: assetId === "asset-file" ? "image/svg+xml" : null,
-        byteSize: assetId === "asset-file" ? 42 : null,
-        sha256: assetId === "asset-file" ? "c".repeat(64) : null,
-        width: null,
-        height: null,
-        status: assetId === "asset-file" ? "available" : "missing",
-        originalPath: null,
-      };
-    });
+    const resolveAsset = vi.fn<(assetId: string) => Promise<ResolvedAsset>>(
+      async (assetId: string): Promise<ResolvedAsset> => {
+        if (assetId === "asset-reject") {
+          throw new Error("cache unavailable");
+        }
+        return {
+          id: assetId,
+          url: assetId === "asset-file" ? "/api/assets/asset-file/content" : null,
+          mimeType: assetId === "asset-file" ? "image/svg+xml" : null,
+          byteSize: assetId === "asset-file" ? 42 : null,
+          sha256: assetId === "asset-file" ? "c".repeat(64) : null,
+          width: null,
+          height: null,
+          status: assetId === "asset-file" ? "available" : "missing",
+          originalPath: null,
+        };
+      },
+    );
     const wrapper = mount(RichTextRenderer, {
       props: {
         document: document([
@@ -247,6 +254,7 @@ describe("Task 11 Mermaid and inline media", () => {
         resolveAsset,
       },
     });
+    await vi.dynamicImportSettled();
     await flushPromises();
 
     expect(wrapper.get('a[download="attachment.svg"]').attributes("href")).toBe(
@@ -288,6 +296,7 @@ describe("Task 11 Mermaid and inline media", () => {
         }),
       },
     });
+    await vi.dynamicImportSettled();
     await flushPromises();
 
     const open = wrapper.get('button[aria-label="Open image: photo"]');
@@ -316,6 +325,7 @@ describe("Task 11 Mermaid and inline media", () => {
     await tabs.trigger("keydown", { key: "PageDown" });
     expect(mermaidMocks.render).not.toHaveBeenCalled();
     await tabs.trigger("keydown", { key: "Home" });
+    await vi.dynamicImportSettled();
     await flushPromises();
 
     expect(mermaidMocks.initialize).toHaveBeenCalledWith(
@@ -325,9 +335,11 @@ describe("Task 11 Mermaid and inline media", () => {
     expect(wrapper.get("[data-mermaid-preview] a").attributes("href")).toBeUndefined();
     expect(wrapper.get("[data-mermaid-preview] text").attributes("onmouseover")).toBeUndefined();
     await wrapper.get('[role="tab"][aria-label="Preview Mermaid diagram"]').trigger("click");
+    await vi.dynamicImportSettled();
     await flushPromises();
     expect(mermaidMocks.render).toHaveBeenCalledTimes(1);
     await tabs.trigger("keydown", { key: "End" });
+    await vi.dynamicImportSettled();
     await flushPromises();
     expect(wrapper.get('[role="tab"][aria-selected="true"]').text()).toBe("Code");
     globalThis.document.documentElement.style.colorScheme = "";
@@ -342,7 +354,41 @@ describe("Task 11 Mermaid and inline media", () => {
     await wrapper.get('button[aria-label="Open Mermaid diagram"]').trigger("click");
     expect(wrapper.emitted("openMedia")).toBeUndefined();
     await wrapper.get('[role="tab"][aria-label="Preview Mermaid diagram"]').trigger("click");
+    await vi.dynamicImportSettled();
     await flushPromises();
     expect(wrapper.get('[role="status"]').text()).toContain("Mermaid preview failed");
+  });
+
+  it("replaces a mounted diagram source and cannot commit an obsolete asynchronous render", async () => {
+    let resolveOld!: (value: { svg: string }) => void;
+    mermaidMocks.render.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    const wrapper = mount(RichTextRenderer, {
+      props: { document: document([{ type: "mermaid", source: "graph TD; Old-->OldResult" }]) },
+    });
+    await wrapper.get('[aria-label="Preview Mermaid diagram"]').trigger("click");
+    await vi.dynamicImportSettled();
+    await flushPromises();
+    mermaidMocks.render.mockResolvedValue({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>Current graph</text><image href="https://remote.example/image.png" /></svg>',
+    });
+    await wrapper.setProps({
+      document: document([{ type: "mermaid", source: "graph TD; New-->Current" }]),
+    });
+    await vi.dynamicImportSettled();
+    await flushPromises();
+    resolveOld({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg"><text>Obsolete graph</text></svg>',
+    });
+    await flushPromises();
+    expect(wrapper.get("[data-mermaid-preview] svg").text()).toBe("Current graph");
+    expect(wrapper.get("[data-mermaid-preview] image").attributes("href")).toBeUndefined();
+    expect(mermaidMocks.initialize).toHaveBeenLastCalledWith(
+      expect.objectContaining({ layout: "dagre", look: "classic", htmlLabels: false }),
+    );
   });
 });

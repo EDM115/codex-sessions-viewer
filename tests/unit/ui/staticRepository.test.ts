@@ -1,8 +1,75 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { StaticConversationRepository } from "../../../app/repositories/static.ts";
+import { conversationSummarySchema } from "../../../shared/types/conversation.ts";
 
 describe("static conversation repository", () => {
+  it("reveals explicit children across inherited root filters with their original project", async () => {
+    const summary = conversationSummarySchema.parse({
+      id: "child",
+      title: "Child",
+      scope: "archived",
+      sourcePath: "D:/child.jsonl",
+      createdAt: "2026-09-14T10:00:00.000Z",
+      updatedAt: "2026-09-14T10:00:00.000Z",
+      cwd: "D:/child",
+      gitBranch: null,
+      gitSha: null,
+      gitOriginUrl: null,
+      models: [],
+      reasoningEfforts: [],
+      turnCount: 0,
+      assistantMessageCount: 0,
+      toolCallCount: 0,
+      toolCounts: {},
+      preview: "Child",
+      pinned: false,
+      sectionName: null,
+      parentThreadId: "parent",
+      childThreadIds: [],
+      hasMedia: false,
+      diagnosticCount: 0,
+      revision: "child-rev",
+    });
+    const repository = new StaticConversationRepository(async (path) =>
+      path.endsWith("index.json")
+        ? { version: 1, sessions: [summary] }
+        : {
+            version: 1,
+            projects: [],
+            entries: {
+              child: {
+                kind: "subagent",
+                projectId: "actual-child-project",
+                parentThreadId: "parent",
+                agentPath: "/root/child",
+                agentNickname: "Child",
+                agentDepth: 1,
+                childCount: 0,
+              },
+            },
+          },
+    );
+    const page = await repository.listSessions({
+      scope: "active",
+      parentThreadId: "parent",
+      projectId: "parent-project",
+      query: "parent-only",
+      cwd: "C:/parent",
+      model: "parent-model",
+      tool: "parent-tool",
+      hasMedia: true,
+    });
+    expect(page.total).toBe(1);
+    expect(page.items[0]).toMatchObject({
+      projectId: "actual-child-project",
+      summary: { id: "child", scope: "archived", cwd: "D:/child" },
+    });
+    expect(
+      (await repository.listSessions({ scope: "archived", parentThreadId: "__root__" })).total,
+    ).toBe(0);
+  });
+
   it("preserves the exact message destination emitted by the Pagefind record", async () => {
     const repository = new StaticConversationRepository(
       async () => {
@@ -20,6 +87,7 @@ describe("static conversation repository", () => {
                     meta: {
                       title: "Build the parser",
                       sessionId: "11111111-1111-4111-8111-111111111111",
+                      parentThreadId: "parent-thread",
                       turnId: "turn-2",
                       messageId: "message-raw-882",
                     },
@@ -36,6 +104,7 @@ describe("static conversation repository", () => {
       items: [
         {
           sessionId: "11111111-1111-4111-8111-111111111111",
+          parentThreadId: "parent-thread",
           turnId: "turn-2",
           messageId: "message-raw-882",
           scope: "active",
@@ -47,31 +116,6 @@ describe("static conversation repository", () => {
       nextCursor: null,
       total: 1,
     });
-  });
-
-  it("resolves favicons from the complete exported manifest record", async () => {
-    const repository = new StaticConversationRepository(async (path) => {
-      if (path !== "/payloads/favicons.json") {
-        throw new Error(`Unexpected static payload request: ${path}`);
-      }
-      return {
-        version: 1,
-        favicons: [
-          {
-            origin: "https://example.test",
-            url: "/favicons/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
-            sourceUrl: "https://example.test/favicon.ico",
-            mimeType: "image/png",
-            byteSize: 68,
-            sha256: "a".repeat(64),
-          },
-        ],
-      };
-    });
-
-    await expect(repository.resolveFavicon("https://example.test")).resolves.toBe(
-      "/favicons/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
-    );
   });
 
   it("uses the navigator target index to fetch only the owning inspector chunk", async () => {

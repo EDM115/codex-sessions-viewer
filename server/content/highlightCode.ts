@@ -7,9 +7,7 @@ import {
   type HighlightedCodeRoot,
   type RichTextAttribute,
 } from "../../shared/types/richText.ts";
-
-const safeStyle =
-  /^(?:(?:background-color|color):#[\da-f]{6})(?:;(?:(?:background-color|color):#[\da-f]{6}))*$/iu;
+import { safeCodeStyle } from "../../shared/utils/codeStyles.ts";
 
 function safeAttributes(properties: Properties | undefined): Record<string, RichTextAttribute> {
   const result: Record<string, RichTextAttribute> = {};
@@ -23,8 +21,8 @@ function safeAttributes(properties: Properties | undefined): Record<string, Rich
       : className;
   }
   const style = properties["style"];
-  if (typeof style === "string" && safeStyle.test(style)) {
-    result["style"] = style;
+  if (typeof style === "string" && safeCodeStyle(style) !== "") {
+    result["style"] = safeCodeStyle(style);
   }
   return result;
 }
@@ -59,7 +57,8 @@ export async function highlightCode(
   try {
     const tree = await codeToHast(source, {
       lang: language,
-      theme: "github-dark-default",
+      themes: { light: "github-light-default", dark: "github-dark-default" },
+      defaultColor: "light-dark()",
     });
     return highlightedCodeRootSchema.parse({
       type: "root",

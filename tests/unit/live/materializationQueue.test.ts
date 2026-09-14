@@ -79,6 +79,7 @@ describe("MaterializationQueue", () => {
     const sharedOpen = queue.enqueue(["shared"], "open", "route");
     const cancelled = queue.enqueue(["cancelled"], "deep-search", "search-1");
     queue.cancelOwner("search-1");
+    queue.cancelOwner("viewport");
     activeGate.resolve();
 
     await expect(cancelled).resolves.toEqual([

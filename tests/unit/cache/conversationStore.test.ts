@@ -129,7 +129,7 @@ describe("cached conversations", () => {
           source,
           expectedCatalogSourceRevision: expectedRevision,
         }),
-      ).toEqual({ status: "committed" });
+      ).toMatchObject({ status: "committed" });
       expect(getCachedSession(database, session.summary.id)).toEqual(session);
       expect(catalogSession(database, session.summary.id)).toMatchObject({
         materialization: "ready",
@@ -215,7 +215,9 @@ describe("cached conversations", () => {
 
     const staticDatabase = openCacheDatabase(":memory:");
     try {
-      expect(replaceCachedSession(staticDatabase, { session, diagnostics: [], source })).toEqual({
+      expect(
+        replaceCachedSession(staticDatabase, { session, diagnostics: [], source }),
+      ).toMatchObject({
         status: "committed",
       });
       expect(getCachedSession(staticDatabase, session.summary.id)).toEqual(session);

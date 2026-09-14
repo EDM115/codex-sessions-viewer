@@ -131,7 +131,8 @@ describe("cached HTTP content authorization", () => {
       await writeFile(wrongName, bytes);
       content.path = wrongName;
     } else if (variant === "hash") {
-      content.sha256 = "0".repeat(64);
+      // Keep the manifest, filename, and size valid so only the byte digest can reject this.
+      await writeFile(validPath, Buffer.alloc(bytes.byteLength, 120));
     } else if (variant === "size") {
       content.byteSize = bytes.byteLength + 1;
     } else if (variant === "directory") {

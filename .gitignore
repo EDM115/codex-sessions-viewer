@@ -20,3 +20,4 @@ blob-report/
 .DS_Store
 .pnpm-store
 .hallmark
+.tmp

@@ -1,8 +1,34 @@
-import { describe, expect, it } from "vitest";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { resolveCodexHome, resolveViewerPaths } from "../../../server/core/paths.ts";
 
+afterEach(() => vi.unstubAllEnvs());
+
 describe("viewer-owned paths", () => {
+  it("uses the current process environment when no options are injected", () => {
+    const root = process.platform === "win32" ? "D:\\viewer-process-root" : "/viewer-process-root";
+    vi.stubEnv("LOCALAPPDATA", root);
+    vi.stubEnv("XDG_CONFIG_HOME", join(root, "config"));
+    vi.stubEnv("XDG_CACHE_HOME", join(root, "cache"));
+    const paths = resolveViewerPaths();
+    const expected =
+      process.platform === "win32"
+        ? [join(root, "codex-sessions-viewer"), join(root, "codex-sessions-viewer", "cache")]
+        : process.platform === "darwin"
+          ? [
+              join(homedir(), "Library", "Application Support", "codex-sessions-viewer"),
+              join(homedir(), "Library", "Caches", "codex-sessions-viewer"),
+            ]
+          : [
+              join(root, "config", "codex-sessions-viewer"),
+              join(root, "cache", "codex-sessions-viewer"),
+            ];
+    expect([paths.configDir, paths.cacheDir]).toEqual(expected);
+  });
+
   it("uses LOCALAPPDATA as the single Windows viewer root", () => {
     expect(
       resolveViewerPaths({
@@ -65,10 +91,7 @@ describe("viewer-owned paths", () => {
     expect(paths.cacheDir).toBe("/home/dev/.cache/codex-sessions-viewer");
   });
 
-  it("uses process defaults and treats whitespace-only Windows roots as absent", () => {
-    const defaults = resolveViewerPaths();
-    expect(defaults.configDir).not.toBe("");
-    expect(defaults.cacheDatabase).toContain("viewer.sqlite");
+  it("treats whitespace-only Windows roots as absent", () => {
     expect(
       resolveViewerPaths({
         platform: "win32",
@@ -80,6 +103,12 @@ describe("viewer-owned paths", () => {
 });
 
 describe("Codex-home precedence", () => {
+  it("reads CODEX_HOME from the process when no options are injected", () => {
+    const path = process.platform === "win32" ? "D:\\process-codex" : "/process-codex";
+    vi.stubEnv("CODEX_HOME", path);
+    expect(resolveCodexHome()).toEqual({ path, source: "environment" });
+  });
+
   const baseOptions = {
     platform: "linux" as const,
     homeDir: "/home/dev",
@@ -122,11 +151,10 @@ describe("Codex-home precedence", () => {
     });
   });
 
-  it("expands a bare home marker and can resolve from process defaults", () => {
+  it("expands a bare home marker", () => {
     expect(resolveCodexHome({ ...baseOptions, configuredCodexHome: "~" })).toEqual({
       path: "/home/dev",
       source: "config",
     });
-    expect(resolveCodexHome().path).not.toBe("");
   });
 });

@@ -112,14 +112,24 @@ describe("stable-read race outcomes", () => {
   });
 
   it("does not expose bytes accumulated by a non-stable read", async () => {
-    filesystem.stat.mockResolvedValueOnce(observation());
-    filesystem.open.mockResolvedValueOnce(
-      handle({ observations: [observation({ device: 8n, inode: 9n })] }),
-    );
+    const opened = {
+      stat: vi.fn<() => Promise<BigIntStats>>(async () => observation()),
+      read: vi.fn<(buffer: Buffer) => Promise<{ bytesRead: number }>>(async (buffer) => {
+        buffer.set(Buffer.from("secret"));
+        return { bytesRead: 6 };
+      }),
+      close: vi.fn<() => Promise<void>>(async () => undefined),
+    };
+    filesystem.stat
+      .mockResolvedValueOnce(observation())
+      .mockResolvedValueOnce(observation({ device: 8n, inode: 9n }));
+    filesystem.open.mockResolvedValueOnce(opened);
 
     await expect(readStableBytes("rollout.jsonl")).resolves.toMatchObject({
-      read: { status: "full-reparse", reason: "replaced" },
+      read: { status: "full-reparse", reason: "replaced", bytesRead: 6 },
       bytes: Buffer.alloc(0),
     });
+    expect(opened.read).toHaveBeenCalledOnce();
+    expect(opened.close).toHaveBeenCalledOnce();
   });
 });

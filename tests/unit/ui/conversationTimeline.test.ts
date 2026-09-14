@@ -352,4 +352,46 @@ describe("conversation timeline repository integration", () => {
     expect(timeline.revision.value).toBe("revision-3");
     expect(timeline.canLoadBefore.value).toBe(false);
   });
+  it("cancels a deferred target without replacing the reading window or blocking adjacent requests", async () => {
+    let resolveTarget!: (chunk: TurnChunk) => void;
+    const initial: TurnChunk = {
+      sessionId: "session-1",
+      turns: [turn(20), turn(21)],
+      previousCursor: "0",
+      nextCursor: "2",
+      revision: "revision-1",
+    };
+    const repository = {
+      getTurns: async (_id: string, query: { targetTurnId?: string }) =>
+        query.targetTurnId === undefined
+          ? { ...initial, turns: [turn(22)], nextCursor: null, revision: "revision-2" }
+          : new Promise<TurnChunk>((resolve) => {
+              resolveTarget = resolve;
+            }),
+    } as Pick<ConversationRepository, "getTurns">;
+    const timeline = useConversationTimeline({
+      sessionId: "session-1",
+      repository,
+      initialChunk: initial,
+    });
+    let applied = false;
+    const target = timeline.loadTarget("turn-1", {
+      beforeApply: () => {
+        applied = true;
+      },
+    });
+    expect(timeline.pendingTurnId.value).toBe("turn-1");
+    timeline.cancelTarget();
+    expect(timeline.loadingTarget.value).toBe(false);
+    expect(timeline.pendingTurnId.value).toBeNull();
+    await timeline.loadAfter();
+    resolveTarget({ ...initial, turns: [turn(1)], previousCursor: null, revision: "stale-target" });
+    await target;
+    expect(applied).toBe(false);
+    expect(timeline.turns.value.map(({ id }) => id)).toEqual(["turn-20", "turn-21", "turn-22"]);
+    expect(timeline.revision.value).toBe("revision-2");
+    expect(timeline.canLoadBefore.value).toBe(true);
+    expect(timeline.canLoadAfter.value).toBe(false);
+    expect(timeline.targetErrorTurnId.value).toBeNull();
+  });
 });

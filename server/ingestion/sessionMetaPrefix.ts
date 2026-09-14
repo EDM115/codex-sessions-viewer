@@ -30,6 +30,8 @@ export interface SessionMetaPrefixFile {
 }
 
 export interface SessionMetaPrefixOptions {
+  /** Extend a truncated first record only, up to this total byte cap. */
+  firstRecordMaxBytes?: number | undefined;
   openFile?: ((path: string) => Promise<SessionMetaPrefixFile>) | undefined;
   observeFile?: ((path: string) => Promise<SessionMetaPrefixObservation>) | undefined;
 }
@@ -51,13 +53,42 @@ export interface SessionMetaPrefix {
 }
 
 export interface SessionMetaPrefixResult {
-  status: "found" | "missing" | "changed";
+  status: "found" | "missing" | "changed" | "exhausted" | "incomplete" | "invalid";
   meta: SessionMetaPrefix | null;
   parentThreadIdHint: string | null;
   bytesRead: number;
   observation: SessionMetaPrefixObservation;
   diagnostics: ViewerDiagnostic[];
 }
+
+/** Catalog startup never reads an unbounded metadata record or a transcript fallback. */
+export const CATALOG_METADATA_MAX_BYTES = 256 * 1024;
+export const CATALOG_EVIDENCE_VERSION = 1;
+
+export const sessionMetaEvidenceSchema = z.strictObject({
+  version: z.int().positive(),
+  origin: z.enum(["rollout-prefix", "materialized"]),
+  status: z.enum(["found", "missing", "changed", "exhausted", "incomplete", "invalid"]),
+  parentThreadIdHint: z.string().nullable(),
+  meta: z
+    .strictObject({
+      id: z.string(),
+      parentThreadId: z.string().nullable(),
+      timestamp: z.string().nullable(),
+      cwd: z.string().nullable(),
+      source: jsonValueSchema.nullable(),
+      modelProvider: z.string().nullable(),
+      git: z
+        .strictObject({
+          branch: z.string().nullable(),
+          commitHash: z.string().nullable(),
+          repositoryUrl: z.string().nullable(),
+        })
+        .nullable(),
+    })
+    .nullable(),
+});
+export type SessionMetaEvidence = z.infer<typeof sessionMetaEvidenceSchema>;
 
 const sessionMetaRecordSchema = z.object({
   type: z.literal("session_meta"),
@@ -204,12 +235,26 @@ export async function readSessionMetaPrefix(
     throw new Error(`Expected a regular rollout file: ${path}`);
   }
   const requested = Math.min(maxBytes, Number(before.size));
-  const buffer = Buffer.allocUnsafe(requested);
+  const cap = options.firstRecordMaxBytes ?? maxBytes;
+  if (!Number.isSafeInteger(cap) || cap < maxBytes || cap > 1024 * 1024) {
+    throw new RangeError("firstRecordMaxBytes must be between maxBytes and 1048576");
+  }
+  const buffer = Buffer.allocUnsafe(Math.min(cap, Number(before.size)));
   const handle = await openFile(path);
   let bytesRead = 0;
   try {
     if (requested > 0) {
       bytesRead = (await handle.read(buffer, 0, requested, 0)).bytesRead;
+    }
+    // Extend only while the first physical record is unfinished. Short reads are retried.
+    while (bytesRead < buffer.length && buffer.subarray(0, bytesRead).indexOf(0x0a) < 0) {
+      const length = Math.min(maxBytes, buffer.length - bytesRead);
+      // oxlint-disable-next-line no-await-in-loop -- Sequential bounded reads stop at the first record boundary.
+      const result = await handle.read(buffer, bytesRead, length, bytesRead);
+      if (result.bytesRead === 0) {
+        break;
+      }
+      bytesRead += result.bytesRead;
     }
   } finally {
     await handle.close();
@@ -228,8 +273,36 @@ export async function readSessionMetaPrefix(
       diagnostics: [],
     };
   }
+  const exhausted =
+    parsed.meta === null &&
+    bytesRead < Number(before.size) &&
+    buffer.subarray(0, bytesRead).indexOf(0x0a) < 0;
+  if (exhausted) {
+    parsed.diagnostics.push(
+      createViewerDiagnostic({
+        code: "source.metadata_budget_exhausted",
+        severity: "info",
+        area: "source",
+        path,
+        message:
+          "Session metadata exceeds the bounded catalog read; its relationship is unresolved until complete evidence is available.",
+        details: { maxBytes: cap, bytesRead },
+      }),
+    );
+  }
   return {
-    status: parsed.meta === null ? "missing" : "found",
+    status:
+      parsed.meta !== null
+        ? "found"
+        : exhausted
+          ? "exhausted"
+          : parsed.diagnostics.length > 0
+            ? "invalid"
+            : buffer.subarray(0, bytesRead).indexOf(0x0a) < 0 && bytesRead > 0
+              ? bytesRead < Number(before.size)
+                ? "exhausted"
+                : "incomplete"
+              : "missing",
     meta: parsed.meta,
     parentThreadIdHint: parentHint,
     bytesRead,

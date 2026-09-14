@@ -27,6 +27,8 @@ describe("turn minimap", () => {
     ];
 
     expect(activeVirtualRowIndex(rows, 800)).toBe(4);
+    expect(activeVirtualRowIndex(rows, 999.99)).toBe(4);
+    expect(activeVirtualRowIndex(rows, 1_000)).toBe(5);
     expect(activeVirtualRowIndex(rows, 1_050)).toBe(5);
   });
 

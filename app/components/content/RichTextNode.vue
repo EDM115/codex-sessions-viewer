@@ -7,6 +7,7 @@ import type {
   RichTextAttribute,
   RichTextNode,
 } from "#shared/types/richText.ts";
+import { safeCodeStyle } from "#shared/utils/codeStyles.ts";
 
 import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
 import CodeBlock from "./CodeBlock.vue";
@@ -37,7 +38,14 @@ function safeAttributeName(name: string): boolean {
 function richAttributes(
   attributes: Record<string, RichTextAttribute>,
 ): Record<string, RichTextAttribute> {
-  return Object.fromEntries(Object.entries(attributes).filter(([name]) => safeAttributeName(name)));
+  return Object.fromEntries(
+    Object.entries(attributes)
+      .filter(([name]) => safeAttributeName(name))
+      .map(([name, value]) => [
+        name === "className" ? "class" : name.replace(/^aria/u, "aria-").toLowerCase(),
+        value,
+      ]),
+  );
 }
 
 function highlightedAttributes(
@@ -49,8 +57,8 @@ function highlightedAttributes(
     output["class"] = className;
   }
   const style = attributes["style"];
-  if (typeof style === "string" && !/url\s*\(|expression\s*\(|javascript:/iu.test(style)) {
-    output["style"] = style;
+  if (typeof style === "string" && safeCodeStyle(style) !== "") {
+    output["style"] = safeCodeStyle(style);
   }
   return output;
 }
@@ -85,7 +93,13 @@ const elementAttributes = computed(() => {
       @open-media="emit('openMedia', $event)"
     />
   </component>
-  <RichLink v-else-if="node.type === 'link'" :node="node" :resolve-favicon="resolveFavicon" />
+  <RichLink
+    v-else-if="node.type === 'link'"
+    :node="node"
+    :resolve-asset="resolveAsset"
+    :resolve-favicon="resolveFavicon"
+    @open-media="emit('openMedia', $event)"
+  />
   <CodeBlock v-else-if="node.type === 'code'" :node="node" />
   <aside v-else-if="node.type === 'alert'" class="rich-alert" :data-kind="node.kind">
     <p class="rich-alert__label">{{ node.kind }}</p>

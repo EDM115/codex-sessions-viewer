@@ -15,7 +15,7 @@ The source of truth remains the rollout JSONL files. `session_index.jsonl`, glob
 ## Global constraints and locked decisions
 
 - Package manager: `pnpm@11.21.0`, declared through `packageManager`.
-- Runtime: Node.js `>=26.7`; never Bun, derined in `package.json`'s engines + devEngines.runtime with onFail:download.
+- Runtime: Node.js `>=26`; never Bun, derined in `package.json`'s engines + devEngines.runtime with onFail:download.
 - Framework: Nuxt 4, Vue 3, TypeScript, SSR enabled.
 - Bind live and offline servers only to `127.0.0.1`; do not offer a non-loopback host option.
 - The application remains fully functional offline. Favicon network fetching is opportunistic and never required for rendering.
@@ -307,7 +307,7 @@ Steps:
 
 1. Scaffold Nuxt 4 with TypeScript and PNPM.
 2. Keep a single root package; do not create package catalogs, or workspace filtering until the repository actually contains a second package.
-3. Set `"type": "module"`, pin PNPM in `packageManager`, declare Node `>=26.7` through `engines` & `devEngines`, and PNPM 11 runtime configuration, and record the accepted Node line in `.node-version`.
+3. Set `"type": "module"`, pin PNPM in `packageManager`, declare Node `>=26` through `engines` & `devEngines`, and PNPM 11 runtime configuration, and record the accepted Node line in `.node-version`.
 4. Add runtime dependencies for Nuxt/Vue, `@vueuse/core`, Zod, Chokidar, environment paths, Unified/Remark/Rehype sanitization, Shiki, Mermaid, TanStack Vue Virtual, `@phosphor-icons/vue`, Pagefind, YAML/frontmatter support, and content-type detection.
 5. Add Vitest, `@nuxt/test-utils`, `@vue/test-utils`, `@testing-library/vue`, Playwright, `@axe-core/playwright`, ESLint, and typechecking dependencies.
 6. Inspect PNPM’s resolved build-script requests and edit the `pnpm-workspace.yaml` as needed to allow builds or not (then re-run `pnpm i` to run the scripts). Keep the default isolated linker and avoid hoisting or phantom dependencies.

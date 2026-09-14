@@ -6,21 +6,28 @@ import type {
   ConversationActivity,
   ConversationMessage,
   ConversationTurn,
-  FileChangeActivity,
   TurnEntryReference,
 } from "#shared/types/conversation.ts";
-import type { ResolvedAsset } from "#shared/types/repository.ts";
+import type { InspectorTarget, ResolvedAsset } from "#shared/types/repository.ts";
 
-import ConversationFileChanges from "./ConversationFileChanges.vue";
+import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
+import ConversationToolGroup from "./ConversationToolGroup.vue";
 import ConversationWorkEntry from "./ConversationWorkEntry.vue";
 import { formatDuration } from "./format.ts";
+import { activityCategory, bodyAssetIds } from "./toolPresentation.ts";
 
 const props = defineProps<{
   resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
   resolveFavicon?: (origin: string) => Promise<string | null>;
   turn: ConversationTurn;
 }>();
-const emit = defineEmits<{ beforeResize: []; resized: [] }>();
+const emit = defineEmits<{
+  beforeResize: [];
+  resized: [];
+  inspect: [target: InspectorTarget];
+  openMedia: [item: MediaViewerItem];
+  openChild: [id: string];
+}>();
 const open = ref(false);
 const messageById = computed(
   () =>
@@ -54,8 +61,20 @@ function fallbackOrder(): TurnEntryReference[] {
 
 type WorkNode =
   | { kind: "entry"; id: string; message?: ConversationMessage; activity?: ConversationActivity }
-  | { kind: "files"; id: string; activities: FileChangeActivity[] };
+  | { kind: "group"; id: string; activities: ConversationActivity[] };
 
+const representedAssets = computed(() => {
+  const ids = new Set<string>();
+  for (const message of messageById.value.values()) {
+    for (const id of message.attachmentIds) {
+      ids.add(id);
+    }
+    for (const id of bodyAssetIds(message.body)) {
+      ids.add(id);
+    }
+  }
+  return ids;
+});
 const nodes = computed<WorkNode[]>(() => {
   const result: WorkNode[] = [];
   for (const reference of props.turn.entryOrder ?? fallbackOrder()) {
@@ -71,15 +90,23 @@ const nodes = computed<WorkNode[]>(() => {
       continue;
     }
     const activity = activityById.value.get(reference.id);
-    if (activity?.kind === "unknown") {
+    if (activity?.kind === "media" && representedAssets.value.has(activity.assetId)) {
       continue;
     }
-    if (activity?.kind === "file_change") {
+    const category = activity === undefined ? null : activityCategory(activity);
+    const groupable =
+      activity !== undefined &&
+      category !== null &&
+      category !== "agent" &&
+      "status" in activity &&
+      activity.status === "succeeded" &&
+      !(activity.kind === "tool" && activity.approval);
+    if (groupable) {
       const previous = result.at(-1);
-      if (previous?.kind === "files") {
+      if (previous?.kind === "group") {
         previous.activities.push(activity);
       } else {
-        result.push({ kind: "files", id: activity.id, activities: [activity] });
+        result.push({ kind: "group", id: activity.id, activities: [activity] });
       }
     } else {
       result.push({ kind: "entry", id: reference.id, activity });
@@ -89,6 +116,14 @@ const nodes = computed<WorkNode[]>(() => {
 });
 const duration = computed(() => formatDuration(props.turn.durationMs));
 
+function beforeDisclosureResize(event: Event): void {
+  if (event instanceof KeyboardEvent && event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  if (event.target instanceof Element && event.target.closest("summary") !== null) {
+    emit("beforeResize");
+  }
+}
 function toggled(event: Event): void {
   open.value = (event.currentTarget as HTMLDetailsElement).open;
   emit("resized");
@@ -102,8 +137,10 @@ function toggled(event: Event): void {
     data-activity-group="worked"
     :open="open"
     @toggle="toggled"
+    @pointerdown.capture="beforeDisclosureResize"
+    @keydown.capture="beforeDisclosureResize"
   >
-    <summary @pointerdown="emit('beforeResize')" @keydown.enter="emit('beforeResize')">
+    <summary>
       <PhCaretRight
         class="conversation-activity-disclosure__caret"
         :size="17"
@@ -114,13 +151,24 @@ function toggled(event: Event): void {
     </summary>
     <div v-if="open" class="conversation-work-stream__entries">
       <template v-for="node in nodes" :key="node.id">
-        <ConversationFileChanges v-if="node.kind === 'files'" :activities="node.activities" />
+        <ConversationToolGroup
+          v-if="node.kind === 'group'"
+          :activities="node.activities"
+          :resolve-asset="resolveAsset"
+          :resolve-favicon="resolveFavicon"
+          @inspect="emit('inspect', $event)"
+          @open-media="emit('openMedia', $event)"
+          @open-child="emit('openChild', $event)"
+        />
         <ConversationWorkEntry
           v-else
           :message="node.message"
           :activity="node.activity"
           :resolve-asset="resolveAsset"
           :resolve-favicon="resolveFavicon"
+          @inspect="emit('inspect', $event)"
+          @open-media="emit('openMedia', $event)"
+          @open-child="emit('openChild', $event)"
         />
       </template>
     </div>

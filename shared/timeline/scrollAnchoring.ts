@@ -13,5 +13,5 @@ export function shouldAdjustForMeasuredRow(
   row: { end: number },
   scrollOffset: number | null,
 ): boolean {
-  return scrollOffset !== null && row.end < scrollOffset;
+  return scrollOffset !== null && row.end <= scrollOffset;
 }

@@ -3,8 +3,6 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@nuxt/test-utils/playwright";
 import type { Page } from "@playwright/test";
 
-import { browserSecurityHeaders } from "../../server/core/securityHeaders.ts";
-
 declare global {
   interface Window {
     viewerReleaseVitals: { cls: number; lcp: number };
@@ -96,9 +94,37 @@ test("blocks external automatic requests and exposes no session creation action"
   await goto("/", { waitUntil: "hydration" });
   const localOrigin = new URL(page.url()).origin;
   const liveResponse = await page.request.get(localOrigin);
-  for (const [header, value] of Object.entries(browserSecurityHeaders)) {
-    expect(liveResponse.headers()[header.toLowerCase()]).toBe(value);
-  }
+  // Expected browser policy is independent of the implementation that emits the headers.
+  expect(liveResponse.headers()).toMatchObject({
+    "permissions-policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "x-robots-tag": "noindex, nofollow, noarchive",
+  });
+  const directives = Object.fromEntries(
+    liveResponse
+      .headers()
+      ["content-security-policy"]!.split(";")
+      .map((directive) => {
+        const [name, ...sources] = directive.trim().split(/\s+/u);
+        return [name, sources];
+      }),
+  );
+  expect(directives).toEqual({
+    "default-src": ["'self'"],
+    "base-uri": ["'none'"],
+    "object-src": ["'none'"],
+    "frame-ancestors": ["'none'"],
+    "form-action": ["'none'"],
+    "connect-src": ["'self'"],
+    "script-src": ["'self'", "'unsafe-inline'"],
+    "style-src": ["'self'", "'unsafe-inline'"],
+    "img-src": ["'self'", "data:", "blob:"],
+    "media-src": ["'self'", "data:", "blob:"],
+    "font-src": ["'self'", "data:"],
+    "worker-src": ["'self'"],
+  });
   const externalRequests: string[] = [];
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());

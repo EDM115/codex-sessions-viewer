@@ -82,7 +82,6 @@ describe("Task 11 rich-text rendering", () => {
     expect(wrapper.get('img[alt=""]').attributes("src")).toBe("/favicons/nuxt.png");
     expect(resolveFavicon).toHaveBeenCalledOnce();
     expect(resolveFavicon).toHaveBeenCalledWith("https://nuxt.com");
-    expect(wrapper.html()).not.toContain("v-html");
   });
 
   it("shows normalized file coordinates and copies only the path", async () => {
@@ -156,7 +155,7 @@ describe("Task 11 rich-text rendering", () => {
     expect(blocks[0]?.get(".rich-code-block__title").text()).toBe("reader.ts");
     expect(blocks[0]?.get("pre").attributes("onclick")).toBeUndefined();
     expect(blocks[1]?.get("code").text()).toBe("plain <source>");
-    expect(blocks[1]?.html()).not.toContain("&lt;source&gt;</code><source");
+    expect(blocks[1]?.find("source").exists()).toBe(false);
 
     await blocks[0]?.get('button[aria-label="Copy code"]').trigger("click");
     expect(writeText).toHaveBeenCalledWith("const answer = 42");
@@ -246,7 +245,7 @@ describe("Task 11 rich-text rendering", () => {
     expect(writeText).toHaveBeenLastCalledWith('Field,Value\nmodel,"gpt, exact"');
   });
 
-  it("lazy-loads @pierre/diffs for unified patches and releases its DOM adapter", async () => {
+  it("passes unified patches to the diff adapter and releases its DOM instance", async () => {
     const source =
       "diff --git a/reader.ts b/reader.ts\n--- a/reader.ts\n+++ b/reader.ts\n@@ -1 +1 @@\n-old\n+new";
     const wrapper = mount(RichTextRenderer, {

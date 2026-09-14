@@ -2,7 +2,7 @@ import { basename, extname, resolve } from "node:path";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
 import { resolveConversationProject } from "../../shared/library/projectIdentity.ts";
-import type { ConversationSummary, JsonValue } from "../../shared/types/conversation.ts";
+import type { ConversationSummary } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { ConversationProject } from "../../shared/types/library.ts";
 import {
@@ -11,6 +11,7 @@ import {
   removeCatalogSource,
   upsertCatalogSessions,
   type CatalogSessionInput,
+  type CatalogSessionRecord,
   type CatalogSessionKind,
 } from "../cache/catalogStore.ts";
 import { removeCachedSource } from "../cache/conversationStore.ts";
@@ -22,6 +23,7 @@ import {
 import type { SourceDiscoveryResult } from "../ingestion/discoverSources.ts";
 import { selectSessionSources } from "../ingestion/selectSessionSources.ts";
 import {
+  CATALOG_EVIDENCE_VERSION,
   observeSessionMetaSource,
   readSessionMetaPrefix,
   type SessionMetaPrefix,
@@ -31,6 +33,7 @@ import {
 import type { GlobalStateMetadata } from "../metadata/globalState.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot, StateThreadMetadata } from "../metadata/stateSnapshot.ts";
+import { classifySessionStructure } from "../normalization/subagentTopology.ts";
 
 export interface SessionMetaClassification {
   kind: CatalogSessionKind;
@@ -47,6 +50,8 @@ export interface RefreshLiveCatalogOptions {
   globalState: GlobalStateMetadata;
   stateSnapshot: StateMetadataSnapshot | null;
   prefixBytes?: number | undefined;
+  /** Omit for recovery scans; [] refreshes metadata without rollout observations. */
+  changedSourcePaths?: readonly string[] | undefined;
   readPrefix?: typeof readSessionMetaPrefix | undefined;
   readJsonl?: StableJsonlReader | undefined;
   observeSource?: ((path: string) => Promise<SessionMetaPrefixObservation>) | undefined;
@@ -92,58 +97,46 @@ function cachedSessionSource(
   existing: CatalogSessionInput,
   observation: SessionMetaPrefixObservation,
 ): SessionMetaPrefixResult {
-  let subagentSource: JsonValue = null;
-  if (existing.kind === "auxiliary") {
-    subagentSource = {
-      subagent: { other: "guardian", parent_thread_id: existing.parentThreadId },
-    };
-  } else if (existing.kind === "subagent") {
-    subagentSource = {
-      subagent: {
-        thread_spawn: {
-          parent_thread_id: existing.parentThreadId,
-          agent_path: existing.agentPath,
-          agent_nickname: existing.agentNickname,
-          depth: existing.agentDepth,
-        },
-      },
-    };
-  }
+  const evidence = existing.structuralEvidence!;
   return {
-    status: "found",
-    meta: {
-      id: existing.summary.id,
-      parentThreadId: existing.parentThreadId,
-      timestamp: existing.summary.createdAt,
-      cwd: existing.summary.cwd,
-      source: subagentSource,
-      modelProvider: null,
-      git: {
-        branch: existing.summary.gitBranch,
-        commitHash: existing.summary.gitSha,
-        repositoryUrl: existing.summary.gitOriginUrl,
-      },
-    },
-    parentThreadIdHint: existing.parentThreadId,
+    status: evidence.status,
+    meta: evidence.meta,
+    parentThreadIdHint: evidence.parentThreadIdHint,
     bytesRead: 0,
     observation,
     diagnostics: [],
   };
 }
 
-async function reusablePrefixes(options: RefreshLiveCatalogOptions): Promise<{
+function cachedObservation(existing: CatalogSessionInput): SessionMetaPrefixObservation {
+  return {
+    device: BigInt(existing.sourceDevice ?? "0"),
+    inode: BigInt(existing.sourceInode ?? "0"),
+    size: BigInt(existing.sourceSize),
+    mtimeNs: BigInt(Math.round(existing.sourceMtimeMs * 1_000_000)),
+    ctimeNs: 0n,
+    regular: true,
+    symbolicLink: false,
+  };
+}
+
+async function reusablePrefixes(
+  options: RefreshLiveCatalogOptions,
+  existingRows: readonly CatalogSessionRecord[],
+): Promise<{
   prefixes: Map<string, SessionMetaPrefixResult>;
   rows: Map<string, CatalogSessionInput>;
 }> {
   const existingByPath = new Map(
-    listAllCatalogSessions(options.database).map((record) => [
-      sourcePathKey(record.summary.sourcePath),
-      record,
-    ]),
+    existingRows.map((record) => [sourcePathKey(record.summary.sourcePath), record]),
   );
   const reusable = new Map<string, SessionMetaPrefixResult>();
   const reusableRows = new Map<string, CatalogSessionInput>();
   const observeSource = options.observeSource ?? observeSessionMetaSource;
+  const changedPaths =
+    options.changedSourcePaths === undefined
+      ? null
+      : new Set(options.changedSourcePaths.map(sourcePathKey));
   for (
     let index = 0;
     index < options.discovery.rollouts.length;
@@ -154,8 +147,18 @@ async function reusablePrefixes(options: RefreshLiveCatalogOptions): Promise<{
     const observations = await Promise.all(
       sources.map(async (source) => {
         const existing = existingByPath.get(sourcePathKey(source.path));
-        if (existing === undefined) {
+        if (
+          existing === undefined ||
+          existing.structuralEvidence?.version !== CATALOG_EVIDENCE_VERSION
+        ) {
           return null;
+        }
+        if (changedPaths !== null && !changedPaths.has(sourcePathKey(source.path))) {
+          return {
+            path: source.path,
+            prefix: cachedSessionSource(existing, cachedObservation(existing)),
+            existing,
+          };
         }
         try {
           const observation = await observeSource(source.path);
@@ -184,54 +187,19 @@ async function reusablePrefixes(options: RefreshLiveCatalogOptions): Promise<{
   return { prefixes: reusable, rows: reusableRows };
 }
 
-function asRecord(value: JsonValue | null | undefined): Record<string, JsonValue> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
-}
-
-function stringProperty(record: Record<string, JsonValue> | null, key: string): string | null {
-  const value = record?.[key];
-  return typeof value === "string" && value.trim() !== "" ? value : null;
-}
-
-function numberProperty(record: Record<string, JsonValue> | null, key: string): number | null {
-  const value = record?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 export function classifySessionMeta(
   meta: SessionMetaPrefix | null,
   threadModel: string | null | undefined = null,
   parentThreadIdHint: string | null = null,
+  fallbackSource: string | null | undefined = null,
 ): SessionMetaClassification {
-  const source = asRecord(meta?.source);
-  const subagent = asRecord(source?.["subagent"]);
-  if (stringProperty(subagent, "other") === "guardian" || threadModel === "codex-auto-review") {
-    return {
-      kind: "auxiliary",
-      parentThreadId:
-        meta?.parentThreadId ?? stringProperty(subagent, "parent_thread_id") ?? parentThreadIdHint,
-      agentPath: null,
-      agentNickname: null,
-      agentDepth: null,
-    };
-  }
-  const spawn = asRecord(subagent?.["thread_spawn"]);
-  if (spawn !== null) {
-    return {
-      kind: "subagent",
-      parentThreadId: stringProperty(spawn, "parent_thread_id"),
-      agentPath: stringProperty(spawn, "agent_path"),
-      agentNickname: stringProperty(spawn, "agent_nickname"),
-      agentDepth: numberProperty(spawn, "depth"),
-    };
-  }
-  return {
-    kind: "root",
-    parentThreadId: null,
-    agentPath: null,
-    agentNickname: null,
-    agentDepth: null,
-  };
+  return classifySessionStructure({
+    source: meta?.source ?? null,
+    parentThreadId: meta?.parentThreadId,
+    threadModel,
+    parentThreadIdHint,
+    fallbackSource,
+  });
 }
 
 function fallbackSessionId(path: string): string {
@@ -461,12 +429,18 @@ function requiredText(row: Record<string, SQLOutputValue>, key: string): string 
 export async function refreshLiveCatalog(
   options: RefreshLiveCatalogOptions,
 ): Promise<CatalogRefreshResult> {
-  const reusable = await reusablePrefixes(options);
+  const existingRows = listAllCatalogSessions(options.database);
+  const observedChanges = options.database.prepare("SELECT total_changes() AS count").get()?.[
+    "count"
+  ];
+  const reusable = await reusablePrefixes(options, existingRows);
   const readPrefix = options.readPrefix ?? readSessionMetaPrefix;
   const sourceSelection = await selectSessionSources(options.discovery.rollouts, {
     prefixBytes: options.prefixBytes,
-    readPrefix: (path, maxBytes) =>
-      Promise.resolve(reusable.prefixes.get(sourcePathKey(path)) ?? readPrefix(path, maxBytes)),
+    readPrefix: (path, maxBytes, prefixOptions) =>
+      Promise.resolve(
+        reusable.prefixes.get(sourcePathKey(path)) ?? readPrefix(path, maxBytes, prefixOptions),
+      ),
     readJsonl: options.readJsonl,
   });
   const diagnostics = [...options.discovery.diagnostics, ...sourceSelection.diagnostics];
@@ -483,6 +457,12 @@ export async function refreshLiveCatalog(
 
   for (const { source, prefix } of prefixes) {
     if (prefix.status === "changed") {
+      const existing = existingRows.find(
+        (row) => sourcePathKey(row.summary.sourcePath) === sourcePathKey(source.path),
+      );
+      if (existing !== undefined) {
+        drafts.push({ prefix, input: { ...existing, summary: { ...existing.summary } } });
+      }
       continue;
     }
     const id = prefix.meta?.id ?? fallbackSessionId(source.path);
@@ -492,6 +472,7 @@ export async function refreshLiveCatalog(
       prefix.meta,
       thread?.model,
       prefix.parentThreadIdHint,
+      thread?.source,
     );
     const summary = coldSummary({
       id,
@@ -527,13 +508,54 @@ export async function refreshLiveCatalog(
         sourceInode: existing?.sourceInode ?? prefix.observation.inode.toString(),
         sourceRevision: reusableSourceRevision(existing, prefix),
         error: null,
+        structuralEvidence: {
+          version: CATALOG_EVIDENCE_VERSION,
+          origin: existing?.structuralEvidence?.origin ?? "rollout-prefix",
+          status: prefix.status,
+          meta: prefix.meta,
+          parentThreadIdHint: prefix.parentThreadIdHint,
+        },
       },
     });
   }
 
+  // Materialization can commit while prefix I/O is pending. Usually the original metadata
+  // snapshot is reusable; after concurrent writes, merge against current rows synchronously.
+  const currentRows =
+    options.database.prepare("SELECT total_changes() AS count").get()?.["count"] === observedChanges
+      ? existingRows
+      : listAllCatalogSessions(options.database);
+  if (currentRows !== existingRows) {
+    const currentById = new Map(currentRows.map((row) => [row.summary.id, row]));
+    for (const draft of drafts) {
+      const current = currentById.get(draft.input.summary.id);
+      const evidence = current?.structuralEvidence;
+      if (
+        current?.sourceRevision !== draft.input.sourceRevision ||
+        evidence?.origin !== "materialized" ||
+        evidence.status !== "found" ||
+        draft.input.structuralEvidence?.status === "found"
+      ) {
+        continue;
+      }
+      // A full parse can recover a capped declaration during the same refresh. Retain it
+      // before resolving the graph, so parent lists and child placement use that evidence.
+      const classification = classifySessionMeta(
+        evidence.meta,
+        undefined,
+        evidence.parentThreadIdHint,
+      );
+      draft.input.structuralEvidence = evidence;
+      draft.input.kind = classification.kind;
+      draft.input.parentThreadId = classification.parentThreadId;
+      draft.input.agentPath = classification.agentPath;
+      draft.input.agentNickname = classification.agentNickname;
+      draft.input.agentDepth = classification.agentDepth;
+    }
+  }
   applyTopology(drafts, options.stateSnapshot, diagnostics);
   const rows = drafts.map(({ input }) => input);
-  const changedIds = upsertCatalogSessions(options.database, rows);
+  const changedIds = upsertCatalogSessions(options.database, rows, currentRows);
 
   const expectedPaths = new Set(prefixes.map(({ source }) => resolve(source.path)));
   const removedIds: string[] = [];

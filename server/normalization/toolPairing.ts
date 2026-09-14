@@ -14,6 +14,20 @@ interface ToolPairingResult {
   consumedEventIds: string[];
 }
 
+export interface ToolPairingMemo {
+  decoded: WeakMap<CodexEvent, JsonValue>;
+  pairs: Map<
+    string,
+    {
+      call: CodexEvent | null;
+      output: CodexEvent | null;
+      turnId: string;
+      eventCount: number;
+      activities: ToolPairingResult["activities"];
+    }
+  >;
+}
+
 interface MutableToolPair {
   key: string;
   callId: string | null;
@@ -155,9 +169,20 @@ function elapsedMilliseconds(start: string | null, end: string | null): number |
   return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : null;
 }
 
-export function pairToolCalls(events: readonly TurnScopedEvent[]): ToolPairingResult {
+export function pairToolCalls(
+  events: readonly TurnScopedEvent[],
+  memo?: ToolPairingMemo,
+): ToolPairingResult {
   const pairs = new Map<string, MutableToolPair>();
   const consumedEventIds: string[] = [];
+  const decode = (event: CodexEvent, value: JsonValue | undefined): JsonValue => {
+    if (memo?.decoded.has(event)) {
+      return memo.decoded.get(event)!;
+    }
+    const decoded = decodedValue(value);
+    memo?.decoded.set(event, decoded);
+    return decoded;
+  };
 
   for (const scoped of events) {
     const { event } = scoped;
@@ -195,7 +220,8 @@ export function pairToolCalls(events: readonly TurnScopedEvent[]): ToolPairingRe
         (type === "tool_search_call" ? "codex" : pair.namespace);
       pair.name =
         type === "tool_search_call" ? "tool_search" : (stringValue(payload["name"]) ?? pair.name);
-      pair.input = decodedValue(
+      pair.input = decode(
+        event,
         type === "function_call"
           ? payload["arguments"]
           : type === "custom_tool_call"
@@ -213,7 +239,7 @@ export function pairToolCalls(events: readonly TurnScopedEvent[]): ToolPairingRe
         pair.name = pair.name === "unknown_tool" ? "tool_search" : pair.name;
         pair.output = payload["tools"] ?? null;
       } else {
-        pair.output = decodedValue(payload["output"]);
+        pair.output = decode(event, payload["output"]);
       }
       const details = resultDetails(pair.output);
       pair.status =
@@ -235,12 +261,24 @@ export function pairToolCalls(events: readonly TurnScopedEvent[]): ToolPairingRe
     pair.error = details.error;
   }
 
+  const nextPairs: ToolPairingMemo["pairs"] = new Map();
   const activities = [...pairs.values()]
     .toSorted((left, right) => left.sortOffset - right.sortOffset)
-    .map((pair): ToolActivity => {
+    .flatMap((pair): ToolPairingResult["activities"] => {
+      const cached = memo?.pairs.get(pair.key);
+      if (
+        cached !== undefined &&
+        cached.call === pair.callEvent &&
+        cached.output === pair.outputEvent &&
+        cached.turnId === pair.turnId &&
+        cached.eventCount === pair.rawEventIds.length
+      ) {
+        nextPairs.set(pair.key, cached);
+        return cached.activities;
+      }
       const startedAt = pair.callEvent?.timestamp ?? null;
       const completedAt = pair.outputEvent?.timestamp ?? null;
-      return {
+      const activity: ToolActivity = {
         id: `tool-${pair.callId ?? pair.key}`,
         turnId: pair.turnId,
         createdAt: startedAt ?? completedAt,
@@ -257,8 +295,19 @@ export function pairToolCalls(events: readonly TurnScopedEvent[]): ToolPairingRe
         output: pair.output,
         error: pair.error,
       };
-    })
-    .flatMap(deriveNestedExecActivities);
+      const activities = deriveNestedExecActivities(activity);
+      nextPairs.set(pair.key, {
+        call: pair.callEvent,
+        output: pair.outputEvent,
+        turnId: pair.turnId,
+        eventCount: pair.rawEventIds.length,
+        activities,
+      });
+      return activities;
+    });
+  if (memo !== undefined) {
+    memo.pairs = nextPairs;
+  }
 
   return { activities, consumedEventIds };
 }

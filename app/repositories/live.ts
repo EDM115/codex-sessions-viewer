@@ -31,6 +31,8 @@ import {
   type ViewerInvalidation,
 } from "#shared/types/repository.ts";
 
+import { publishFaviconAvailability } from "../components/content/faviconAvailability.ts";
+
 export interface RepositoryRequesterOptions extends RepositoryRequestOptions {
   method?: "GET" | "POST" | "DELETE";
   body?: unknown;
@@ -190,6 +192,7 @@ export class LiveApiConversationRepository implements ConversationRepository {
     const source = new EventSource("/api/events");
     const handlers: Array<[ViewerInvalidation["type"], EventListener]> = [];
     for (const type of [
+      "favicon.updated",
       "library.updated",
       "session.updated",
       "settings.updated",
@@ -203,6 +206,9 @@ export class LiveApiConversationRepository implements ConversationRepository {
         try {
           const parsed = viewerInvalidationSchema.safeParse(JSON.parse(event.data) as unknown);
           if (parsed.success) {
+            if (parsed.data.type === "favicon.updated") {
+              publishFaviconAvailability(parsed.data.ids, parsed.data.revision);
+            }
             listener(parsed.data);
           }
         } catch {

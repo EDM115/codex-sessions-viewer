@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  classifySessionStructure,
   enrichSubagentActivities,
   resolveSubagentTopology,
 } from "../../../server/normalization/subagentTopology.ts";
@@ -23,6 +24,43 @@ function activity(overrides: Partial<SubagentActivity> = {}): SubagentActivity {
 }
 
 describe("subagent topology", () => {
+  it("keeps rollout parent authority, treats SQLite source as optional fallback and does not guess from bare hints", () => {
+    const fallbackSource = JSON.stringify({
+      subagent: { thread_spawn: { parent_thread_id: "stale-parent", agent_path: "/root/stale" } },
+    });
+    expect(classifySessionStructure({ source: null, fallbackSource })).toMatchObject({
+      kind: "subagent",
+      parentThreadId: "stale-parent",
+    });
+    expect(
+      classifySessionStructure({
+        source: { subagent: { thread_spawn: { parent_thread_id: "nested-parent" } } },
+        parentThreadId: "rollout-parent",
+        fallbackSource,
+      }),
+    ).toMatchObject({ kind: "subagent", parentThreadId: "rollout-parent" });
+    expect(classifySessionStructure({ source: "cli", fallbackSource })).toMatchObject({
+      kind: "root",
+      parentThreadId: null,
+    });
+    expect(
+      classifySessionStructure({ source: null, parentThreadIdHint: "hint-only" }),
+    ).toMatchObject({ kind: "root", parentThreadId: null });
+    expect(
+      classifySessionStructure({
+        source: null,
+        parentThreadIdHint: "hint-only",
+        threadModel: "codex-auto-review",
+      }),
+    ).toMatchObject({ kind: "auxiliary", parentThreadId: "hint-only" });
+    expect(
+      classifySessionStructure({
+        source: null,
+        fallbackSource: JSON.stringify({ subagent: { other: "guardian" } }),
+      }),
+    ).toMatchObject({ kind: "auxiliary" });
+  });
+
   it("resolves nested ancestry and rejects cyclic breadcrumb chains", () => {
     const topology = resolveSubagentTopology([
       { id: "root", parentThreadId: null, agentPath: "/root", agentNickname: null },
@@ -68,5 +106,28 @@ describe("subagent topology", () => {
       description: "Noether · Subagent started",
     });
     expect(updated).toMatchObject({ childThreadId: "grandchild", status: "succeeded" });
+
+    const ambiguous = activity();
+    const explicit = activity({ childThreadId: "grandchild" });
+    const reusedPath = [
+      {
+        ...nodes[0]!,
+        id: "unrelated-child",
+        parentThreadId: "unrelated-parent",
+        agentNickname: "Other",
+      },
+      ...nodes,
+    ];
+    enrichSubagentActivities([ambiguous, explicit], reusedPath);
+    expect(ambiguous).toMatchObject({
+      childThreadId: null,
+      parentThreadId: null,
+      description: "Subagent started",
+    });
+    expect(explicit).toMatchObject({
+      childThreadId: "grandchild",
+      parentThreadId: "child",
+      description: "Noether · Subagent started",
+    });
   });
 });

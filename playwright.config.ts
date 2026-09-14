@@ -14,6 +14,9 @@ export default defineConfig<ConfigOptions>({
   use: {
     nuxt: {
       rootDir,
+      ...(process.env["CODEX_VIEWER_TEST_URL"]
+        ? { host: process.env["CODEX_VIEWER_TEST_URL"] }
+        : {}),
       env: {
         CODEX_VIEWER_CODEX_HOME: fileURLToPath(new URL("./tests/fixtures", import.meta.url)),
       },

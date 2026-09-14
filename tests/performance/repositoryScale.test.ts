@@ -7,10 +7,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { getCachedSession, replaceCachedSession } from "../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../server/cache/database.ts";
-import { getCachedTurnChunk } from "../../server/cache/repositoryStore.ts";
 import { createPagefindTurnRecords } from "../../server/export/buildPagefind.ts";
 import { writeStaticPayloads } from "../../server/export/writeStaticPayloads.ts";
 import { InvalidationBus } from "../../server/live/invalidationBus.ts";
+import { LiveReconciler } from "../../server/live/reconciler.ts";
 import { LiveConversationRepository } from "../../server/live/repository.ts";
 import { cachedSource, normalizedRolloutFixture } from "../fixtures/cache/normalized.ts";
 import { representativeLargeSession } from "./fixtures.ts";
@@ -88,7 +88,7 @@ describe("representative repository scale", () => {
     }
   }, 35_000);
 
-  it("keeps a bounded live turn query materially faster than full-session reconstruction", async () => {
+  it("keeps the real warm live repository materially faster than full-session reconstruction", async () => {
     const source = await normalizedRolloutFixture({
       name: "modern.jsonl",
       sourcePath: "C:/fixtures/performance-bounded.jsonl",
@@ -97,6 +97,17 @@ describe("representative repository scale", () => {
     });
     const session = representativeLargeSession(source);
     const database = openCacheDatabase(":memory:");
+    const bus = new InvalidationBus();
+    const cacheDir = await mkdtemp(join(tmpdir(), "viewer-warm-benchmark-"));
+    temporaryDirectories.push(cacheDir);
+    const reconciler = new LiveReconciler({
+      database,
+      bus,
+      cacheDir,
+      codexHome: cacheDir,
+      fetchFavicons: false,
+    });
+    const repository = new LiveConversationRepository(database, bus, reconciler);
     try {
       replaceCachedSession(database, {
         session,
@@ -104,21 +115,27 @@ describe("representative repository scale", () => {
         source: cachedSource(session, { size: 8_000_000 }),
       });
       for (let index = 0; index < 3; index += 1) {
-        getCachedTurnChunk(database, session.summary.id, {
+        // oxlint-disable-next-line no-await-in-loop -- Warm each serial repository read before measuring latency.
+        await repository.getTurns(session.summary.id, {
           targetTurnId: "scale-turn-487",
           limit: 20,
         });
         getCachedSession(database, session.summary.id);
       }
-      const boundedMedianMs = measure(20, () => {
-        const chunk = getCachedTurnChunk(database, session.summary.id, {
+      const boundedTimes: number[] = [];
+      for (let index = 0; index < 20; index += 1) {
+        const started = performance.now();
+        // oxlint-disable-next-line no-await-in-loop -- Sequential timing samples measure per-request latency.
+        const chunk = await repository.getTurns(session.summary.id, {
           targetTurnId: "scale-turn-487",
           limit: 20,
         });
         if (chunk?.turns.length !== 20) {
           throw new Error("The bounded query returned the wrong chunk.");
         }
-      });
+        boundedTimes.push(performance.now() - started);
+      }
+      const boundedMedianMs = median(boundedTimes);
       const fullMedianMs = measure(20, () => {
         const loaded = getCachedSession(database, session.summary.id);
         if (loaded?.turns.length !== 500) {
@@ -131,6 +148,7 @@ describe("representative repository scale", () => {
         `bounded ${boundedMedianMs.toFixed(3)} ms vs full ${fullMedianMs.toFixed(3)} ms`,
       ).toBeLessThan(fullMedianMs * 0.5);
     } finally {
+      await reconciler.close();
       database.close();
     }
   });
@@ -148,8 +166,8 @@ describe("representative repository scale", () => {
     const rawEventId = "large-shared-event";
     const referencedEntities = [
       turn.userMessage,
-      turn.assistantMessages[0]!,
-      turn.activities[0]!,
+      turn.assistantMessages[0],
+      turn.activities[0],
     ].filter((entity) => entity !== null && entity !== undefined);
     expect(referencedEntities).toHaveLength(3);
     for (const entity of referencedEntities) {

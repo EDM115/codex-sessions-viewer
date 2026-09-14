@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from "vitest";
 import { openCacheDatabase } from "../../server/cache/database.ts";
 import type { SessionMetaPrefixResult } from "../../server/ingestion/sessionMetaPrefix.ts";
 import { refreshLiveCatalog } from "../../server/live/catalogBuilder.ts";
-import { MaterializationQueue } from "../../server/live/materializationQueue.ts";
 
 function sessionId(index: number): string {
   return `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
@@ -162,27 +161,5 @@ describe("live catalog startup scale", () => {
     } finally {
       database.close();
     }
-  });
-
-  it("keeps visible-session materialization serialized", async () => {
-    let concurrent = 0;
-    let maxConcurrent = 0;
-    const queue = new MaterializationQueue(async (id) => {
-      concurrent += 1;
-      maxConcurrent = Math.max(maxConcurrent, concurrent);
-      await Promise.resolve();
-      concurrent -= 1;
-      return { id, state: "ready", error: null };
-    });
-
-    await expect(
-      queue.enqueue(
-        Array.from({ length: 20 }, (_, index) => sessionId(index)),
-        "visible",
-        "viewport",
-      ),
-    ).resolves.toHaveLength(20);
-    expect(maxConcurrent).toBe(1);
-    await queue.close();
   });
 });

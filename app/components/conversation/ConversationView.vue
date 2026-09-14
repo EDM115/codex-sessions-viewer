@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { PhArrowDown, PhArrowLeft, PhArrowUp, PhSidebarSimple } from "@phosphor-icons/vue";
-import { useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/vue-virtual";
+import { useVirtualizer } from "@tanstack/vue-virtual";
 import {
   computed,
   defineAsyncComponent,
@@ -9,10 +9,12 @@ import {
   onMounted,
   ref,
   shallowRef,
+  watch,
+  useId,
 } from "vue";
 
-import { shouldAdjustForMeasuredRow } from "#shared/timeline/scrollAnchoring.ts";
 import { activeVirtualRowIndex } from "#shared/timeline/turnMinimap.ts";
+import { installConversationScrollPolicy } from "#shared/timeline/virtualizer.ts";
 import type { ConversationSummary, TurnNavigatorItem } from "#shared/types/conversation.ts";
 import type {
   InspectorRecord,
@@ -40,6 +42,7 @@ import TurnMinimap from "./TurnMinimap.vue";
 const MediaViewer = defineAsyncComponent(() => import("../media/MediaViewer.vue"));
 
 const props = defineProps<{
+  embedded?: boolean;
   initialChunk: TurnChunk;
   initialTargetTurnId: string | null;
   mode: RepositoryMode;
@@ -47,6 +50,15 @@ const props = defineProps<{
   summary: ConversationSummary;
 }>();
 
+const emit = defineEmits<{ openChild: [sessionId: string] }>();
+
+const minimapInstanceId = useId();
+const turnAnchorPrefix = computed(() =>
+  props.embedded ? `embedded-${minimapInstanceId}-turn-` : "turn-",
+);
+const minimapPanelId = computed(() =>
+  props.embedded ? `turn-minimap-panel-${minimapInstanceId}` : "turn-minimap-panel",
+);
 const ESTIMATED_TURN_SIZE = 520;
 
 const route = useRoute();
@@ -71,6 +83,11 @@ const { settings } = usePresentationSettings();
 const navigatorItems = shallowRef<readonly TurnNavigatorItem[]>([...props.navigator]);
 const workbench = ref<HTMLElement | null>(null);
 const scroller = ref<HTMLElement | null>(null);
+const virtualCanvas = ref<HTMLElement | null>(null);
+let layoutObserver: ResizeObserver | null = null;
+let layoutWidth: number | null = null;
+let layoutRestorePending = false;
+let layoutRestoreQueued = false;
 const currentTurnId = ref(props.initialTargetTurnId ?? props.initialChunk.turns.at(-1)?.id ?? null);
 const minimapOverlayOpen = ref(false);
 const inspectorTarget = shallowRef<InspectorTarget | null>(null);
@@ -98,16 +115,57 @@ const virtualizer = useVirtualizer(
     getItemKey: (index: number) => timeline.turns.value[index]?.id ?? index,
     getScrollElement: () => scroller.value,
     overscan: 3,
-    shouldAdjustScrollPositionOnItemSizeChange: (
-      item: VirtualItem,
-      _delta: number,
-      instance: Virtualizer<HTMLElement, Element>,
-    ) => shouldAdjustForMeasuredRow(item, instance.scrollOffset),
   })),
 );
+installConversationScrollPolicy(virtualizer.value, () => {
+  const container = scroller.value;
+  const canvas = virtualCanvas.value;
+  return container === null || canvas === null
+    ? 0
+    : canvas.getBoundingClientRect().top -
+        container.getBoundingClientRect().top +
+        container.scrollTop;
+});
 const virtualRows = computed(() => (virtualized.value ? virtualizer.value.getVirtualItems() : []));
 const virtualSize = computed(() => virtualizer.value.getTotalSize());
-const anchoring = useScrollAnchoring(scroller, () => virtualizer.value.measure());
+const anchoring = useScrollAnchoring(
+  scroller,
+  (turnId) => {
+    const index = timeline.turns.value.findIndex(({ id }) => id === turnId);
+    const container = scroller.value;
+    const canvas = virtualCanvas.value;
+    if (index < 0 || container === null || canvas === null) {
+      return null;
+    }
+    virtualizer.value.getTotalSize();
+    const row = virtualizer.value.measurementsCache[index];
+    return row === undefined
+      ? null
+      : row.start +
+          canvas.getBoundingClientRect().top -
+          container.getBoundingClientRect().top +
+          container.scrollTop;
+  },
+  () => {
+    const container = scroller.value;
+    const canvas = virtualCanvas.value;
+    if (container === null || canvas === null) {
+      return null;
+    }
+    const origin =
+      canvas.getBoundingClientRect().top -
+      container.getBoundingClientRect().top +
+      container.scrollTop;
+    const row = virtualizer.value.getVirtualItemForOffset(container.scrollTop - origin);
+    const turnId = row === undefined ? undefined : timeline.turns.value[row.index]?.id;
+    return row === undefined || turnId === undefined
+      ? null
+      : { turnId, top: row.start + origin - container.scrollTop };
+  },
+);
+const inspectorActivities = computed(() =>
+  inspectorOpen.value ? timeline.turns.value.flatMap((turn) => turn.activities) : [],
+);
 const inspectorOpen = computed(
   () => inspectorTarget.value !== null || inspectorLoading.value || inspectorError.value !== null,
 );
@@ -131,19 +189,32 @@ function alignRenderedTurnAtStart(turnId: string): void {
     element.getBoundingClientRect().top - container.getBoundingClientRect().top;
 }
 
-async function settleRenderedTurnAtStart(turnId: string, remainingFrames = 3): Promise<void> {
+async function settleRenderedTurnAtStart(
+  turnId: string,
+  requestVersion: number,
+  remainingFrames = 3,
+): Promise<void> {
   await nextTick();
+  if (requestVersion !== jumpRequestVersion) {
+    return;
+  }
   alignRenderedTurnAtStart(turnId);
   if (remainingFrames > 0) {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    await settleRenderedTurnAtStart(turnId, remainingFrames - 1);
+    await settleRenderedTurnAtStart(turnId, requestVersion, remainingFrames - 1);
   }
 }
 
 function measureElement(element: unknown): void {
-  if (element instanceof Element) {
-    virtualizer.value.measureElement(element);
+  if (!(element instanceof Element)) {
+    virtualizer.value.measureElement(null);
+    return;
   }
+  // Vue invokes function refs before a newly created parent is inserted. Measuring
+  // here would cache a detached row's zero height and move the initial range.
+  void nextTick().then(() =>
+    element.isConnected ? virtualizer.value.measureElement(element) : undefined,
+  );
 }
 
 function loadingMessage(direction: "after" | "before"): string {
@@ -154,24 +225,16 @@ async function loadBefore(): Promise<void> {
   if (beforeLoadRequest !== null) {
     return beforeLoadRequest;
   }
-  const interactionVersion = jumpRequestVersion;
+  let interactionVersion = jumpRequestVersion;
   let anchor: ScrollAnchorSnapshot | null = null;
-  let estimatedAdjustment = 0;
   const request = timeline
-    .loadBefore((chunk) => {
-      if (interactionVersion === jumpRequestVersion) {
-        anchor = anchoring.capture();
-        const loadedIds = new Set(timeline.turns.value.map(({ id }) => id));
-        estimatedAdjustment =
-          chunk.turns.filter(({ id }) => !loadedIds.has(id)).length * ESTIMATED_TURN_SIZE;
-      }
+    .loadBefore(() => {
+      interactionVersion = jumpRequestVersion;
+      anchor = anchoring.capture();
     })
     .then(async () => {
       if (interactionVersion === jumpRequestVersion) {
         await nextTick();
-        if (scroller.value !== null) {
-          scroller.value.scrollTop += estimatedAdjustment;
-        }
         await anchoring.restore(anchor);
       }
       return undefined;
@@ -188,7 +251,6 @@ async function loadBefore(): Promise<void> {
 async function loadAfter(): Promise<void> {
   await timeline.loadAfter();
   await nextTick();
-  virtualizer.value.measure();
 }
 
 function updateCurrentTurn(): void {
@@ -197,7 +259,11 @@ function updateCurrentTurn(): void {
   if (container === null || rows.length === 0) {
     return;
   }
-  const readingLine = container.scrollTop + container.clientHeight * 0.3;
+  const canvasTop = virtualCanvas.value?.getBoundingClientRect().top;
+  const readingLine =
+    canvasTop === undefined
+      ? container.scrollTop + container.clientHeight * 0.3
+      : container.getBoundingClientRect().top + container.clientHeight * 0.3 - canvasTop;
   const rowIndex = activeVirtualRowIndex(rows, readingLine);
   currentTurnId.value =
     (rowIndex === null ? undefined : timeline.turns.value[rowIndex]?.id) ?? currentTurnId.value;
@@ -214,6 +280,7 @@ function handleScroll(): void {
       return;
     }
     updateCurrentTurn();
+    anchoring.remember();
     if (container.scrollTop < 560 && timeline.canLoadBefore.value) {
       void loadBefore();
     }
@@ -235,7 +302,8 @@ async function restoreDisclosureAnchor(): Promise<void> {
   disclosureAnchor = null;
 }
 
-async function jumpToTurn(turnId: string): Promise<void> {
+async function jumpToTurn(turnId: string, updateRoute = true): Promise<void> {
+  anchoring.cancel();
   const requestVersion = ++jumpRequestVersion;
   programmaticJumpVersion = requestVersion;
   try {
@@ -245,40 +313,43 @@ async function jumpToTurn(turnId: string): Promise<void> {
       await nextTick();
       focusMinimapToggle();
     }
-    let replacedTargetWindow = false;
+    if (requestVersion !== jumpRequestVersion) {
+      return;
+    }
     await timeline.loadTarget(turnId, {
       limit: props.mode === "live" ? 5 : 20,
       beforeApply: () => {
         if (requestVersion !== jumpRequestVersion) {
           return;
         }
-        virtualizer.value.measure();
         if (scroller.value !== null) {
           scroller.value.scrollTop = 0;
         }
-        replacedTargetWindow = true;
       },
     });
     if (requestVersion !== jumpRequestVersion) {
       return;
     }
     await nextTick();
-    if (replacedTargetWindow) {
-      virtualizer.value.measure();
-    }
     const index = timeline.turns.value.findIndex(({ id }) => id === turnId);
     if (index < 0) {
       return;
     }
     virtualizer.value.scrollToIndex(index, { align: "start" });
-    await settleRenderedTurnAtStart(turnId);
+    await settleRenderedTurnAtStart(turnId, requestVersion);
+    if (requestVersion !== jumpRequestVersion) {
+      return;
+    }
     currentTurnId.value = turnId;
-    await router.replace({
-      query: { ...route.query, turn: turnId },
-      hash: `#turn-${turnId}`,
-    });
+    if (updateRoute && !props.embedded) {
+      await router.replace({
+        query: { ...route.query, turn: turnId },
+        hash: `#turn-${turnId}`,
+      });
+    }
     await nextTick();
     alignRenderedTurnAtStart(turnId);
+    anchoring.remember();
   } finally {
     if (programmaticJumpVersion === requestVersion) {
       programmaticJumpVersion = null;
@@ -359,9 +430,7 @@ async function refreshLiveSession(): Promise<void> {
   }
   let anchor: ScrollAnchorSnapshot | null = null;
   await timeline.refresh(currentTurnId.value ?? undefined, () => {
-    if (interactionVersion === jumpRequestVersion) {
-      anchor = anchoring.capture();
-    }
+    anchor = anchoring.capture();
   });
   if (disposed) {
     return;
@@ -369,9 +438,7 @@ async function refreshLiveSession(): Promise<void> {
   navigatorItems.value = items;
   summaryState.value = summary;
   liveRefreshError.value = null;
-  if (interactionVersion === jumpRequestVersion) {
-    await anchoring.restore(anchor);
-  }
+  await anchoring.restore(anchor);
   if (settings.liveFollow && wasNearEnd && interactionVersion === jumpRequestVersion) {
     if (timeline.canLoadAfter.value) {
       await timeline.loadAfter();
@@ -379,11 +446,13 @@ async function refreshLiveSession(): Promise<void> {
         return;
       }
       await nextTick();
-      virtualizer.value.measure();
     }
+    anchoring.cancel();
     virtualizer.value.scrollToIndex(Math.max(0, timeline.turns.value.length - 1), {
       align: "end",
     });
+    await nextTick();
+    anchoring.remember();
   }
 }
 
@@ -428,7 +497,7 @@ async function toggleMinimapOverlay(): Promise<void> {
   await nextTick();
   if (minimapOverlayOpen.value) {
     workbench.value
-      ?.querySelector<HTMLButtonElement>('#turn-minimap-panel .turn-minimap__target[tabindex="0"]')
+      ?.querySelector<HTMLButtonElement>('.turn-minimap__target[tabindex="0"]')
       ?.focus();
   } else {
     focusMinimapToggle();
@@ -443,11 +512,73 @@ function closeMinimapOverlay(): void {
   void nextTick().then(focusMinimapToggle);
 }
 
+function handleReadInput(event: Event): void {
+  if (
+    event instanceof KeyboardEvent &&
+    !["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
+  ) {
+    return;
+  }
+  anchoring.cancel();
+  timeline.cancelTarget();
+  jumpRequestVersion += 1;
+  programmaticJumpVersion = null;
+}
+
+watch(
+  () => props.initialTargetTurnId,
+  (turnId) => {
+    if (turnId !== null && turnId !== currentTurnId.value) {
+      void jumpToTurn(turnId, false);
+    }
+  },
+);
+
+// ResizeObserver remains active after restoration, including late images and diagrams.
+watch(virtualCanvas, (canvas, previous) => {
+  if (previous !== null) {
+    layoutObserver?.unobserve(previous);
+  }
+  if (canvas !== null) {
+    layoutObserver?.observe(canvas);
+  }
+});
+
+function restoreLayoutAnchor(): void {
+  if (disposed || programmaticJumpVersion !== null) {
+    return;
+  }
+  if (layoutRestorePending) {
+    layoutRestoreQueued = true;
+    return;
+  }
+  const width = scroller.value?.clientWidth ?? 0;
+  const anchor = anchoring.snapshot ?? anchoring.capture();
+  if (layoutWidth !== null && width !== layoutWidth) {
+    virtualizer.value.measure();
+  }
+  layoutWidth = width;
+  layoutRestorePending = true;
+  void anchoring.restore(anchor).finally(() => {
+    layoutRestorePending = false;
+    if (layoutRestoreQueued) {
+      layoutRestoreQueued = false;
+      restoreLayoutAnchor();
+    }
+  });
+}
+
 onMounted(async () => {
+  layoutObserver = new ResizeObserver(restoreLayoutAnchor);
+  if (scroller.value !== null) {
+    layoutObserver.observe(scroller.value);
+  }
+  if (virtualCanvas.value !== null) {
+    layoutObserver.observe(virtualCanvas.value);
+  }
   await nextTick();
   virtualized.value = true;
   await nextTick();
-  virtualizer.value.measure();
   const initialIndex = Math.max(
     0,
     timeline.turns.value.findIndex(({ id }) => id === currentTurnId.value),
@@ -455,6 +586,11 @@ onMounted(async () => {
   virtualizer.value.scrollToIndex(initialIndex, {
     align: props.initialTargetTurnId === null ? "end" : "start",
   });
+  if (props.initialTargetTurnId !== null) {
+    await jumpToTurn(props.initialTargetTurnId, false);
+  }
+  await nextTick();
+  anchoring.remember();
   unsubscribe = repository.subscribe((event) => {
     if (event.type === "session.updated" && event.ids.includes(props.summary.id)) {
       scheduleLiveRefresh();
@@ -464,6 +600,9 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   disposed = true;
+  timeline.cancelTarget();
+  anchoring.cancel();
+  layoutObserver?.disconnect();
   unsubscribe();
   if (scrollFrame !== null) {
     cancelAnimationFrame(scrollFrame);
@@ -472,28 +611,36 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main ref="workbench" class="conversation-workbench">
+  <component
+    :is="embedded ? 'section' : 'main'"
+    ref="workbench"
+    class="conversation-workbench"
+    :class="{ 'is-embedded': embedded }"
+  >
     <header class="conversation-heading">
-      <a class="conversation-heading__back" href="/">
+      <NuxtLink v-if="!embedded" class="conversation-heading__back" to="/">
         <PhArrowLeft :size="17" weight="regular" aria-hidden="true" /> Library
-      </a>
+      </NuxtLink>
       <div class="conversation-heading__title-row">
         <div>
           <p class="conversation-heading__kicker">
             {{ summaryState.sectionName ?? summaryState.scope }} session
           </p>
-          <h1>{{ summaryState.title }}</h1>
+          <component :is="embedded ? 'h2' : 'h1'">{{ summaryState.title }}</component>
         </div>
-        <UiIconButton
-          v-if="settings.turnMinimap"
-          class="conversation-heading__minimap-toggle"
-          label="Open turn minimap"
-          controls="turn-minimap-panel"
-          :expanded="minimapOverlayOpen"
-          @click="toggleMinimapOverlay"
-        >
-          <PhSidebarSimple :size="19" weight="regular" aria-hidden="true" />
-        </UiIconButton>
+        <div class="conversation-heading__actions">
+          <slot name="actions" :summary="summaryState" />
+          <UiIconButton
+            v-if="settings.turnMinimap"
+            class="conversation-heading__minimap-toggle"
+            label="Open turn minimap"
+            :controls="minimapPanelId"
+            :expanded="minimapOverlayOpen"
+            @click="toggleMinimapOverlay"
+          >
+            <PhSidebarSimple :size="19" weight="regular" aria-hidden="true" />
+          </UiIconButton>
+        </div>
       </div>
       <div class="conversation-heading__metadata">
         <span>{{ summaryState.turnCount }} turns</span>
@@ -512,6 +659,9 @@ onBeforeUnmount(() => {
         aria-label="Conversation timeline"
         tabindex="0"
         @scroll.passive="handleScroll"
+        @wheel.passive="handleReadInput"
+        @pointerdown.capture="handleReadInput"
+        @keydown.capture="handleReadInput"
       >
         <div class="conversation-timeline__load conversation-timeline__load--before">
           <UiButton
@@ -532,7 +682,8 @@ onBeforeUnmount(() => {
           <UiButton variant="quiet" @click="scheduleLiveRefresh">Retry refresh</UiButton>
         </div>
         <div
-          v-if="virtualRows.length > 0"
+          v-if="virtualized"
+          ref="virtualCanvas"
           class="conversation-timeline__virtual"
           :style="{ height: `${virtualSize}px` }"
         >
@@ -547,6 +698,7 @@ onBeforeUnmount(() => {
             <ConversationTurn
               v-if="timeline.turns.value[row.index] !== undefined"
               :turn="timeline.turns.value[row.index]!"
+              :anchor-prefix="turnAnchorPrefix"
               :reasoning-default="settings.reasoningDefault"
               :resolve-asset="resolveAsset"
               :resolve-favicon="resolveFavicon"
@@ -556,6 +708,7 @@ onBeforeUnmount(() => {
               @resized="restoreDisclosureAnchor"
               @inspect="openInspector"
               @open-media="mediaViewer.open"
+              @open-child="emit('openChild', $event)"
             />
           </div>
         </div>
@@ -564,6 +717,7 @@ onBeforeUnmount(() => {
             v-for="turn in timeline.turns.value"
             :key="turn.id"
             :turn="turn"
+            :anchor-prefix="turnAnchorPrefix"
             :reasoning-default="settings.reasoningDefault"
             :resolve-asset="resolveAsset"
             :resolve-favicon="resolveFavicon"
@@ -571,6 +725,7 @@ onBeforeUnmount(() => {
             :timestamp-format="settings.timestampFormat"
             @inspect="openInspector"
             @open-media="mediaViewer.open"
+            @open-child="emit('openChild', $event)"
           />
         </div>
         <div class="conversation-timeline__load conversation-timeline__load--after">
@@ -588,30 +743,32 @@ onBeforeUnmount(() => {
 
       <div
         v-if="settings.turnMinimap"
-        id="turn-minimap-panel"
+        :id="minimapPanelId"
         class="conversation-stage__minimap"
         :class="minimapOverlayOpen ? 'is-open' : null"
         @keydown.esc.stop="closeMinimapOverlay"
       >
         <TurnMinimap
-          :items="[...navigatorItems]"
+          :items="navigatorItems"
           :current-turn-id="currentTurnId"
           :pending-turn-id="timeline.pendingTurnId.value"
           :error-turn-id="timeline.targetErrorTurnId.value"
-          @select="jumpToTurn"
+          @select="jumpToTurn($event)"
         />
       </div>
 
       <ConversationInspector
         v-if="inspectorOpen"
         :record="inspectorRecord"
+        :activities="inspectorActivities"
+        @inspect="openInspector"
         :loading="inspectorLoading"
         :error="inspectorError"
         @close="closeInspector"
         @retry="loadInspector"
       />
     </section>
-  </main>
+  </component>
   <MediaViewer
     v-if="mediaViewer.item.value !== null"
     :item="mediaViewer.item.value"
@@ -619,3 +776,15 @@ onBeforeUnmount(() => {
     @close="mediaViewer.close"
   />
 </template>
+
+<style scoped>
+.conversation-heading__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.conversation-workbench.is-embedded {
+  height: 100%;
+  min-height: 0;
+}
+</style>

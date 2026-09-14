@@ -366,14 +366,16 @@ describe("favicon resolution", () => {
       ).resolves.toMatchObject({ status: "available", source: "origin" });
       expect(refreshed).toHaveBeenCalled();
 
+      const beforeMissingFile = refreshed.mock.calls.length;
       await rm(root, { recursive: true, force: true });
-      await expect(
-        resolveFavicon(database, "https://throws.example/file-gone", {
-          mode: "export",
-          faviconRoot: root,
-          client: refreshed,
-        }),
-      ).resolves.toMatchObject({ status: "available" });
+      const restored = await resolveFavicon(database, "https://throws.example/file-gone", {
+        mode: "export",
+        faviconRoot: root,
+        client: refreshed,
+      });
+      expect(restored).toMatchObject({ status: "available" });
+      expect(refreshed.mock.calls.length).toBeGreaterThan(beforeMissingFile);
+      expect(await readFile(restored.cachePath!)).toEqual(pixel);
     } finally {
       database.close();
     }

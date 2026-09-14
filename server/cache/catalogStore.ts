@@ -1,4 +1,5 @@
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   resolveConversationProject,
@@ -17,6 +18,11 @@ import {
   type MaterializationState,
 } from "../../shared/types/library.ts";
 import type { CursorPage, SessionListQuery } from "../../shared/types/repository.ts";
+import {
+  CATALOG_EVIDENCE_VERSION,
+  sessionMetaEvidenceSchema,
+  type SessionMetaEvidence,
+} from "../ingestion/sessionMetaPrefix.ts";
 import { withCacheTransaction } from "./database.ts";
 import { SEED_CATALOG_FROM_SESSIONS_SQL } from "./schema.ts";
 
@@ -38,6 +44,7 @@ export interface CatalogSessionInput {
   sourceInode: string | null;
   sourceRevision: string;
   error: string | null;
+  structuralEvidence?: SessionMetaEvidence | null;
 }
 
 export interface CatalogSessionRecord extends Omit<CatalogSessionInput, "summary" | "project"> {
@@ -122,6 +129,10 @@ function catalogRecord(row: Record<string, SQLOutputValue>): CatalogSessionRecor
     sourceInode: nullableText(row, "source_inode"),
     sourceRevision: requiredText(row, "source_revision"),
     error: nullableText(row, "error"),
+    structuralEvidence:
+      row["structural_evidence_json"] === null
+        ? null
+        : sessionMetaEvidenceSchema.parse(parsedJson(row["structural_evidence_json"])),
   };
 }
 
@@ -131,8 +142,8 @@ const UPSERT_CATALOG_SQL = `
     session_kind, materialization_state, title, created_at, updated_at, cwd,
     git_origin_url, parent_thread_id, agent_path, agent_nickname, agent_depth,
     child_count, source_size, source_mtime_ms, source_device, source_inode,
-    source_revision, error, summary_json
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_revision, error, summary_json, structural_evidence_json
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(id) DO UPDATE SET
     source_path = excluded.source_path,
     scope = excluded.scope,
@@ -170,7 +181,8 @@ const UPSERT_CATALOG_SQL = `
       THEN session_catalog.error
       ELSE excluded.error
     END,
-    summary_json = excluded.summary_json
+    summary_json = excluded.summary_json,
+    structural_evidence_json = excluded.structural_evidence_json
 `;
 
 function writeCatalogSession(
@@ -206,26 +218,29 @@ function writeCatalogSession(
     input.sourceRevision,
     input.error,
     json(summary),
+    input.structuralEvidence == null ? null : json(input.structuralEvidence),
   );
 }
 
 export function upsertCatalogSessions(
   database: DatabaseSync,
   inputs: readonly CatalogSessionInput[],
+  existingRows?: readonly CatalogSessionRecord[],
 ): string[] {
   return withCacheTransaction(database, () => {
     const existingById = new Map(
-      database
-        .prepare("SELECT * FROM session_catalog")
-        .all()
-        .map((row) => {
-          const record = catalogRecord(row);
-          return [record.summary.id, record] as const;
-        }),
+      (existingRows ?? listAllCatalogSessions(database)).map((record) => [
+        record.summary.id,
+        record,
+      ]),
     );
     const statement = database.prepare(UPSERT_CATALOG_SQL);
     const changedIds: string[] = [];
-    for (const input of inputs) {
+    for (const originalInput of inputs) {
+      const input = {
+        ...originalInput,
+        structuralEvidence: originalInput.structuralEvidence ?? null,
+      };
       const existing = existingById.get(input.summary.id);
       const effectiveInput =
         input.materialization === "cold" &&
@@ -248,7 +263,7 @@ export function upsertCatalogSessions(
               },
             }
           : input;
-      if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(effectiveInput)) {
+      if (existing !== undefined && isDeepStrictEqual(existing, effectiveInput)) {
         continue;
       }
       writeCatalogSession(statement, effectiveInput);
@@ -285,6 +300,14 @@ function likeValue(value: string): string {
 }
 
 function listConditions(query: SessionListQuery): { sql: string; values: Array<string | number> } {
+  // Root filters choose trees. Explicit expansion reveals every direct ordinary child,
+  // including children whose actual project, archive scope, model or tools differ.
+  if (query.parentThreadId !== undefined && query.parentThreadId !== ROOT_PARENT_SENTINEL) {
+    return {
+      sql: "c.session_kind = 'subagent' AND c.parent_thread_id = ?",
+      values: [query.parentThreadId],
+    };
+  }
   const conditions = ["c.scope = ?", "c.session_kind <> 'auxiliary'"];
   const values: Array<string | number> = [query.scope];
   if (query.projectId !== undefined) {
@@ -482,6 +505,61 @@ export function markCatalogSessionReady(
     return false;
   }
   if (existing !== null) {
+    if (
+      expected !== undefined &&
+      (existing.sourceRevision !== expected.sourceRevision ||
+        existing.summary.sourcePath !== expected.sourcePath)
+    ) {
+      return false;
+    }
+    // Full parsing may recover a declaration whose first record exceeded the startup cap.
+    // Never replace a successfully parsed rollout declaration with optional normalization data.
+    const recoveredParent =
+      existing.structuralEvidence?.status !== "found" && summary.parentThreadId !== null
+        ? catalogSession(database, summary.parentThreadId)
+        : null;
+    if (existing.structuralEvidence?.status !== "found" && summary.parentThreadId !== null) {
+      existing.structuralEvidence = {
+        version: CATALOG_EVIDENCE_VERSION,
+        origin: "materialized",
+        status: "found",
+        parentThreadIdHint: summary.parentThreadId,
+        meta: {
+          id: summary.id,
+          parentThreadId: summary.parentThreadId,
+          timestamp: summary.createdAt,
+          cwd: summary.cwd,
+          source: null,
+          modelProvider: null,
+          git: {
+            branch: summary.gitBranch,
+            commitHash: summary.gitSha,
+            repositoryUrl: summary.gitOriginUrl,
+          },
+        },
+      };
+    }
+    const recovered =
+      recoveredParent !== null &&
+      recoveredParent.kind !== "auxiliary" &&
+      recoveredParent.summary.id !== summary.id;
+    if (recovered) {
+      // Reject an edge back into the child's own ancestry before changing the effective graph.
+      const visited = new Set([summary.id]);
+      let ancestor: CatalogSessionRecord | null = recoveredParent;
+      while (ancestor !== null && !visited.has(ancestor.summary.id)) {
+        visited.add(ancestor.summary.id);
+        ancestor =
+          ancestor.parentThreadId === null
+            ? null
+            : catalogSession(database, ancestor.parentThreadId);
+      }
+      if (ancestor === null) {
+        existing.kind = "subagent";
+        existing.parentThreadId = recoveredParent.summary.id;
+        existing.agentDepth = (recoveredParent.agentDepth ?? 0) + 1;
+      }
+    }
     summary = {
       ...summary,
       parentThreadId: existing.parentThreadId,
@@ -519,6 +597,22 @@ export function markCatalogSessionReady(
                 AND session_kind <> 'auxiliary'
             `)
             .run(...values, expected.sourceRevision, expected.sourcePath);
+    if (result.changes === 1 && existing.structuralEvidence?.origin === "materialized") {
+      database
+        .prepare(
+          "UPDATE session_catalog SET session_kind = ?, agent_depth = ?, structural_evidence_json = ? WHERE id = ?",
+        )
+        .run(existing.kind, existing.agentDepth, json(existing.structuralEvidence), summary.id);
+      if (recoveredParent !== null && existing.parentThreadId === recoveredParent.summary.id) {
+        const childIds = listCatalogChildren(database, recoveredParent.summary.id)
+          .map(({ summary: child }) => child.id)
+          .toSorted();
+        const parentSummary = { ...recoveredParent.summary, childThreadIds: childIds };
+        database
+          .prepare("UPDATE session_catalog SET child_count = ?, summary_json = ? WHERE id = ?")
+          .run(childIds.length, json(parentSummary), recoveredParent.summary.id);
+      }
+    }
     return result.changes === 1;
   }
   if (expected !== undefined) {
@@ -542,9 +636,10 @@ export function markCatalogSessionReady(
   if (source === undefined) {
     throw new Error(`Cannot mark uncataloged session ${summary.id} ready without its source.`);
   }
-  const project =
-    parent?.project ??
-    resolveConversationProject({ cwd: summary.cwd, gitOriginUrl: summary.gitOriginUrl }, []);
+  const project = resolveConversationProject(
+    { cwd: summary.cwd, gitOriginUrl: summary.gitOriginUrl },
+    [],
+  );
   const statement = database.prepare(UPSERT_CATALOG_SQL);
   writeCatalogSession(statement, {
     summary,

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { PhDownloadSimple, PhFile, PhImageBroken } from "@phosphor-icons/vue";
-import { computed, onMounted, ref, shallowRef } from "vue";
+import { computed, onMounted, ref, shallowRef, watch } from "vue";
 
 import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type { RichTextMediaNode } from "#shared/types/richText.ts";
@@ -36,22 +36,37 @@ const available = computed(
   () => asset.value?.status === "available" && asset.value.url !== null && !failed.value,
 );
 
-onMounted(async () => {
-  if (props.node.source !== "asset") {
-    loading.value = false;
-    return;
-  }
-  if (props.node.assetId === null || props.resolveAsset === undefined) {
-    loading.value = false;
-    return;
-  }
-  try {
-    asset.value = await props.resolveAsset(props.node.assetId);
-  } catch {
-    failed.value = true;
-  } finally {
-    loading.value = false;
-  }
+onMounted(() => {
+  watch(
+    () => [props.node.source, props.node.assetId, props.resolveAsset] as const,
+    async ([source, assetId, resolveAsset], _, onCleanup) => {
+      let current = true;
+      onCleanup(() => {
+        current = false;
+      });
+      asset.value = null;
+      failed.value = false;
+      loading.value = source === "asset" && assetId !== null && resolveAsset !== undefined;
+      if (!loading.value || assetId === null || resolveAsset === undefined) {
+        return;
+      }
+      try {
+        const resolved = await resolveAsset(assetId);
+        if (current) {
+          asset.value = resolved;
+        }
+      } catch {
+        if (current) {
+          failed.value = true;
+        }
+      } finally {
+        if (current) {
+          loading.value = false;
+        }
+      }
+    },
+    { immediate: true },
+  );
 });
 
 function openImage(): void {

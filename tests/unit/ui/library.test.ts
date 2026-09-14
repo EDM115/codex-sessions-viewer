@@ -202,6 +202,7 @@ describe("library presentation components", () => {
         hits: [
           {
             sessionId: "session/1",
+            parentThreadId: "parent/1",
             turnId: "turn 3",
             messageId: null,
             scope: "active",
@@ -220,6 +221,8 @@ describe("library presentation components", () => {
     expect(wrapper.get("mark").text()).toBe("viewer");
     expect(wrapper.find("script").exists()).toBe(false);
     expect(wrapper.text()).toContain("<script> stays read-only.");
+    expect(wrapper.text()).toContain("Subagent ·");
+    expect(wrapper.get('a[href="/session/parent%2F1"]').text()).toBe("Open parent conversation");
   });
 
   it("marks the selected session and supports arrow-key focus movement", async () => {

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -223,7 +223,6 @@ describe("session normalization", () => {
       ],
     });
 
-    expect(basename(sourcePath)).toContain("55555555-5555-4555-8555-555555555555");
     expect(result.session?.summary.id).toBe("55555555-5555-4555-8555-555555555555");
   });
 

@@ -13,7 +13,7 @@ import {
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import { representativeLargeSession } from "../../performance/fixtures.ts";
 
-async function cachedFixture(turnCount?: number) {
+async function cachedFixture(turnCount?: number, rootFilters = false) {
   const source = await normalizedRolloutFixture({
     name: "modern.jsonl",
     sourcePath: "C:/fixtures/repository-store.jsonl",
@@ -25,6 +25,9 @@ async function cachedFixture(turnCount?: number) {
   session.summary.models = ["gpt-test"];
   session.summary.toolCounts = { shell: 2 };
   session.summary.hasMedia = true;
+  if (rootFilters) {
+    session.summary.parentThreadId = null;
+  }
   const database = openCacheDatabase(":memory:");
   if (session.summary.parentThreadId !== null) {
     const parentSummary = {
@@ -71,7 +74,7 @@ async function cachedFixture(turnCount?: number) {
 
 describe("bounded cache repository", () => {
   it("applies every session filter and cursor boundary without loading conversation rows", async () => {
-    const { database, session } = await cachedFixture();
+    const { database, session } = await cachedFixture(undefined, true);
     try {
       const parentThreadId = session.summary.parentThreadId ?? "__root__";
       for (const query of [
@@ -113,15 +116,16 @@ describe("bounded cache repository", () => {
   });
 
   it("builds navigator previews and every prose bucket from message columns", async () => {
-    const { database, session } = await cachedFixture(5);
+    const { database, session } = await cachedFixture(7);
     try {
-      const lengths = [100, 500, 1_500, 4_000];
+      // Nine assistant characters put the totals on and immediately above each boundary.
+      const lengths = [271, 272, 991, 992, 2_991, 2_992];
       for (const [index, length] of lengths.entries()) {
         const turn = session.turns[index]!;
-        turn.userMessage!.sourceMarkdown = `${"p".repeat(length)}\n prompt`;
+        turn.userMessage!.sourceMarkdown = "p".repeat(length);
         turn.assistantMessages[0]!.sourceMarkdown = " response";
       }
-      const emptyTurn = session.turns[4]!;
+      const emptyTurn = session.turns[6]!;
       emptyTurn.userMessage = null;
       emptyTurn.assistantMessages = [];
       emptyTurn.startedAt = null;
@@ -132,14 +136,16 @@ describe("bounded cache repository", () => {
       });
 
       const navigator = getCachedTurnNavigator(database, session.summary.id)!;
-      expect(navigator.map(({ proseLengthBucket }) => proseLengthBucket)).toEqual([1, 2, 3, 4, 1]);
+      expect(navigator.map(({ proseLengthBucket }) => proseLengthBucket)).toEqual([
+        1, 2, 2, 3, 3, 4, 1,
+      ]);
       expect(navigator[0]).toMatchObject({
         userMessageId: session.turns[0]!.userMessage!.id,
-        promptPreview: `${"p".repeat(100)} prompt`,
+        promptPreview: `${"p".repeat(159)}…`,
         assistantPreview: "response",
       });
       expect(navigator[3]!.promptPreview).toMatch(/…$/u);
-      expect(navigator[4]!).toMatchObject({
+      expect(navigator[6]!).toMatchObject({
         userMessageId: null,
         promptPreview: "",
         assistantPreview: "",

@@ -51,6 +51,7 @@ export interface RichTextLinkNode {
   url: string;
   origin: string | null;
   title: string | null;
+  attributes?: Record<string, RichTextAttribute>;
   children: RichTextNode[];
 }
 
@@ -189,6 +190,7 @@ export const richTextNodeSchema: z.ZodType<RichTextNode> = z.lazy(() =>
       url: z.string(),
       origin: z.string().nullable(),
       title: z.string().nullable(),
+      attributes: z.record(z.string(), richTextAttributeSchema).optional(),
       children: z.array(richTextNodeSchema),
     }),
     z.strictObject({

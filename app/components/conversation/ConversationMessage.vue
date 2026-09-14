@@ -8,12 +8,14 @@ import type { PresentationSettings } from "#shared/types/settings.ts";
 
 import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
 import RichTextRenderer from "../content/RichTextRenderer.vue";
+import ConversationAttachment from "./ConversationAttachment.vue";
 import CopyIconButton from "./CopyIconButton.vue";
 import { formatDuration, formatTimestamp } from "./format.ts";
+import { bodyAssetIds } from "./toolPresentation.ts";
 
 const props = withDefaults(
   defineProps<{
-    agentWork?: string;
+    agentWork?: string | (() => string);
     durationMs?: number | null;
     message: ConversationMessage;
     resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
@@ -28,6 +30,11 @@ const emit = defineEmits<{
   openMedia: [item: MediaViewerItem];
 }>();
 
+const attachmentIds = computed(() =>
+  [...new Set(props.message.attachmentIds)].filter(
+    (id) => !bodyAssetIds(props.message.body).has(id),
+  ),
+);
 const menuOpen = ref(false);
 const workCopyState = ref<"default" | "error" | "success">("default");
 let resetTimer: ReturnType<typeof setTimeout> | null = null;
@@ -36,8 +43,13 @@ const duration = computed(() => formatDuration(props.durationMs));
 const timestamp = computed(() => formatTimestamp(props.message.createdAt, props.timestampFormat));
 
 async function copyAgentWork(): Promise<void> {
+  if (resetTimer !== null) {
+    clearTimeout(resetTimer);
+  }
   try {
-    await navigator.clipboard.writeText(props.agentWork);
+    await navigator.clipboard.writeText(
+      typeof props.agentWork === "function" ? props.agentWork() : props.agentWork,
+    );
     workCopyState.value = "success";
     menuOpen.value = false;
     resetTimer = setTimeout(() => {
@@ -71,6 +83,13 @@ onBeforeUnmount(() => {
         @open-media="emit('openMedia', $event)"
       />
     </div>
+    <ConversationAttachment
+      v-for="id in attachmentIds"
+      :key="id"
+      :asset-id="id"
+      :resolve-asset="resolveAsset"
+      @open-media="emit('openMedia', $event)"
+    />
     <footer class="conversation-message__footer">
       <time :datetime="message.createdAt" data-allow-mismatch="text">{{ timestamp }}</time>
       <span v-if="duration !== null" class="tabular">{{ duration }}</span>

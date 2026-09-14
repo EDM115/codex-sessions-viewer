@@ -221,7 +221,7 @@ function reviewedInput(value: JsonValue): JsonValue {
   return argumentsValue === undefined ? value : (argumentsValue as JsonValue);
 }
 
-function actionHash(value: JsonValue): string {
+export function guardianActionHash(value: JsonValue): string {
   return createHash("sha256")
     .update(JSON.stringify(normalizedJson(reviewedInput(value))))
     .digest("hex");
@@ -244,12 +244,12 @@ export function matchGuardianEvidence(
 ): Map<string, GuardianApprovalEvidence> {
   const toolsByHash = new Map<string, ToolActivity[]>();
   for (const tool of tools) {
-    const hash = actionHash(tool.input);
+    const hash = guardianActionHash(tool.input);
     toolsByHash.set(hash, [...(toolsByHash.get(hash) ?? []), tool]);
   }
   const matches = new Map<string, GuardianApprovalEvidence>();
   for (const review of reviews) {
-    const candidates = toolsByHash.get(actionHash(review.reviewedAction)) ?? [];
+    const candidates = toolsByHash.get(guardianActionHash(review.reviewedAction)) ?? [];
     if (candidates.length === 1 && !matches.has(candidates[0]!.id)) {
       matches.set(candidates[0]!.id, approval(review));
     }

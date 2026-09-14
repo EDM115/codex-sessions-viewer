@@ -6,8 +6,8 @@ The viewer never writes, renames, locks, migrates, or deletes anything under the
 
 ## Requirements
 
-- Node.js 26.7 or newer on the Node 26 release line
-- PNPM 11.21.0
+- Node.js 26; the project pins Node 26.8.1 for its commands
+- PNPM 11.26.0
 - Windows, macOS, or Linux; Windows is the primary acceptance platform
 
 Install the exact locked dependencies:
@@ -20,9 +20,10 @@ PNPM can provision the Node runtime declared by the package when the active syst
 
 ## Quick start
 
-Start the live viewer on the loopback interface:
+Build the application, then start the live viewer on the loopback interface:
 
 ```powershell
+pnpm build
 pnpm live
 ```
 
@@ -43,10 +44,10 @@ Then open `http://127.0.0.1:3000`. Static output requires this local HTTP server
 ### Live viewer
 
 ```powershell
-pnpm live [--codex-home <path>] [--port <number>]
+pnpm live [--codex-home <path>] [--media-root <path>] [--port <number>]
 ```
 
-The server binds only to `127.0.0.1`. It uses cached data immediately when possible, watches active and archived rollouts, coalesces changes, and broadcasts local invalidations over SSE. A Codex JSONL file may be mid-append; only complete stable records are exposed. Visible preparation and explicit opens share a serialized priority queue, so full transcript normalization never fans out across the archive.
+The command runs the production server from `.output-live/server/index.mjs`; run `pnpm build` again after changing application source or dependencies. If `CODEX_VIEWER_BUILD_OUTPUT` selects another build directory, use the same value for both commands. The server binds only to `127.0.0.1`. It uses cached data immediately when possible, watches active and archived rollouts, coalesces changes, and broadcasts local invalidations over SSE. A Codex JSONL file may be mid-append; only complete stable records are exposed. Visible preparation and explicit opens share a serialized priority queue, so full transcript normalization never fans out across the archive. Repeat `--media-root` to trust more than one attachment directory.
 
 Library folders are derived from Codex project metadata, git origins, and working directories. Root conversations appear directly in their project; subagents are nested below their parent at any depth. `codex-auto-review` rollouts are auxiliary approval evidence rather than conversations: they are excluded from counts, routes, folders, and model filters, while an unambiguous allow/deny result remains attached to the reviewed tool call.
 
@@ -126,6 +127,7 @@ Presentation preferences such as theme, disclosure defaults, timestamps, code wr
 ## Development and verification
 
 The source follows Nuxt 4 ownership boundaries: browser code in `app/`, server-only code in `server/`, universal contracts and algorithms in `shared/`, Jiti command entrypoints in `scripts/`, and verification in `tests/`.
+Start development with hot reload using `pnpm dev`. It accepts the same `--codex-home`, repeatable `--media-root`, and `--port` options as `pnpm live`, and binds to the same loopback interface. `pnpm live --dev` is equivalent.
 
 Run the normal source checks with:
 

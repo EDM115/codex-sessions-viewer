@@ -73,7 +73,7 @@ interface ConversionContext {
   embeddedMedia: Map<string, EmbeddedMediaSource>;
 }
 
-function annotateMarkdown() {
+function annotateMarkdown(markdown: string) {
   return (tree: MdastRoot): void => {
     const visit = (node: MdastRoot | MdastRootContent): void => {
       if (node.type === "code") {
@@ -90,10 +90,21 @@ function annotateMarkdown() {
           dataOriginalSrc: node.url,
         };
       } else if (node.type === "link" && node.url !== undefined) {
+        const source = markdown.slice(node.position?.start.offset, node.position?.end.offset);
+        const destination = source
+          .slice(source.lastIndexOf("](") + 2)
+          .match(/^(?:<([^>]+)>|([^\s)]+))/u);
+        const literal = destination?.[1] ?? destination?.[2];
+        // CommonMark unescapes the leading pair of UNC backslashes. Restore that
+        // prefix only; the parsed destination handles balanced parentheses/titles.
+        const href =
+          literal?.startsWith("\\\\") && node.url.startsWith("\\") && !node.url.startsWith("\\\\")
+            ? `\\${node.url}`
+            : node.url;
         node.data = node.data ?? {};
         node.data.hProperties = {
           ...node.data.hProperties,
-          dataOriginalHref: node.url,
+          dataOriginalHref: href,
         };
       }
       if ("children" in node) {
@@ -157,6 +168,10 @@ function canonicalLink(
   href: string,
   baseUrl: string | undefined,
 ): { url: string; origin: string | null } | null {
+  // A drive letter is a filesystem prefix, even though URL parses it as a scheme.
+  if (/^(?:[a-z]:[\\/]|\\\\)/iu.test(href) || href.startsWith("#")) {
+    return { url: href, origin: null };
+  }
   try {
     const url = baseUrl === undefined ? new URL(href) : new URL(href, baseUrl);
     if (url.protocol === "http:" || url.protocol === "https:") {
@@ -307,8 +322,19 @@ async function convertNode(
       node.children.find(
         (child): child is Element => child.type === "element" && child.tagName === "code",
       ) ?? node;
-    const language = property(code.properties, "dataLanguage", "data-language") || null;
-    const source = textContent(code).replace(/\n$/u, "");
+    const annotatedLanguage = property(code.properties, "dataLanguage", "data-language");
+    const classes: unknown = code.properties.className;
+    const languageClass = (
+      Array.isArray(classes) ? classes : typeof classes === "string" ? classes.split(/\s+/u) : []
+    ).find((value) => typeof value === "string" && /^language-[\w+-]+$/u.test(value));
+    const language =
+      annotatedLanguage !== null
+        ? annotatedLanguage || null
+        : typeof languageClass === "string"
+          ? languageClass.slice("language-".length)
+          : null;
+    const source =
+      annotatedLanguage !== null ? textContent(code).replace(/\n$/u, "") : textContent(code);
     if (language?.toLowerCase() === "mermaid") {
       return [{ type: "mermaid", source }];
     }
@@ -328,7 +354,15 @@ async function convertNode(
     const link = href === null ? null : canonicalLink(href, context.options.baseUrl);
     return link === null
       ? children
-      : [{ type: "link", ...link, title: property(node.properties, "title"), children }];
+      : [
+          {
+            type: "link",
+            ...link,
+            title: property(node.properties, "title"),
+            attributes: safeAttributes(node.properties),
+            children,
+          },
+        ];
   }
   if (node.tagName === "img") {
     return [mediaNode(node, context)];
@@ -363,11 +397,12 @@ export async function parseRichText(
   const processor = unified()
     .use(remarkParse)
     .use(remarkGfm)
-    .use(annotateMarkdown)
-    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(annotateMarkdown, markdown)
+    .use(remarkRehype, { allowDangerousHtml: true, clobberPrefix: "" })
     .use(rehypeRaw)
     .use(rehypeSanitize, richTextSanitizeSchema);
   const tree: HastRoot = await processor.run(processor.parse(markdown));
+  normalizeAnchorReferences(tree);
   const context: ConversionContext = { options, embeddedMedia: new Map() };
   return {
     document: richTextDocumentSchema.parse({
@@ -376,4 +411,48 @@ export async function parseRichText(
     }),
     embeddedMedia: [...context.embeddedMedia.values()],
   };
+}
+
+// Sanitization prefixes IDs. Rewrite references with the same mapping, including
+// generated footnote references/backlinks, before the renderer scopes each document.
+function normalizeAnchorReferences(tree: HastRoot): void {
+  const elements: Element[] = [];
+  function visit(node: HastRoot | HastRootContent): void {
+    if (node.type === "element") {
+      elements.push(node);
+    }
+    if ("children" in node) {
+      node.children.forEach(visit);
+    }
+  }
+  visit(tree);
+  const ids = new Map<string, string>();
+  for (const element of elements) {
+    const id = property(element.properties, "id");
+    if (id !== null) {
+      ids.set(id, id);
+      ids.set(id.replace(/^user-content-/u, ""), id);
+    }
+  }
+  for (const element of elements) {
+    for (const key of ["href", "dataOriginalHref"]) {
+      const value = property(element.properties, key);
+      if (value?.startsWith("#") && ids.has(value.slice(1))) {
+        element.properties[key] = `#${ids.get(value.slice(1))!}`;
+      }
+    }
+    for (const key of ["ariaDescribedBy", "ariaLabelledBy"]) {
+      const value = element.properties[key];
+      if (Array.isArray(value)) {
+        element.properties[key] = value.map((id) =>
+          typeof id === "string" ? (ids.get(id) ?? id) : id,
+        );
+      } else if (typeof value === "string") {
+        element.properties[key] = value
+          .split(/\s+/u)
+          .map((id) => ids.get(id) ?? id)
+          .join(" ");
+      }
+    }
+  }
 }

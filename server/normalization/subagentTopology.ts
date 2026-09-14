@@ -1,4 +1,66 @@
-import type { SubagentActivity } from "../../shared/types/conversation.ts";
+import {
+  jsonValueSchema,
+  type JsonValue,
+  type SubagentActivity,
+} from "../../shared/types/conversation.ts";
+
+export interface SessionStructure {
+  kind: "root" | "subagent" | "auxiliary";
+  parentThreadId: string | null;
+  agentPath: string | null;
+  agentNickname: string | null;
+  agentDepth: number | null;
+}
+
+function record(value: JsonValue | null | undefined): Record<string, JsonValue> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function text(recordValue: Record<string, JsonValue> | null, key: string): string | null {
+  const value = recordValue?.[key];
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+/** Rollout declarations outrank optional state. Fork lineage is not a delegated-child edge. */
+export function classifySessionStructure(options: {
+  source: JsonValue | null;
+  parentThreadId?: string | null | undefined;
+  threadModel?: string | null | undefined;
+  fallbackSource?: string | null | undefined;
+  parentThreadIdHint?: string | null | undefined;
+}): SessionStructure {
+  let source = options.source;
+  if (source === null && options.fallbackSource) {
+    try {
+      const parsed = jsonValueSchema.safeParse(JSON.parse(options.fallbackSource));
+      source = parsed.success ? parsed.data : null;
+    } catch {
+      // Optional SQLite source strings may be legacy plain text or incomplete.
+    }
+  }
+  const subagent = record(record(source)?.["subagent"]);
+  const spawn = record(subagent?.["thread_spawn"]);
+  const parent =
+    options.parentThreadId ?? text(spawn, "parent_thread_id") ?? text(subagent, "parent_thread_id");
+  if (text(subagent, "other") === "guardian" || options.threadModel === "codex-auto-review") {
+    return {
+      kind: "auxiliary",
+      parentThreadId: parent ?? options.parentThreadIdHint ?? null,
+      agentPath: null,
+      agentNickname: null,
+      agentDepth: null,
+    };
+  }
+  const depth = spawn?.["depth"];
+  return {
+    kind: spawn !== null || parent !== null ? "subagent" : "root",
+    parentThreadId: parent,
+    agentPath: text(spawn, "agent_path"),
+    agentNickname: text(spawn, "agent_nickname"),
+    agentDepth:
+      typeof depth === "number" && Number.isSafeInteger(depth) && depth >= 0 ? depth : null,
+  };
+}
 
 export interface SubagentTopologyNode {
   id: string;

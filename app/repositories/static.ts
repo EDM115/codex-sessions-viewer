@@ -124,6 +124,9 @@ function includes(value: string | null, query: string): boolean {
 }
 
 function matchesSession(item: ConversationListItem, query: SessionListQuery): boolean {
+  if (query.parentThreadId !== undefined && query.parentThreadId !== "__root__") {
+    return item.kind === "subagent" && item.parentThreadId === query.parentThreadId;
+  }
   const session = item.summary;
   if (session.scope !== query.scope) {
     return false;
@@ -216,6 +219,7 @@ async function pagefindHit(
   const turnId = meta?.["turnId"];
   const title = meta?.["title"];
   const messageId = meta?.["messageId"];
+  const parentThreadId = meta?.["parentThreadId"];
   if (typeof sessionId !== "string" || typeof turnId !== "string" || typeof title !== "string") {
     return null;
   }
@@ -224,6 +228,7 @@ async function pagefindHit(
   }
   return {
     sessionId,
+    ...(typeof parentThreadId === "string" && parentThreadId !== "" ? { parentThreadId } : {}),
     turnId,
     messageId: messageId ?? null,
     scope,

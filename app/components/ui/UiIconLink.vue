@@ -11,14 +11,15 @@ defineProps<{
 <template>
   <UiTooltip :text="tooltip ?? label">
     <template #default="{ tooltipId }">
-      <a
+      <NuxtLink
         class="ui-icon-button interactive-control"
-        :href="href"
+        :to="href"
+        :prefetch="false"
         :aria-label="label"
         :aria-describedby="tooltipId"
       >
         <slot />
-      </a>
+      </NuxtLink>
     </template>
   </UiTooltip>
 </template>

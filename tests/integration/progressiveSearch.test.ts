@@ -154,7 +154,12 @@ describe("progressive live search", () => {
       ).resolves.toMatchObject({
         items: [
           expect.objectContaining({
-            summary: expect.objectContaining({ title: "Indexed session title", pinned: true }),
+            summary: expect.objectContaining({
+              id: "11111111-1111-4111-8111-000000000001",
+              title: "Indexed session title",
+              pinned: true,
+            }),
+            projectId: "codex:viewer",
           }),
         ],
         total: 1,
@@ -187,6 +192,12 @@ describe("progressive live search", () => {
       await expect(
         runtime.repository.search({ scope: "active", query: "parser", limit: 20 }),
       ).resolves.toMatchObject({ total: 1 });
+      expect(
+        (
+          await runtime.repository.search({ scope: "active", query: "parser", limit: 20 })
+        ).items.map(({ sessionId, turnId }) => ({ sessionId, turnId })),
+      ).toEqual([{ sessionId: readyId, turnId: "turn-1" }]);
+      expect(runtime.database.prepare("SELECT id FROM sessions").all()).toEqual([{ id: readyId }]);
       expect(readJsonl).toHaveBeenCalledOnce();
 
       const started = await runtime.repository.startDeepSearch({
@@ -204,6 +215,20 @@ describe("progressive live search", () => {
         });
       });
       expect(readJsonl).toHaveBeenCalledTimes(3);
+      expect(runtime.database.prepare("SELECT id FROM sessions ORDER BY id").all()).toEqual([
+        { id: "11111111-1111-4111-8111-000000000001" },
+        { id: "11111111-1111-4111-8111-000000000002" },
+        { id: "11111111-1111-4111-8111-000000000003" },
+      ]);
+      expect(
+        (await runtime.repository.search({ scope: "active", query: "parser", limit: 20 })).items
+          .map(({ sessionId, turnId }) => ({ sessionId, turnId }))
+          .toSorted((a, b) => a.sessionId.localeCompare(b.sessionId)),
+      ).toEqual([
+        { sessionId: "11111111-1111-4111-8111-000000000001", turnId: "turn-1" },
+        { sessionId: "11111111-1111-4111-8111-000000000002", turnId: "turn-1" },
+        { sessionId: "11111111-1111-4111-8111-000000000003", turnId: "turn-1" },
+      ]);
       expect(
         events.filter(({ type, ids }) => type === "search.updated" && ids.includes(started.id))
           .length,
@@ -240,10 +265,20 @@ describe("progressive live search", () => {
       await vi.waitFor(async () => {
         await expect(runtime.repository.getDeepSearch(job.id)).resolves.toMatchObject({
           state: "cancelled",
+          completed: 1,
+          failed: 0,
         });
       });
-      await vi.waitFor(() => expect(readJsonl).toHaveBeenCalledOnce());
+      // Let the completed worker's continuation attempt its next iteration before checking cancellation.
+      await new Promise<void>((resolve) => setImmediate(resolve));
       expect(readJsonl).toHaveBeenCalledOnce();
+      const materializedPath = readJsonl.mock.calls[0]![0];
+      const materializedId = runtime.database
+        .prepare("SELECT id FROM session_catalog WHERE source_path = ?")
+        .get(materializedPath)?.["id"];
+      expect(runtime.database.prepare("SELECT id FROM sessions").all()).toEqual([
+        { id: materializedId },
+      ]);
     } finally {
       releaseFirst();
       await runtime.close();
@@ -316,7 +351,7 @@ describe("progressive live search", () => {
     }
   });
 
-  it("reuses unchanged source manifests but refuses a missing normalized cache row", async () => {
+  it("reuses unchanged source manifests and rebuilds a missing normalized cache row", async () => {
     const readJsonl = vi.fn<StableJsonlReader>(readStableJsonl);
     const runtime = await startRuntime(1, readJsonl);
 
@@ -344,11 +379,11 @@ describe("progressive live search", () => {
       await expect(runtime.repository.prepareSessions([id])).resolves.toEqual([
         {
           id,
-          state: "failed",
-          error: "The source was unchanged but no normalized conversation is available.",
+          state: "ready",
+          error: null,
         },
       ]);
-      expect(readJsonl).toHaveBeenCalledOnce();
+      expect(readJsonl).toHaveBeenCalledTimes(2);
     } finally {
       await runtime.close();
     }

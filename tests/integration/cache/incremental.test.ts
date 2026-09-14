@@ -33,6 +33,139 @@ afterEach(async () => {
 });
 
 describe("incremental session cache", () => {
+  it("drops advanced memo state after a rejected cache commit and retains the last good revision", async () => {
+    const root = await temporaryRoot();
+    const path = join(root, "source.jsonl");
+    await writeFile(path, await fixture("modern.jsonl"));
+    const database = openCacheDatabase(":memory:");
+    const updater = new SessionCacheUpdater(database);
+    try {
+      const first = await updater.update({ path, scope: "active" });
+      if (first.status !== "updated") {
+        throw new Error("Expected initial source normalization");
+      }
+      const before = getCachedSession(database, first.sessionId);
+      expect(updater.retention.sources).toBe(1);
+      database.exec(
+        "CREATE TEMP TRIGGER reject_session_update BEFORE UPDATE ON sessions BEGIN SELECT RAISE(ABORT, 'synthetic write rejection'); END;",
+      );
+      await appendFile(
+        path,
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "agent_message", message: "a large rejected candidate ".repeat(10_000) },
+        }) + "\n",
+      );
+      await expect(updater.update({ path, scope: "active" })).resolves.toMatchObject({
+        status: "failed",
+      });
+      expect(updater.retention).toMatchObject({ sources: 0, bytes: 0 });
+      expect(getCachedSession(database, first.sessionId)).toEqual(before);
+      database.exec("DROP TRIGGER reject_session_update");
+      await expect(updater.update({ path, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+        mode: "full",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("bounds retained source state by both LRU count and bytes and reparses an evicted session", async () => {
+    const root = await temporaryRoot();
+    const database = openCacheDatabase(":memory:");
+    const source = await fixture("modern.jsonl");
+    const paths = await Promise.all(
+      Array.from({ length: 3 }, async (_, index) => {
+        const path = join(root, `source-${index}.jsonl`);
+        await writeFile(
+          path,
+          source.replaceAll(
+            "11111111-1111-4111-8111-111111111111",
+            `11111111-1111-4111-8111-${String(index).padStart(12, "0")}`,
+          ),
+        );
+        return path;
+      }),
+    );
+    const updater = new SessionCacheUpdater(database, {
+      maxRetainedSources: 2,
+      maxRetainedBytes: 2_000_000,
+    });
+    try {
+      for (const path of paths) {
+        // oxlint-disable-next-line no-await-in-loop -- Access order determines the LRU eviction under test.
+        await updater.update({ path, scope: "active" });
+      }
+      expect(updater.retention.sources).toBe(2);
+      expect(updater.retention.bytes).toBeLessThanOrEqual(2_000_000);
+      await appendFile(paths[0]!, "\n");
+      await expect(updater.update({ path: paths[0]!, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+        mode: "full",
+      });
+      const tiny = new SessionCacheUpdater(database, {
+        maxRetainedSources: 2,
+        maxRetainedBytes: 1,
+      });
+      await tiny.update({ path: paths[0]!, scope: "active" }, { force: true });
+      expect(tiny.retention).toMatchObject({ sources: 0, bytes: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps incomplete trailing JSON pending and detects same-size rewrites and replacement", async () => {
+    const root = await temporaryRoot();
+    const path = join(root, "source.jsonl");
+    const original = await fixture("modern.jsonl");
+    await writeFile(path, original);
+    const database = openCacheDatabase(":memory:");
+    const updater = new SessionCacheUpdater(database);
+    try {
+      const first = await updater.update({ path, scope: "active" });
+      if (first.status !== "updated") {
+        throw new Error("Initial normalization failed");
+      }
+      const fragment =
+        '{"type":"event_msg","payload":{"type":"agent_message","message":"Split Unicode é';
+      await appendFile(path, fragment);
+      await expect(updater.update({ path, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+        mode: "append",
+      });
+      expect(getCachedSession(database, first.sessionId)?.summary.assistantMessageCount).toBe(2);
+      await appendFile(path, '"}}\n');
+      await expect(updater.update({ path, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+        mode: "append",
+      });
+      expect(
+        getCachedSession(database, first.sessionId)?.turns.at(-1)?.assistantMessages.at(-1)
+          ?.sourceMarkdown,
+      ).toBe("Split Unicode é");
+      const complete = await readFile(path, "utf8");
+      await writeFile(path, complete.replace("Split Unicode", "Other Unicode"));
+      await utimes(path, new Date(Date.now() + 10_000), new Date(Date.now() + 10_000));
+      await expect(updater.update({ path, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+        mode: "full",
+      });
+      expect(
+        getCachedSession(database, first.sessionId)?.turns.at(-1)?.assistantMessages.at(-1)
+          ?.sourceMarkdown,
+      ).toBe("Other Unicode é");
+      await rm(path);
+      await writeFile(path, original);
+      await expect(updater.update({ path, scope: "active" })).resolves.toMatchObject({
+        status: "updated",
+        mode: "full",
+      });
+      expect(getCachedSession(database, first.sessionId)?.summary.assistantMessageCount).toBe(2);
+    } finally {
+      database.close();
+    }
+  });
   it("trusts a persisted unchanged fingerprint after restart without retransformation", async () => {
     const root = await temporaryRoot();
     const sourcePath = join(root, "modern.jsonl");

@@ -215,17 +215,35 @@ describe("ConversationWorkStream", () => {
       "Drafting the patch",
     ]);
     expect(wrapper.text()).not.toContain("Encrypted source retained");
+    expect(wrapper.findAll(".conversation-tool-row__header strong")).toHaveLength(1);
+    expect(
+      wrapper.findAll("[data-tool-group]").map((group) => group.attributes("data-tool-group")),
+    ).toEqual(["command-b", "file-a"]);
+    expect(wrapper.findAll(".conversation-tool-row pre")).toHaveLength(0);
+    await Promise.all(
+      wrapper.findAll("[data-tool-group]").map((group) => {
+        (group.element as HTMLDetailsElement).open = true;
+        return group.trigger("toggle");
+      }),
+    );
     expect(
       wrapper.findAll(".conversation-tool-row__header strong").map((node) => node.text()),
     ).toEqual(["Ran command", "Ran command", "Ran command"]);
     expect(wrapper.text()).toContain("Approved · low risk");
     expect(wrapper.text()).toContain("Read-only verification command.");
+    const child = wrapper.get('[data-entry-id="agent"] details');
+    (child.element as HTMLDetailsElement).open = true;
+    await child.trigger("toggle");
     expect(wrapper.get('a[href="/session/child-session"]').text()).toContain(
       "Reviewed the cache path",
     );
-    expect(wrapper.findAll(".conversation-file-changes")).toHaveLength(1);
-    expect(wrapper.get(".conversation-file-changes > summary strong").text()).toBe(
-      "Edited 2 files",
+    expect(wrapper.findAll(".conversation-file-changes")).toHaveLength(2);
+    expect(wrapper.get('[data-tool-group="file-a"] > summary').text()).toContain("Edited files");
+    await Promise.all(
+      wrapper.findAll(".conversation-file-changes").map((details) => {
+        (details.element as HTMLDetailsElement).open = true;
+        return details.trigger("toggle");
+      }),
     );
     const fileDetails = wrapper.findAll(".conversation-file-changes__files details");
     await Promise.all(
@@ -249,6 +267,7 @@ describe("ConversationWorkStream", () => {
       "command-c",
       "agent",
       "file-a",
+      "file-b",
     ]);
   });
 });

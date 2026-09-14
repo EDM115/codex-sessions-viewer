@@ -79,7 +79,7 @@ describe("session catalog store", () => {
       catalogInput(`root-${String(index).padStart(2, "0")}`, {
         summary: {
           ...summary(`root-${String(index).padStart(2, "0")}`),
-          updatedAt: "2026-08-13T08:30:00.000Z",
+          updatedAt: index === 20 ? "2026-08-13T09:00:00.000Z" : "2026-08-13T08:30:00.000Z",
         },
       }),
     );
@@ -123,10 +123,23 @@ describe("session catalog store", () => {
       expect(page.nextCursor).toBe("20");
       expect(page.items.every(({ kind }) => kind === "root")).toBe(true);
       expect(page.items.map(({ summary: item }) => item.id).slice(0, 3)).toEqual([
+        "root-20",
         "root-00",
         "root-01",
-        "root-02",
       ]);
+      expect(
+        listCatalogSessions(database, {
+          scope: "active",
+          projectId: "codex:viewer",
+          parentThreadId: "__root__",
+          cursor: page.nextCursor!,
+          limit: 20,
+        }),
+      ).toMatchObject({
+        items: [{ summary: { id: "root-19" } }],
+        total: 21,
+        nextCursor: null,
+      });
       expect(children.items.map(({ summary: item }) => item.id)).toEqual(["child"]);
       expect(children.total).toBe(1);
       expect(listCatalogProjects(database)).toEqual([

@@ -182,21 +182,34 @@ describe("live Codex-home switching", () => {
     const firstRuntime = await LiveViewerRuntime.start(config, {
       reconciliationIntervalMs: 60_000,
     });
-    await firstRuntime.close();
+    try {
+      await firstRuntime.repository.getSession("11111111-1111-4111-8111-111111111111");
+      expect(firstRuntime.database.prepare("SELECT COUNT(*) AS count FROM turns").get()).toEqual({
+        count: 2,
+      });
+    } finally {
+      await firstRuntime.close();
+    }
     const cache = openCacheDatabase(config.paths.cacheDatabase);
     try {
       cache.prepare("UPDATE turns SET payload_json = '{}'").run();
     } finally {
       cache.close();
     }
+    const readJsonl = vi.fn<typeof readStableJsonl>(readStableJsonl);
     const runtime = await LiveViewerRuntime.start(config, {
       initialReconciliation: "deferred",
       reconciliationIntervalMs: 60_000,
+      readJsonl,
     });
 
     try {
       await expect(runtime.startInitialReconciliation()).resolves.toBeUndefined();
       expect(runtime.status).toEqual({ state: "ready", message: null });
+      expect(readJsonl).not.toHaveBeenCalled();
+      expect(
+        runtime.database.prepare("SELECT payload_json FROM turns ORDER BY turn_index").all(),
+      ).toEqual([{ payload_json: "{}" }, { payload_json: "{}" }]);
       await expect(
         runtime.repository.listSessions({ scope: "active", limit: 10 }),
       ).resolves.toMatchObject({ total: 1 });
@@ -304,14 +317,16 @@ describe("live Codex-home switching", () => {
 
     try {
       const firstIds = runtime.database.prepare("SELECT id FROM session_catalog").all();
-      expect(firstIds).toHaveLength(1);
+      expect(firstIds).toEqual([{ id: "11111111-1111-4111-8111-111111111111" }]);
       await runtime.updateSettings({
         codexHome: secondHome,
         port: 3_000,
         fetchFavicons: false,
       });
       expect(runtime.settings.codexHome).toBe(secondHome);
-      expect(runtime.database.prepare("SELECT id FROM session_catalog").all()).toHaveLength(1);
+      expect(runtime.database.prepare("SELECT id FROM session_catalog").all()).toEqual([
+        { id: "33333333-3333-4333-8333-333333333333" },
+      ]);
 
       const preserved = openCacheDatabase(config.paths.cacheDatabase);
       try {

@@ -16,6 +16,7 @@ import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { ConversationProject } from "../../shared/types/library.ts";
 import type { InspectorRecord, InspectorTarget, TurnChunk } from "../../shared/types/repository.ts";
 import type { NormalizedRawEvent, NormalizedSession } from "../normalization/normalizeSession.ts";
+import { classifySessionStructure } from "../normalization/subagentTopology.ts";
 import { assertSafeOutputComponent, serializedJson, writeOutputFile } from "./outputFiles.ts";
 
 const DEFAULT_CHUNK_SIZE = 20;
@@ -409,6 +410,22 @@ function reconcileStaticTopology(conversations: readonly NormalizedSession[]): N
   }));
 }
 
+function staticSessionStructure(conversation: NormalizedSession) {
+  const payload = conversation.rawEvents.find((event) => event.type === "session_meta")?.payload;
+  const meta =
+    payload !== null && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+  return classifySessionStructure({
+    source: meta?.["source"] ?? null,
+    parentThreadId:
+      typeof meta?.["parent_thread_id"] === "string" ? meta["parent_thread_id"] : null,
+    threadModel:
+      conversation.summary.models.every((model) => model === "codex-auto-review") &&
+      conversation.summary.models.length > 0
+        ? "codex-auto-review"
+        : null,
+  });
+}
+
 function staticLibraryPayload(conversations: readonly NormalizedSession[]) {
   const summaries = new Map(conversations.map(({ summary }) => [summary.id, summary]));
   const directProjects = new Map(
@@ -417,21 +434,6 @@ function staticLibraryPayload(conversations: readonly NormalizedSession[]) {
       resolveConversationProject({ cwd: summary.cwd, gitOriginUrl: summary.gitOriginUrl }, []),
     ]),
   );
-  const projectFor = (
-    sessionId: string,
-  ): Omit<ConversationProject, "activeCount" | "archivedCount"> => {
-    const visited = new Set<string>();
-    let currentId = sessionId;
-    while (!visited.has(currentId)) {
-      visited.add(currentId);
-      const summary = summaries.get(currentId);
-      if (summary?.parentThreadId === null || summary === undefined) {
-        return directProjects.get(currentId) ?? directProjects.get(sessionId)!;
-      }
-      currentId = summary.parentThreadId;
-    }
-    return directProjects.get(sessionId)!;
-  };
   const depthFor = (sessionId: string): number | null => {
     const visited = new Set<string>();
     let currentId = sessionId;
@@ -452,8 +454,10 @@ function staticLibraryPayload(conversations: readonly NormalizedSession[]) {
     ConversationProject & { activeCount: number; archivedCount: number }
   >();
   const entries: Record<string, Record<string, unknown>> = {};
-  for (const { summary } of conversations) {
-    const project = projectFor(summary.id);
+  for (const conversation of conversations) {
+    const { summary } = conversation;
+    const structure = staticSessionStructure(conversation);
+    const project = directProjects.get(summary.id)!;
     const existing = projects.get(project.id) ?? {
       ...project,
       activeCount: 0,
@@ -467,8 +471,8 @@ function staticLibraryPayload(conversations: readonly NormalizedSession[]) {
       kind: summary.parentThreadId === null ? "root" : "subagent",
       projectId: project.id,
       parentThreadId: summary.parentThreadId,
-      agentPath: null,
-      agentNickname: null,
+      agentPath: structure.agentPath,
+      agentNickname: structure.agentNickname,
       agentDepth: depthFor(summary.id),
       childCount: summary.childThreadIds.length,
     };
@@ -497,9 +501,7 @@ export async function writeStaticPayloads(
   const dispositions: Array<"written" | "reused"> = [];
   const ordered = reconcileStaticTopology(
     conversations.filter(
-      ({ summary }) =>
-        summary.models.length === 0 ||
-        !summary.models.every((model) => model === "codex-auto-review"),
+      (conversation) => staticSessionStructure(conversation).kind !== "auxiliary",
     ),
   ).toSorted(
     (left, right) =>

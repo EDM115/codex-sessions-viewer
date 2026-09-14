@@ -124,19 +124,20 @@ describe("cached full-text search", () => {
         .prepare("SELECT project_id FROM session_catalog WHERE id = ?")
         .get(active.summary.id)?.["project_id"];
       expect(typeof projectId).toBe("string");
-      for (const query of [
-        { scope: "active" as const, query: "parser" },
-        { scope: "archived" as const, query: "Legacy prompt" },
-        { scope: "active" as const, query: "parser", projectId: String(projectId) },
-        { scope: "active" as const, query: "parser", model: "gpt-exact-1" },
-        { scope: "active" as const, query: "parser", cwd: "C:\\work\\viewer" },
-        { scope: "active" as const, query: "parser", tool: "filesystem.read_file" },
-        { scope: "active" as const, query: "parser", hasMedia: true },
-        { scope: "active" as const, query: " " },
-      ]) {
-        expect(countCachedSearchResults(database, query)).toBe(
-          searchCachedSessions(database, query).total,
-        );
+      for (const [query, expected] of [
+        [{ scope: "active", query: "Build parser" }, 1],
+        [{ scope: "archived", query: "Legacy prompt" }, 1],
+        [{ scope: "active", query: "Build parser", projectId: String(projectId) }, 1],
+        [{ scope: "active", query: "Build parser", model: "gpt-exact-1" }, 1],
+        [{ scope: "active", query: "Build parser", model: "missing-model" }, 0],
+        [{ scope: "active", query: "Build parser", cwd: "C:\\work\\viewer" }, 1],
+        [{ scope: "active", query: "Build parser", cwd: "C:\\other" }, 0],
+        [{ scope: "active", query: "Build parser", tool: "filesystem.read_file" }, 1],
+        [{ scope: "active", query: "Build parser", hasMedia: true }, 1],
+        [{ scope: "active", query: "Build parser", hasMedia: false }, 0],
+        [{ scope: "active", query: " " }, 0],
+      ] as const) {
+        expect(countCachedSearchResults(database, query)).toBe(expected);
       }
       expect(
         countCachedSearchResults(database, {
@@ -164,6 +165,7 @@ describe("cached full-text search", () => {
       revision: "sha256:archived",
     });
     const database = openCacheDatabase(":memory:");
+    active.turns[0]!.userMessage!.sourceMarkdown = "copperarch before replacement";
 
     try {
       replaceCachedSession(database, {
@@ -180,12 +182,21 @@ describe("cached full-text search", () => {
         .prepare("SELECT rowid, * FROM session_fts WHERE session_id = ? ORDER BY rowid")
         .all(archived.summary.id);
 
+      active.turns[0]!.userMessage!.sourceMarkdown = "indigoquartz after replacement";
       replaceCachedSession(database, {
         session: active,
         diagnostics: [],
         source: cachedSource(active, { hash: "c".repeat(64), size: 8_192 }),
       });
 
+      expect(
+        searchCachedSessions(database, { scope: "active", query: "copperarch" }).items,
+      ).toEqual([]);
+      expect(
+        searchCachedSessions(database, { scope: "active", query: "indigoquartz" }).items,
+      ).toEqual([
+        expect.objectContaining({ sessionId: active.summary.id, turnId: active.turns[0]!.id }),
+      ]);
       expect(
         database
           .prepare("SELECT count(*) AS count FROM session_fts WHERE session_id = ?")

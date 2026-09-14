@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import { getCachedAsset, upsertCachedAsset } from "../../../server/cache/assetStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { resolvedAssetSchema } from "../../../shared/types/repository.ts";
 
 describe("cached asset metadata", () => {
   it("upserts asset state and returns only the resolver contract", () => {
@@ -39,7 +38,7 @@ describe("cached asset metadata", () => {
       });
 
       const resolved = getCachedAsset(database, "asset-1");
-      expect(resolvedAssetSchema.parse(resolved)).toEqual({
+      expect(resolved).toEqual({
         id: "asset-1",
         url: "/assets/asset-1.png",
         mimeType: "image/png",

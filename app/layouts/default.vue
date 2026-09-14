@@ -26,10 +26,15 @@ const context = computed(() =>
   >
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="app-chrome">
-      <a class="app-chrome__brand" href="/" aria-label="Codex Sessions Viewer home">
+      <NuxtLink
+        class="app-chrome__brand"
+        to="/"
+        :prefetch="false"
+        aria-label="Codex Sessions Viewer home"
+      >
         <span class="app-chrome__sigil" aria-hidden="true">C</span>
         <span>Codex Sessions Viewer</span>
-      </a>
+      </NuxtLink>
       <p class="app-chrome__context">{{ context }}</p>
       <nav class="app-chrome__actions" aria-label="Application">
         <UiIconLink v-if="route.path !== '/'" href="/" label="Open session library">

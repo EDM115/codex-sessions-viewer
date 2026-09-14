@@ -23,18 +23,19 @@ onMounted(() => {
 
 onBeforeUnmount(() => stopObserving());
 
-function destination(id: string): string {
-  return `/session/${encodeURIComponent(id)}`;
+function destination(id: string) {
+  return workspace?.sessionDestination(id) ?? `/session/${encodeURIComponent(id)}`;
 }
 </script>
 
 <template>
   <div ref="row" class="library-session-row">
     <p v-if="groupLabel" class="library-session-group">{{ groupLabel }}</p>
-    <a
+    <NuxtLink
       class="library-session-item"
       :class="selected ? 'is-selected' : null"
-      :href="destination(item.summary.id)"
+      :to="destination(item.summary.id)"
+      :prefetch="false"
       :aria-current="selected ? 'page' : undefined"
     >
       <span class="library-session-item__heading">
@@ -69,7 +70,7 @@ function destination(id: string): string {
         <span v-else>{{ item.summary.turnCount }} turns</span>
         <span>{{ item.summary.models[0] ?? "model pending" }}</span>
       </span>
-    </a>
+    </NuxtLink>
     <button
       v-if="item.materialization === 'failed'"
       class="library-session-item__retry"

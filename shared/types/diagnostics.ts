@@ -13,6 +13,7 @@ export type ViewerDiagnosticCode =
   | "source.changed_during_read"
   | "source.duplicate_session"
   | "source.invalid_jsonl"
+  | "source.metadata_budget_exhausted"
   | "metadata.snapshot_invalid"
   | "cache.unavailable";
 
@@ -55,6 +56,7 @@ export const viewerDiagnosticCodeSchema = z.enum([
   "source.changed_during_read",
   "source.duplicate_session",
   "source.invalid_jsonl",
+  "source.metadata_budget_exhausted",
   "metadata.snapshot_invalid",
   "cache.unavailable",
 ]);

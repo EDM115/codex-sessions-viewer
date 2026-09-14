@@ -65,7 +65,29 @@ text(await tools.apply_patch(patch));`;
       expect.objectContaining({ cmd: expect.stringContaining("verify:output") }),
       expect.objectContaining({ cmd: expect.stringContaining("doctor") }),
     ]);
-    expect(derived[2]).toMatchObject({ kind: "tool", name: "exec_command", status: "failed" });
+    expect(derived).toMatchObject([
+      {
+        kind: "tool",
+        name: "exec_command",
+        status: "succeeded",
+        output: { gate: "focused", output: "passed", exit_code: 0, wall_time_seconds: 1.5 },
+        durationMs: 1500,
+      },
+      {
+        kind: "tool",
+        name: "exec_command",
+        status: "succeeded",
+        output: { gate: "verify", output: "verified", exit_code: 0, wall_time_seconds: 2 },
+        durationMs: 2000,
+      },
+      {
+        kind: "tool",
+        name: "exec_command",
+        status: "failed",
+        output: { gate: "doctor", output: "failed", exit_code: 1, wall_time_seconds: 0.5 },
+        durationMs: 500,
+      },
+    ]);
   });
 
   it("supports created, moved, and deleted files and falls back losslessly on dynamic or mismatched envelopes", () => {

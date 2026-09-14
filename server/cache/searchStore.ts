@@ -121,8 +121,21 @@ export function replaceSessionSearchRows(
   database: DatabaseSync,
   session: NormalizedSession,
   diagnostics: readonly ViewerDiagnostic[],
+  changedTurnIds?: readonly string[],
 ): void {
-  database.prepare("DELETE FROM session_fts WHERE session_id = ?").run(session.summary.id);
+  const changed = changedTurnIds === undefined ? null : new Set(changedTurnIds);
+  // The first row owns mutable session metadata even when its transcript is unchanged.
+  if (session.turns[0] !== undefined) {
+    changed?.add(session.turns[0].id);
+  }
+  if (changed === null) {
+    database.prepare("DELETE FROM session_fts WHERE session_id = ?").run(session.summary.id);
+  } else {
+    const remove = database.prepare("DELETE FROM session_fts WHERE session_id = ? AND turn_id = ?");
+    for (const id of changed) {
+      remove.run(session.summary.id, id);
+    }
+  }
   const insert = database.prepare(`
     INSERT INTO session_fts (
       session_id, turn_id, message_id, title, prompt, assistant, reasoning, tools,
@@ -130,6 +143,9 @@ export function replaceSessionSearchRows(
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   for (const [index, turn] of session.turns.entries()) {
+    if (changed !== null && !changed.has(turn.id)) {
+      continue;
+    }
     const columns = turnSearchColumns(turn);
     const firstTurn = index === 0;
     insert.run(
@@ -241,12 +257,14 @@ export function searchCachedSessions(
         session_fts.session_id,
         session_fts.turn_id,
         session_fts.message_id,
+        CASE WHEN topology.id IS NULL THEN s.parent_thread_id ELSE topology.parent_thread_id END AS parent_thread_id,
         s.scope,
         s.title,
         snippet(session_fts, -1, '', '', ' … ', 18) AS excerpt,
         rank
       FROM session_fts
       JOIN sessions AS s ON s.id = session_fts.session_id
+      LEFT JOIN session_catalog AS topology ON topology.id = s.id
       WHERE ${filters.sql}
       ORDER BY rank, s.updated_at DESC, session_fts.turn_id
       LIMIT ? OFFSET ?
@@ -255,6 +273,7 @@ export function searchCachedSessions(
   return searchResponseSchema.parse({
     items: rows.map((row) => ({
       sessionId: row["session_id"],
+      ...(row["parent_thread_id"] == null ? {} : { parentThreadId: row["parent_thread_id"] }),
       turnId: row["turn_id"],
       messageId: row["message_id"],
       scope: row["scope"],

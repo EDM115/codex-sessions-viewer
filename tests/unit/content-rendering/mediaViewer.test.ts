@@ -121,7 +121,7 @@ describe("Task 11 fullscreen media viewer", () => {
     class TestClipboardItem {
       constructor(readonly items: Record<string, Blob>) {}
     }
-    const write = vi.fn(async () => undefined);
+    const write = vi.fn(async (_items: TestClipboardItem[]) => undefined);
     vi.stubGlobal("ClipboardItem", TestClipboardItem);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { write } });
     const fetchMock = vi.fn(async () => ({
@@ -151,7 +151,11 @@ describe("Task 11 fullscreen media viewer", () => {
     await flushPromises();
     expect(fetchMock).toHaveBeenCalledWith("/api/assets/image/content");
     expect(write).toHaveBeenCalledTimes(1);
-    expect(wrapper.get('button[aria-label="Copied: Copy image"]')).toBeTruthy();
+    expect(write.mock.calls[0]![0]).toHaveLength(1);
+    await expect(write.mock.calls[0]![0][0]!.items["image/png"]!.text()).resolves.toBe("image");
+    expect(wrapper.get('button[aria-label="Copied: Copy image"]').attributes("data-state")).toBe(
+      "success",
+    );
 
     await wrapper.get('button[aria-label="Download image"]').trigger("click");
     expect(click).toHaveBeenCalledTimes(1);
@@ -162,7 +166,8 @@ describe("Task 11 fullscreen media viewer", () => {
     });
     await wrapper.get('button[aria-label="Copied: Copy image"]').trigger("click");
     await flushPromises();
-    expect(wrapper.get('button[aria-label="Copy image"] [aria-hidden="true"]')).toBeTruthy();
+    expect(wrapper.get('button[aria-label="Copy image"]').attributes("data-state")).toBe("error");
+    expect(write).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 
@@ -186,11 +191,11 @@ describe("Task 11 fullscreen media viewer", () => {
     const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:test");
     const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
     const downloads: string[] = [];
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
-      function (this: HTMLAnchorElement) {
-        downloads.push(this.download);
-      },
-    );
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      downloads.push(this.download);
+    });
     const drawImage = vi.fn();
     const nativeCreateElement = document.createElement.bind(document);
     vi.spyOn(document, "createElement").mockImplementation(
@@ -248,7 +253,14 @@ describe("Task 11 fullscreen media viewer", () => {
     );
     await stage.trigger("pointerdown", { pointerId: 2, clientX: 50, clientY: 15 });
     await stage.trigger("pointermove", { pointerId: 2, clientX: 90, clientY: 15 });
-    expect(wrapper.get(".media-viewer__content").attributes("style")).not.toContain("scale(1)");
+    const pinchedScale = Number(
+      wrapper
+        .get(".media-viewer__content")
+        .attributes("style")
+        .match(/scale\(([^)]+)\)/u)?.[1],
+    );
+    // Pointer distance changes from sqrt(25² + 20²) to sqrt(65² + 20²).
+    expect(pinchedScale).toBeCloseTo(Math.sqrt(4_625 / 1_025), 6);
     await stage.trigger("pointerup", { pointerId: 2 });
     await stage.trigger("pointercancel", { pointerId: 1 });
 

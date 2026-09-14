@@ -48,7 +48,7 @@ function scaleRecords(turnCount: number): JsonlRecord[] {
   }));
 }
 
-function medianNormalizationMs(records: readonly JsonlRecord[]): number {
+function medianNormalizationMs(records: readonly JsonlRecord[], expectedTurnCount: number): number {
   const durations: number[] = [];
   for (let iteration = 0; iteration < 3; iteration += 1) {
     const startedAt = performance.now();
@@ -59,10 +59,14 @@ function medianNormalizationMs(records: readonly JsonlRecord[]): number {
       sessionIndexEntries: [],
       stateSnapshot: null,
     });
-    if (result.session === null) {
-      throw new Error("The normalization scale fixture did not produce a session.");
-    }
     durations.push(performance.now() - startedAt);
+    expect(result.session?.turns).toHaveLength(expectedTurnCount);
+    expect(result.session?.turns.at(-1)).toMatchObject({
+      id: `turn-${expectedTurnCount - 1}`,
+      userMessage: { sourceMarkdown: `Prompt ${expectedTurnCount - 1}` },
+      models: ["gpt-4"],
+      reasoningEfforts: ["medium"],
+    });
   }
   return durations.toSorted((left, right) => left - right)[1]!;
 }
@@ -71,10 +75,10 @@ describe("normalization scale", () => {
   it("keeps a doubled settings-heavy workload below near-quadratic growth", () => {
     const smaller = scaleRecords(800);
     const larger = scaleRecords(1_600);
-    medianNormalizationMs(smaller);
-    medianNormalizationMs(larger);
-    const smallerMedianMs = medianNormalizationMs(smaller);
-    const largerMedianMs = medianNormalizationMs(larger);
+    medianNormalizationMs(smaller, 800);
+    medianNormalizationMs(larger, 1_600);
+    const smallerMedianMs = medianNormalizationMs(smaller, 800);
+    const largerMedianMs = medianNormalizationMs(larger, 1_600);
 
     expect(
       largerMedianMs,

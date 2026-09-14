@@ -1,0 +1,11 @@
+{
+  "node": "v26.8.1",
+  "turns": 500,
+  "requestedTurns": 20,
+  "samples": 20,
+  "rawEvents": 0,
+  "warmDirectMedianMs": 7.39449999999988,
+  "warmRealRepositoryMedianMs": 4.649549999999863,
+  "fullReconstructionMedianMs": 37.11340000000018,
+  "note": "Synthetic fixture diagnostic. No real archive or HTTP/browser latency measured."
+}

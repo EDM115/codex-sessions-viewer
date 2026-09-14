@@ -12,7 +12,11 @@ import {
   type ReadStableJsonlOptions,
   type StableJsonlResult,
 } from "./jsonlStream.ts";
-import { readSessionMetaPrefix, type SessionMetaPrefixResult } from "./sessionMetaPrefix.ts";
+import {
+  CATALOG_METADATA_MAX_BYTES,
+  readSessionMetaPrefix,
+  type SessionMetaPrefixResult,
+} from "./sessionMetaPrefix.ts";
 
 const DEFAULT_PREFIX_BYTES = 4_096;
 const PREFIX_READ_CONCURRENCY = 32;
@@ -79,7 +83,12 @@ async function readPrefixes(
     const prefixes = await Promise.all(
       batch.map(async (source) => ({
         source,
-        prefix: await readPrefix(source.path, options.prefixBytes ?? DEFAULT_PREFIX_BYTES),
+        prefix: await readPrefix(source.path, options.prefixBytes ?? DEFAULT_PREFIX_BYTES, {
+          firstRecordMaxBytes: Math.max(
+            options.prefixBytes ?? DEFAULT_PREFIX_BYTES,
+            CATALOG_METADATA_MAX_BYTES,
+          ),
+        }),
       })),
     );
     results.push(...prefixes);

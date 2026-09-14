@@ -8,9 +8,11 @@ import {
   jsonValueSchema,
   type ConversationMessage,
   type ConversationScope,
+  type ConversationTurn,
   type SourceFingerprint,
 } from "../../shared/types/conversation.ts";
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import { guardianActionHash } from "../normalization/guardianEvidence.ts";
 import {
   type NormalizedRawEvent,
   type NormalizedSession,
@@ -30,9 +32,12 @@ export interface ReplaceCachedSessionInput {
   diagnostics: readonly ViewerDiagnostic[];
   source: CachedSourceWrite;
   expectedCatalogSourceRevision?: string | undefined;
+  previousSession?: NormalizedSession | undefined;
 }
 
-export type ReplaceCachedSessionResult = { status: "committed" } | { status: "stale-catalog" };
+export type ReplaceCachedSessionResult =
+  | { status: "committed"; changedTurnIds: string[] }
+  | { status: "stale-catalog" };
 
 class StaleCatalogCommitError extends Error {}
 
@@ -177,16 +182,103 @@ function writeMessage(
   );
 }
 
-function replaceChildren(database: DatabaseSync, session: NormalizedSession): void {
+function preserveRichTurn(
+  previous: ConversationTurn,
+  current: ConversationTurn,
+  stored: ConversationTurn,
+): ConversationTurn {
+  const previousMessages = new Map(
+    [previous.userMessage, ...(previous.steeringMessages ?? []), ...previous.assistantMessages]
+      .filter((message) => message !== null)
+      .map((message) => [message.id, message]),
+  );
+  const storedMessages = new Map(
+    [stored.userMessage, ...(stored.steeringMessages ?? []), ...stored.assistantMessages]
+      .filter((message) => message !== null)
+      .map((message) => [message.id, message]),
+  );
+  const preserveMessage = (message: ConversationMessage): ConversationMessage => {
+    const before = previousMessages.get(message.id);
+    const rich = storedMessages.get(message.id);
+    return before !== undefined &&
+      rich !== undefined &&
+      before.sourceMarkdown === message.sourceMarkdown &&
+      json(before.attachmentIds) === json(message.attachmentIds)
+      ? { ...message, body: rich.body }
+      : message;
+  };
+  const previousActivities = new Map(
+    previous.activities.map((activity) => [activity.id, activity]),
+  );
+  const storedActivities = new Map(stored.activities.map((activity) => [activity.id, activity]));
+  return {
+    ...current,
+    userMessage: current.userMessage === null ? null : preserveMessage(current.userMessage),
+    steeringMessages: (current.steeringMessages ?? []).map(preserveMessage),
+    assistantMessages: current.assistantMessages.map(preserveMessage),
+    activities: current.activities.map((activity) =>
+      json(previousActivities.get(activity.id)) === json(activity)
+        ? (storedActivities.get(activity.id) ?? activity)
+        : activity,
+    ),
+  };
+}
+
+function replaceChildren(
+  database: DatabaseSync,
+  session: NormalizedSession,
+  previous?: NormalizedSession,
+): string[] {
   const sessionId = session.summary.id;
-  database.prepare("DELETE FROM raw_events WHERE session_id = ?").run(sessionId);
+  const priorTurns = new Map(previous?.turns.map((turn) => [turn.id, turn]));
+  const currentIds = new Set(session.turns.map(({ id }) => id));
+  const changed = new Set(
+    session.turns
+      .filter(
+        (turn) => priorTurns.get(turn.id) !== turn && json(priorTurns.get(turn.id)) !== json(turn),
+      )
+      .map(({ id }) => id),
+  );
+  for (const id of priorTurns.keys()) {
+    if (!currentIds.has(id)) {
+      changed.add(id);
+    }
+  }
+  const preserved = new Map<string, ConversationTurn>();
+  const readTurn = database.prepare(
+    "SELECT payload_json FROM turns WHERE session_id = ? AND id = ?",
+  );
+  for (const turn of session.turns) {
+    const prior = priorTurns.get(turn.id);
+    if (!changed.has(turn.id) || prior === undefined) {
+      continue;
+    }
+    const row = readTurn.get(sessionId, turn.id);
+    if (row !== undefined) {
+      preserved.set(
+        turn.id,
+        preserveRichTurn(
+          prior,
+          turn,
+          conversationTurnSchema.parse(parsedJson(row["payload_json"])),
+        ),
+      );
+    }
+  }
   database.prepare("DELETE FROM diagnostics WHERE session_id = ?").run(sessionId);
-  database.prepare("DELETE FROM session_fts WHERE session_id = ?").run(sessionId);
-  database.prepare("DELETE FROM turns WHERE session_id = ?").run(sessionId);
+  if (previous === undefined) {
+    database.prepare("DELETE FROM raw_events WHERE session_id = ?").run(sessionId);
+    database.prepare("DELETE FROM turns WHERE session_id = ?").run(sessionId);
+  } else {
+    const remove = database.prepare("DELETE FROM turns WHERE session_id = ? AND id = ?");
+    for (const id of changed) {
+      remove.run(sessionId, id);
+    }
+  }
 
   const insertTurn = database.prepare(`
-    INSERT INTO turns (id, session_id, turn_index, started_at, completed_at, payload_json)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO turns (id, session_id, turn_index, started_at, completed_at, payload_json, final_assistant_message_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
   const insertMessage = database.prepare(`
     INSERT INTO messages (
@@ -195,11 +287,23 @@ function replaceChildren(database: DatabaseSync, session: NormalizedSession): vo
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertActivity = database.prepare(`
-    INSERT INTO activities (id, session_id, turn_id, kind, created_at, payload_json)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO activities (id, session_id, turn_id, kind, created_at, payload_json, guardian_input_hash)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
-  for (const turn of session.turns) {
-    insertTurn.run(turn.id, sessionId, turn.index, turn.startedAt, turn.completedAt, json(turn));
+  for (const normalizedTurn of session.turns) {
+    if (!changed.has(normalizedTurn.id)) {
+      continue;
+    }
+    const turn = preserved.get(normalizedTurn.id) ?? normalizedTurn;
+    insertTurn.run(
+      turn.id,
+      sessionId,
+      turn.index,
+      turn.startedAt,
+      turn.completedAt,
+      json(turn),
+      turn.finalAssistantMessageId ?? null,
+    );
     if (turn.userMessage !== null) {
       writeMessage(insertMessage, sessionId, turn.userMessage);
     }
@@ -217,6 +321,7 @@ function replaceChildren(database: DatabaseSync, session: NormalizedSession): vo
         activity.kind,
         activity.createdAt,
         json(activity),
+        activity.kind === "tool" ? guardianActionHash(activity.input) : null,
       );
     }
   }
@@ -225,8 +330,21 @@ function replaceChildren(database: DatabaseSync, session: NormalizedSession): vo
     INSERT INTO raw_events (
       id, session_id, source_order, turn_id, type, timestamp, payload_json
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id, id) DO UPDATE SET source_order = excluded.source_order, turn_id = excluded.turn_id, type = excluded.type, timestamp = excluded.timestamp, payload_json = excluded.payload_json
   `);
+  const priorEvents = new Map(previous?.rawEvents.map((event) => [event.id, event]));
   session.rawEvents.forEach((event, index) => {
+    const before = priorEvents.get(event.id);
+    if (
+      before !== undefined &&
+      !changed.has(event.turnId ?? "") &&
+      before.turnId === event.turnId &&
+      before.payload === event.payload &&
+      before.type === event.type &&
+      before.timestamp === event.timestamp
+    ) {
+      return;
+    }
     insertRawEvent.run(
       event.id,
       sessionId,
@@ -237,6 +355,7 @@ function replaceChildren(database: DatabaseSync, session: NormalizedSession): vo
       json(event.payload),
     );
   });
+  return [...changed];
 }
 
 function writeDiagnostics(
@@ -284,6 +403,11 @@ export function replaceCachedSession(
           return { status: "stale-catalog" };
         }
       }
+      const previous = input.previousSession;
+      const storedRevision = database
+        .prepare("SELECT revision FROM sessions WHERE id = ?")
+        .get(input.session.summary.id)?.["revision"];
+      const reusablePrevious = previous?.summary.revision === storedRevision ? previous : undefined;
       writeSource(database, input.session.summary.id, input.source);
       writeSummary(database, input.session);
       const markedReady = markCatalogSessionReady(
@@ -299,10 +423,15 @@ export function replaceCachedSession(
       if (expectedRevision !== undefined && !markedReady) {
         throw new StaleCatalogCommitError();
       }
-      replaceChildren(database, input.session);
+      const changedTurnIds = replaceChildren(database, input.session, reusablePrevious);
       writeDiagnostics(database, input.session.summary.id, input.diagnostics);
-      replaceSessionSearchRows(database, input.session, input.diagnostics);
-      return { status: "committed" };
+      replaceSessionSearchRows(
+        database,
+        input.session,
+        input.diagnostics,
+        reusablePrevious === undefined ? undefined : changedTurnIds,
+      );
+      return { status: "committed", changedTurnIds };
     });
   } catch (error) {
     if (error instanceof StaleCatalogCommitError) {
@@ -324,7 +453,7 @@ export function updateCachedSessionRichContent(
       throw new Error("Refusing to cache rich content for a stale session revision.");
     }
     const updateTurn = database.prepare(`
-      UPDATE turns SET payload_json = ? WHERE session_id = ? AND id = ?
+      UPDATE turns SET payload_json = ?, rich_revision = ? WHERE session_id = ? AND id = ?
     `);
     const updateMessage = database.prepare(`
       UPDATE messages SET body_json = ? WHERE session_id = ? AND id = ?
@@ -334,7 +463,10 @@ export function updateCachedSessionRichContent(
     `);
     for (const turn of session.turns) {
       const validatedTurn = conversationTurnSchema.parse(turn);
-      if (updateTurn.run(json(validatedTurn), session.summary.id, turn.id).changes !== 1) {
+      if (
+        updateTurn.run(json(validatedTurn), session.summary.revision, session.summary.id, turn.id)
+          .changes !== 1
+      ) {
         throw new Error("The cached session turn changed while rich content was being stored.");
       }
       const messages = [
@@ -405,6 +537,20 @@ export function getCachedSession(
             }),
           );
   return { summary, turns, rawEvents };
+}
+
+export function hasCachedSession(
+  database: DatabaseSync,
+  sessionId: string,
+  parserVersion?: number,
+): boolean {
+  return parserVersion === undefined
+    ? database.prepare("SELECT 1 FROM sessions WHERE id = ?").get(sessionId) !== undefined
+    : database
+        .prepare(
+          "SELECT 1 FROM sessions JOIN source_files ON source_files.path = sessions.source_path WHERE sessions.id = ? AND source_files.parser_version = ?",
+        )
+        .get(sessionId, parserVersion) !== undefined;
 }
 
 export function removeCachedSource(database: DatabaseSync, sourcePath: string): string | null {

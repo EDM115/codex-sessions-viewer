@@ -69,6 +69,21 @@ afterEach(async () => {
 });
 
 describe("Pagefind offline bundle", () => {
+  it("retains parent identity in static child search records", async () => {
+    const conversation = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: "C:/fixtures/child.jsonl",
+      scope: "active",
+      revision: "sha256:child-search",
+    });
+    conversation.summary.parentThreadId = "parent-thread";
+    const records = createPagefindTurnRecords([conversation]);
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every((record) => record.meta?.["parentThreadId"] === "parent-thread")).toBe(
+      true,
+    );
+  });
+
   it("writes a local browser index from custom turn records", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-viewer-pagefind-"));
     temporaryDirectories.push(root);
@@ -147,7 +162,7 @@ describe("Pagefind offline bundle", () => {
     );
 
     const baseQuery = { scope: "active" as const, query: "Handle cancellation" };
-    const [availableFilters, results] = await withFileFetch(async () => {
+    const [availableFilters, results, rejected] = await withFileFetch(async () => {
       const filters = await pagefind.filters();
       const searches = [
         await repository.search(baseQuery),
@@ -171,10 +186,20 @@ describe("Pagefind offline bundle", () => {
           hasMedia: true,
         }),
       ];
-      return [filters, searches] as const;
+      const excluded = [
+        await repository.search({ ...baseQuery, scope: "archived" }),
+        await repository.search({ ...baseQuery, model: "other-model" }),
+        await repository.search({ ...baseQuery, cwd: "D:\\other-project" }),
+        await repository.search({ ...baseQuery, tool: "other-tool" }),
+        await repository.search({ ...baseQuery, hasMedia: false }),
+      ];
+      return [filters, searches, excluded] as const;
     });
     expect(availableFilters).toHaveProperty(["cwd", "C%3A%5Cwork%5Cviewer"], 2);
     expect(results.map(({ total }) => total)).toEqual([1, 1, 1, 1, 1]);
+    expect(rejected.map(({ total, items }) => ({ total, items }))).toEqual(
+      Array.from({ length: 5 }, () => ({ total: 0, items: [] })),
+    );
     const result = results.at(-1)!;
 
     expect(result).toMatchObject({

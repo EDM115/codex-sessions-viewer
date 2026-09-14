@@ -197,6 +197,9 @@ export function createPagefindTurnRecords(
         meta: {
           title: conversation.summary.title,
           sessionId: conversation.summary.id,
+          ...(conversation.summary.parentThreadId === null
+            ? {}
+            : { parentThreadId: conversation.summary.parentThreadId }),
           turnId: turn.id,
           ...(messageId === null ? {} : { messageId }),
           date,

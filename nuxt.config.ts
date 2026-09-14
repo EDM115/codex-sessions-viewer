@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
 import { browserSecurityHeaders } from "./server/core/securityHeaders.ts";
@@ -142,6 +143,30 @@ export default defineNuxtConfig({
     },
   },
   hooks: {
+    ready(nuxt) {
+      const nuxtRequire = createRequire(
+        createRequire(import.meta.url).resolve("nuxt/package.json"),
+      );
+      // Volar resolves plugins with Node, so Nuxt's TS aliases cannot expose isolated pnpm dependencies.
+      // Register after Nuxt's page module has added its plugins and preserve their typed-router options.
+      nuxt.hook("prepare:types", ({ tsConfig }) => {
+        const vueOptions = tsConfig.vueCompilerOptions;
+        if (vueOptions?.plugins === undefined) {
+          return;
+        }
+        vueOptions.plugins = vueOptions.plugins.map((plugin) => {
+          const name = typeof plugin === "string" ? plugin : plugin.name;
+          if (
+            name !== "vue-router/volar/sfc-route-blocks" &&
+            name !== "vue-router/volar/sfc-typed-router"
+          ) {
+            return plugin;
+          }
+          const resolvedName = nuxtRequire.resolve(name);
+          return typeof plugin === "string" ? resolvedName : { ...plugin, name: resolvedName };
+        });
+      });
+    },
     "prerender:routes"({ routes }) {
       for (const route of staticSessionRoutes()) {
         routes.add(route);

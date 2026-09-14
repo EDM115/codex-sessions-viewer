@@ -14,6 +14,7 @@ import {
   type TokenUsage,
   type TurnNavigatorItem,
 } from "./conversation.ts";
+import { viewerDiagnosticSchema, type ViewerDiagnostic } from "./diagnostics.ts";
 import {
   conversationListItemSchema,
   type ConversationListItem,
@@ -21,7 +22,6 @@ import {
   type DeepSearchJob,
   type PreparationResult,
 } from "./library.ts";
-
 export type RepositoryMode = "live" | "static";
 
 export interface RepositoryCapabilities {
@@ -67,6 +67,7 @@ export const preparationRequestSchema = z.strictObject({
 
 export interface SearchHit {
   sessionId: string;
+  parentThreadId?: string | null;
   turnId: string;
   messageId: string | null;
   scope: "active" | "archived";
@@ -111,6 +112,7 @@ export interface InspectorRecord {
   eventIds: string[];
   diagnosticIds: string[];
   rawRecords: JsonValue[];
+  diagnostics?: ViewerDiagnostic[];
 }
 
 export interface ResolvedAsset {
@@ -126,6 +128,7 @@ export interface ResolvedAsset {
 }
 
 export type ViewerInvalidationType =
+  | "favicon.updated"
   | "library.updated"
   | "session.updated"
   | "settings.updated"
@@ -216,6 +219,7 @@ export const deepSearchRequestSchema = searchQuerySchema.omit({ cursor: true, li
 
 export const searchHitSchema = z.strictObject({
   sessionId: z.string().min(1),
+  parentThreadId: z.string().min(1).nullable().optional(),
   turnId: z.string().min(1),
   messageId: z.string().nullable(),
   scope: conversationScopeSchema,
@@ -265,6 +269,7 @@ export const inspectorRecordSchema = z.strictObject({
   eventIds: z.array(z.string()),
   diagnosticIds: z.array(z.string()),
   rawRecords: z.array(jsonValueSchema),
+  diagnostics: z.array(viewerDiagnosticSchema).optional(),
 });
 
 export const resolvedAssetSchema = z.strictObject({
@@ -281,6 +286,7 @@ export const resolvedAssetSchema = z.strictObject({
 
 export const viewerInvalidationSchema = z.strictObject({
   type: z.enum([
+    "favicon.updated",
     "library.updated",
     "session.updated",
     "settings.updated",

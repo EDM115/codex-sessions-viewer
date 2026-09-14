@@ -1,28 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { richTextSanitizeSchema } from "../../../server/content/sanitizeSchema.ts";
+import { parseRichText } from "../../../server/content/parseRichText.ts";
 import { sanitizeSvg } from "../../../server/content/sanitizeSvg.ts";
 
 describe("sanitizer policy", () => {
-  it("keeps only explicit network protocols and strips active document containers", () => {
-    expect(richTextSanitizeSchema.protocols).toMatchObject({
-      href: ["http", "https", "mailto"],
-      src: ["http", "https", "data"],
-    });
-    expect(richTextSanitizeSchema.strip).toEqual(
-      expect.arrayContaining([
-        "script",
-        "style",
-        "iframe",
-        "object",
-        "embed",
-        "form",
-        "audio",
-        "video",
-        "canvas",
-        "template",
-      ]),
+  it("drops active document containers and their bodies while retaining adjacent prose", async () => {
+    const { document } = await parseRichText(
+      "<p>Before safe prose.</p><form>hidden-form</form><object>hidden-object</object><canvas>hidden-canvas</canvas><template>hidden-template</template><style>hidden-style</style><p>After safe prose.</p>",
     );
+    const serialized = JSON.stringify(document);
+    expect(serialized).toContain("Before safe prose.");
+    expect(serialized).toContain("After safe prose.");
+    expect(serialized).not.toMatch(/hidden-(?:form|object|canvas|template|style)/u);
   });
 
   it("rejects non-SVG input and strips scripts, events, external references, and animation", async () => {

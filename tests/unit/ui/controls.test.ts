@@ -55,7 +55,7 @@ describe("Task 9 UI controls", () => {
     expect(wrapper.find('[role="tooltip"]').exists()).toBe(false);
   });
 
-  it("keeps field geometry stable while associating helper and error content", async () => {
+  it("associates helper and error content and emits edited field values", async () => {
     const wrapper = mount(UiTextField, {
       props: {
         id: "codex-home",
@@ -133,7 +133,7 @@ describe("Task 9 UI controls", () => {
     wrapper.unmount();
   });
 
-  it("provides keyboard-dismissible disclosure and menu surfaces", async () => {
+  it("renders a disclosure label and dismisses an opened menu with Escape", async () => {
     const disclosure = mount(UiDisclosure, {
       props: { label: "Cache diagnostics" },
       slots: { default: "No parser diagnostics." },
@@ -151,7 +151,7 @@ describe("Task 9 UI controls", () => {
     expect(menu.find('[role="menu"]').exists()).toBe(false);
   });
 
-  it("keeps the test-only control preview exhaustive and out of production routing", () => {
+  it("smoke-renders the control preview states and sections", () => {
     const wrapper = mount(ControlStatesPreview);
 
     expect(wrapper.findAll('[data-preview-state="default"]')).not.toHaveLength(0);

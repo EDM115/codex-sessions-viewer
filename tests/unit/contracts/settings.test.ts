@@ -33,8 +33,13 @@ describe("presentation settings migration", () => {
         wrapCode: true,
       }),
     ).toEqual({
-      ...DEFAULT_PRESENTATION_SETTINGS,
+      theme: "midnight-glass",
+      toolCallsDefault: "collapsed",
+      reasoningDefault: "collapsed",
+      timestampFormat: "both",
       wrapCode: true,
+      liveFollow: true,
+      turnMinimap: true,
     });
   });
 

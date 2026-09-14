@@ -345,8 +345,39 @@ describe("Markdown copy serializers", () => {
     expect(markdown).toContain("Earlier context.");
     expect(markdown).toContain("C:/images/a b.png");
     expect(markdown).toContain("Untimed response.");
-    expect(markdown).not.toContain("reasoning-empty");
+    expect(markdown).not.toContain("#### Reasoning");
+    expect(markdown).not.toContain("Final response.");
     expect(markdown).not.toContain("future");
+  });
+
+  it("uses explicit entry order across progress, steering, and activities even when timestamps disagree", () => {
+    const value = turn();
+    value.assistantMessages = [
+      {
+        ...message("assistant", "Progress before tool."),
+        id: "progress",
+        createdAt: "2026-08-13T10:00:09.000Z",
+      },
+      { ...message("assistant", "Final answer."), id: "final" },
+    ];
+    value.finalAssistantMessageId = "final";
+    value.steeringMessages = [{ ...message("user", "Steering after tool."), id: "steering" }];
+    value.activities = [tool];
+    value.entryOrder = [
+      { kind: "message", id: value.userMessage!.id },
+      { kind: "message", id: "progress" },
+      { kind: "activity", id: tool.id },
+      { kind: "message", id: "steering" },
+      { kind: "message", id: "final" },
+    ];
+
+    const markdown = serializeAgentWork(value);
+    expect(
+      markdown.match(/Progress before tool\.|functions\.shell_command|Steering after tool\./gu),
+    ).toEqual(["Progress before tool.", "functions.shell_command", "Steering after tool."]);
+    expect(markdown).toContain("#### You — steering\n\nSteering after tool.");
+    expect(markdown).not.toContain("Final answer.");
+    expect(markdown).not.toContain("Inspect `src/index.ts`.");
   });
 
   it("formats short and fractional tool durations, unqualified names, errors, and missing prompts", () => {

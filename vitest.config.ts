@@ -69,6 +69,7 @@ export default defineConfig({
         },
         test: {
           name: "ui",
+          setupFiles: ["./tests/helpers/uiSetup.ts"],
           include: [
             "tests/unit/content-rendering/**/*.{test,spec}.ts",
             "tests/unit/ui/**/*.{test,spec}.ts",

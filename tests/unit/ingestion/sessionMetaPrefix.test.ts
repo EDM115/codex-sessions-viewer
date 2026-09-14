@@ -70,16 +70,67 @@ describe("readSessionMetaPrefix", () => {
 
     try {
       await expect(readSessionMetaPrefix(incomplete, 4_096)).resolves.toMatchObject({
-        status: "missing",
+        status: "incomplete",
         meta: null,
       });
       await expect(readSessionMetaPrefix(oversized, 512)).resolves.toMatchObject({
-        status: "missing",
+        status: "exhausted",
         meta: null,
         parentThreadIdHint: "parent",
         bytesRead: 512,
       });
       await expect(readSessionMetaPrefix(linked, 4_096)).rejects.toThrow("regular rollout file");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("extends only the first record up to an explicit cap and distinguishes malformed, incomplete and exhausted evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "viewer-prefix-cap-"));
+    try {
+      const large = join(root, "large.jsonl");
+      await writeFile(
+        large,
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "large", padding: "x".repeat(24_000), parent_thread_id: "parent" },
+        }) +
+          "\n" +
+          "body".repeat(100_000),
+      );
+      const result = await readSessionMetaPrefix(large, 4_096, { firstRecordMaxBytes: 256 * 1024 });
+      expect(result).toMatchObject({
+        status: "found",
+        meta: { id: "large", parentThreadId: "parent" },
+      });
+      expect(result.bytesRead).toBeLessThan(28_672);
+      const capped = join(root, "capped.jsonl");
+      await writeFile(
+        capped,
+        JSON.stringify({
+          type: "session_meta",
+          payload: { padding: "x".repeat(300_000), id: "capped", parent_thread_id: "late" },
+        }) + "\n",
+      );
+      const exhausted = await readSessionMetaPrefix(capped, 4_096, {
+        firstRecordMaxBytes: 256 * 1024,
+      });
+      expect(exhausted).toMatchObject({
+        status: "exhausted",
+        meta: null,
+        parentThreadIdHint: null,
+        bytesRead: 256 * 1024,
+      });
+      expect(exhausted.diagnostics[0]?.code).toBe("source.metadata_budget_exhausted");
+      const malformed = join(root, "invalid.jsonl");
+      await writeFile(malformed, '{"type":"session_meta", invalid}\n');
+      expect((await readSessionMetaPrefix(malformed, 4_096)).status).toBe("invalid");
+      const incomplete = join(root, "incomplete.jsonl");
+      const meta = JSON.stringify({ type: "session_meta", payload: { id: "incomplete" } });
+      await writeFile(incomplete, meta);
+      expect((await readSessionMetaPrefix(incomplete, 4_096)).status).toBe("incomplete");
+      await writeFile(incomplete, meta + "\n");
+      expect((await readSessionMetaPrefix(incomplete, 4_096)).status).toBe("found");
     } finally {
       await rm(root, { recursive: true, force: true });
     }

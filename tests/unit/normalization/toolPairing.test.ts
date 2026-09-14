@@ -33,7 +33,7 @@ function scoped(...events: CodexEvent[]): TurnScopedEvent[] {
 }
 
 describe("tool call pairing", () => {
-  it("pairs function calls and outputs by call ID while preserving namespace and name", () => {
+  it("pairs overlapping function calls by ID when outputs arrive in reverse order", () => {
     const result = pairToolCalls(
       scoped(
         event(1, "2026-01-01T10:00:00.000Z", {
@@ -43,7 +43,19 @@ describe("tool call pairing", () => {
           name: "read_file",
           arguments: '{"path":"C:\\\\work\\\\file.ts"}',
         }),
-        event(2, "2026-01-01T10:00:00.250Z", {
+        event(2, "2026-01-01T10:00:00.050Z", {
+          type: "function_call",
+          call_id: "call-2",
+          namespace: "network",
+          name: "fetch",
+          arguments: '{"url":"https://example.test/status"}',
+        }),
+        event(3, "2026-01-01T10:00:00.150Z", {
+          type: "function_call_output",
+          call_id: "call-2",
+          output: '{"status":503}',
+        }),
+        event(4, "2026-01-01T10:00:00.250Z", {
           type: "function_call_output",
           call_id: "call-1",
           output: '{"content":"ok"}',
@@ -56,7 +68,7 @@ describe("tool call pairing", () => {
         id: "tool-call-1",
         turnId: "turn-1",
         createdAt: "2026-01-01T10:00:00.000Z",
-        rawEventIds: ["raw-100", "raw-200"],
+        rawEventIds: ["raw-100", "raw-400"],
         kind: "tool",
         namespace: "filesystem",
         name: "read_file",
@@ -69,8 +81,17 @@ describe("tool call pairing", () => {
         output: { content: "ok" },
         error: null,
       },
+      expect.objectContaining({
+        callId: "call-2",
+        namespace: "network",
+        name: "fetch",
+        rawEventIds: ["raw-200", "raw-300"],
+        input: { url: "https://example.test/status" },
+        output: { status: 503 },
+        durationMs: 100,
+      }),
     ]);
-    expect(result.consumedEventIds).toEqual(["raw-100", "raw-200"]);
+    expect(result.consumedEventIds).toEqual(["raw-100", "raw-200", "raw-300", "raw-400"]);
   });
 
   it("keeps a call without an output and marks unknown status and duration", () => {

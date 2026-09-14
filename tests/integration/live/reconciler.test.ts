@@ -163,7 +163,7 @@ describe("live reconciliation", () => {
       );
       const sessionEvent = events.find(({ type }) => type === "session.updated");
       expect(sessionEvent?.ids).toContain(getCachedSession(database, sessionId)?.turns.at(-1)?.id);
-      expect(readOffsets).toEqual([0, 0]);
+      expect(readOffsets).toEqual([0, Buffer.byteLength(await fixture())]);
     } finally {
       await reconciler.close();
       database.close();

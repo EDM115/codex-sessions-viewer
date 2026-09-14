@@ -134,6 +134,7 @@ describe("conversation repository adapters", () => {
         updatedAt: "2026-08-14T09:00:00.000Z",
       }),
     ];
+    const originalSessions = structuredClone(sessions);
     const request = vi.fn<RepositoryRequester>(async () => ({ version: 1, sessions }));
     const repository = new StaticConversationRepository(request, async () => ({
       search: vi.fn<PagefindBrowserApi["search"]>(async () => ({ results: [] })),
@@ -157,7 +158,7 @@ describe("conversation repository adapters", () => {
       nextCursor: null,
       items: [{ summary: { id: "session-3" } }],
     });
-    expect(sessions).toHaveLength(3);
+    expect(sessions).toEqual(originalSessions);
     expect(request).toHaveBeenCalledTimes(2);
   });
 
@@ -771,7 +772,8 @@ describe("conversation repository adapters", () => {
     );
     expect(received).toHaveBeenCalledTimes(2);
     unsubscribe();
-    expect(removeEventListener).toHaveBeenCalledTimes(5);
+    expect(removeEventListener).toHaveBeenCalledTimes(listeners.size);
+    expect(removeEventListener).toHaveBeenCalledWith("favicon.updated", expect.any(Function));
     expect(close).toHaveBeenCalledOnce();
     vi.unstubAllGlobals();
   });

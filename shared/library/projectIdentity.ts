@@ -40,7 +40,7 @@ function isPathWithin(candidate: string, root: string): boolean {
     return true;
   }
   const separator = isWindowsPath(root) ? "\\" : "/";
-  return candidate.startsWith(`${root}${separator}`);
+  return candidate.startsWith(root.endsWith(separator) ? root : `${root}${separator}`);
 }
 
 function stableFallbackId(source: "git" | "cwd", value: string): string {

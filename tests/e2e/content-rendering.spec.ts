@@ -61,18 +61,12 @@ test("renders code and tables without widening responsive conversation layouts",
   );
 });
 
-test("loads Mermaid only on Preview and exercises the shared SVG viewer", async ({
+test("renders Mermaid on Preview and exercises the shared SVG viewer", async ({
   context,
   page,
   goto,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  const scripts: string[] = [];
-  page.on("response", (response) => {
-    if (response.request().resourceType() === "script") {
-      scripts.push(response.url());
-    }
-  });
   await page.setViewportSize({ width: 1024, height: 900 });
   await goto(sessionRoute, { waitUntil: "hydration" });
 
@@ -82,11 +76,12 @@ test("loads Mermaid only on Preview and exercises the shared SVG viewer", async 
     "true",
   );
   await expect(mermaid.locator("pre")).toContainText("Source --> Preview");
-  const scriptCountBeforePreview = scripts.length;
+  await expect(mermaid.locator("[data-mermaid-preview] svg")).toHaveCount(0);
 
   await mermaid.getByRole("tab", { name: "Preview Mermaid diagram" }).click();
   await expect(mermaid.locator("[data-mermaid-preview] svg")).toBeVisible();
-  expect(scripts.length).toBeGreaterThan(scriptCountBeforePreview);
+  await expect(mermaid.locator("[data-mermaid-preview] svg")).toContainText("Source");
+  await expect(mermaid.locator("[data-mermaid-preview] svg")).toContainText("Preview");
 
   const opener = mermaid.getByRole("button", { name: "Open Mermaid diagram" });
   await opener.click();

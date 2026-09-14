@@ -1,4 +1,4 @@
-import { mount } from "@vue/test-utils";
+import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, effectScope, nextTick, reactive } from "vue";
 
@@ -6,6 +6,7 @@ import {
   createLibraryWorkspace,
   useLibraryWorkspace,
   useOptionalLibraryWorkspace,
+  type LibraryWorkspaceState,
 } from "../../../app/composables/useLibraryWorkspace.ts";
 import type { ConversationSummary } from "../../../shared/types/conversation.ts";
 import type {
@@ -107,12 +108,317 @@ function stubWorkspaceGlobals(
   return { replace };
 }
 
+async function startInvalidations(workspace: LibraryWorkspaceState) {
+  let listener: Parameters<LibraryWorkspaceState["repository"]["subscribe"]>[0] = () => undefined;
+  vi.spyOn(workspace.repository, "subscribe").mockImplementation((callback) => {
+    listener = callback;
+    return () => undefined;
+  });
+  workspace.hydrate({
+    counts: { active: 2, archived: 1 },
+    hits: [],
+    items: [],
+    nextCursor: null,
+    projects: [project],
+    runtimeStatus: { state: "ready", message: null },
+    total: 2,
+  });
+  workspace.start();
+  await flushPromises();
+  return (ids: string[]) => listener({ type: "library.updated", ids, revision: "next" });
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("persistent library workspace state", () => {
+  it.each(["project", "children"])(
+    "replaces an in-flight %s request when an invalidation arrives",
+    async (kind) => {
+      vi.useFakeTimers();
+      let releaseOld!: () => void;
+      const oldGate = new Promise<void>((resolve) => {
+        releaseOld = resolve;
+      });
+      let pageCalls = 0;
+      let oldSignal: AbortSignal | undefined;
+      stubWorkspaceGlobals(reactive({ path: "/", query: {} }), async (path, options) => {
+        if (path === "/api/projects") {
+          return [project];
+        }
+        if (path === "/api/status") {
+          return { state: "ready", message: null };
+        }
+        pageCalls += 1;
+        const old = pageCalls === 1;
+        if (old) {
+          if (options?.["signal"] instanceof AbortSignal) {
+            oldSignal = options["signal"];
+          }
+          await oldGate;
+        }
+        return { items: [item(old ? "stale" : "fresh")], nextCursor: null, total: 1 };
+      });
+      const scope = effectScope();
+      const workspace = scope.run(createLibraryWorkspace)!;
+      const invalidate = await startInvalidations(workspace);
+      const oldRequest =
+        kind === "project"
+          ? workspace.toggleProject("project-1")
+          : workspace.toggleSession(item("parent"));
+      invalidate(["parent"]);
+      await vi.advanceTimersByTimeAsync(0);
+      const page = () =>
+        kind === "project"
+          ? workspace.projectPages.get("project-1")
+          : workspace.childPages.get("parent");
+      expect(oldSignal?.aborted).toBe(true);
+      expect(page()?.items.map(({ summary }) => summary.id)).toEqual(["fresh"]);
+      releaseOld();
+      await oldRequest;
+      expect(page()?.items.map(({ summary }) => summary.id)).toEqual(["fresh"]);
+      expect(page()?.loading).toBe(false);
+      workspace.stop();
+      scope.stop();
+    },
+  );
+
+  it("discards a delayed folder response after filters change without overwriting the new page", async () => {
+    vi.useFakeTimers();
+    const route = reactive({ path: "/", query: { model: "old" } });
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    stubWorkspaceGlobals(route, async (path) => {
+      if (path === "/api/projects") {
+        return [project];
+      }
+      if (path === "/api/status") {
+        return { state: "ready", message: null };
+      }
+      const model = new URL(path, "http://localhost").searchParams.get("model");
+      if (model === "old") {
+        await oldGate;
+      }
+      return { items: [item(model ?? "missing")], nextCursor: null, total: 1 };
+    });
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    const oldRequest = workspace.toggleProject("project-1");
+    route.query.model = "new";
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(workspace.projectPages.get("project-1")?.items[0]?.summary.id).toBe("new");
+    releaseOld();
+    await oldRequest;
+    expect(workspace.projectPages.get("project-1")?.items[0]?.summary.id).toBe("new");
+    workspace.stop();
+    scope.stop();
+  });
+
+  it("refreshes the retained child range and nested branch without fetching unrelated or closed pages", async () => {
+    vi.useFakeTimers();
+    let revision = "old";
+    const requests: string[] = [];
+    const roots = [item("parent"), item("closed-parent")];
+    const child = item("child", "active", "ready", "parent");
+    stubWorkspaceGlobals(reactive({ path: "/", query: {} }), async (path) => {
+      if (path === "/api/projects") {
+        return [project, { ...project, id: "other-project" }];
+      }
+      if (path === "/api/status") {
+        return { state: "ready", message: null };
+      }
+      requests.push(path);
+      const params = new URL(path, "http://localhost").searchParams;
+      const parentId = params.get("parentThreadId");
+      if (parentId === "__root__") {
+        return {
+          items: params.get("projectId") === "other-project" ? [item("unrelated")] : roots,
+          nextCursor: null,
+          total: 2,
+        };
+      }
+      const next = params.has("cursor");
+      const result =
+        parentId === "parent"
+          ? item(next ? "second-child" : "child", "active", "ready", "parent")
+          : item(`${parentId}-descendant`, "active", "ready", parentId);
+      result.summary.title = revision;
+      return {
+        items: [result],
+        nextCursor: parentId === "parent" && !next ? "second" : null,
+        total: parentId === "parent" ? 2 : 1,
+      };
+    });
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    const invalidate = await startInvalidations(workspace);
+    await workspace.toggleProject("project-1");
+    await workspace.toggleProject("other-project");
+    await workspace.toggleSession(roots[0]);
+    await workspace.loadChildren(roots[0], true);
+    await workspace.toggleSession(child);
+    await workspace.loadChildren(roots[1]);
+    requests.length = 0;
+    revision = "fresh";
+    invalidate(["child", "closed-parent-descendant"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      workspace.childPages.get("parent")?.items.map(({ summary }) => [summary.id, summary.title]),
+    ).toEqual([
+      ["child", "fresh"],
+      ["second-child", "fresh"],
+    ]);
+    expect(workspace.childPages.get("child")?.items[0]?.summary.title).toBe("fresh");
+    expect(requests.some((path) => path.includes("projectId=other-project"))).toBe(false);
+    expect(requests.some((path) => path.includes("parentThreadId=closed-parent"))).toBe(false);
+    expect(workspace.expandedSessionIds.value).toEqual(new Set(["parent", "child"]));
+    await workspace.toggleSession(roots[1]);
+    expect(workspace.childPages.get("closed-parent")?.items[0]?.summary.title).toBe("fresh");
+    await workspace.toggleProject("project-1");
+    requests.length = 0;
+    revision = "reopened";
+    invalidate(["child"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requests).toEqual([]);
+    await workspace.toggleProject("project-1");
+    expect(workspace.childPages.get("parent")?.items[0]?.summary.title).toBe("reopened");
+    expect(workspace.childPages.get("child")?.items[0]?.summary.title).toBe("reopened");
+    workspace.stop();
+    scope.stop();
+  });
+
+  it("refreshes other expanded projects when a known root moves without changing project counts", async () => {
+    vi.useFakeTimers();
+    let moved = false;
+    const requestFetch = vi.fn<RequestFetch>(async (path) => {
+      if (path === "/api/projects") {
+        return [project, { ...project, id: "other-project" }];
+      }
+      if (path === "/api/status") {
+        return { state: "ready", message: null };
+      }
+      const targetProject = new URL(path, "http://localhost").searchParams.get("projectId");
+      const hasParent = (targetProject === "project-1") !== moved;
+      return {
+        items: [{ ...item(hasParent ? "parent" : "other"), projectId: targetProject }],
+        nextCursor: null,
+        total: 1,
+      };
+    });
+    stubWorkspaceGlobals(reactive({ path: "/", query: {} }), requestFetch);
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    const invalidate = await startInvalidations(workspace);
+    await workspace.toggleProject("project-1");
+    await workspace.toggleProject("other-project");
+    moved = true;
+    invalidate(["parent"]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(workspace.projectPages.get("project-1")?.items[0]?.summary.id).toBe("other");
+    expect(workspace.projectPages.get("other-project")?.items[0]?.summary.id).toBe("parent");
+    workspace.stop();
+    scope.stop();
+  });
+
+  it("does not launch expanded-page followups after stopping a pending refresh", async () => {
+    vi.useFakeTimers();
+    let releaseProjects!: () => void;
+    const projectGate = new Promise<void>((resolve) => {
+      releaseProjects = resolve;
+    });
+    let delayProjects = false;
+    const requestFetch = vi.fn<RequestFetch>(async (path) => {
+      if (path === "/api/projects") {
+        if (delayProjects) {
+          await projectGate;
+        }
+        return [project];
+      }
+      if (path === "/api/status") {
+        return { state: "ready", message: null };
+      }
+      return { items: [item("parent")], nextCursor: null, total: 1 };
+    });
+    stubWorkspaceGlobals(reactive({ path: "/", query: {} }), requestFetch);
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    const invalidate = await startInvalidations(workspace);
+    await workspace.toggleProject("project-1");
+    delayProjects = true;
+    invalidate(["parent"]);
+    await vi.advanceTimersByTimeAsync(0);
+    workspace.stop();
+    requestFetch.mockClear();
+    releaseProjects();
+    await flushPromises();
+    expect(requestFetch).not.toHaveBeenCalled();
+    scope.stop();
+  });
+
+  it("expands immediately and retains independent expansions when requests finish out of order", async () => {
+    const releases = new Map<string, () => void>();
+    stubWorkspaceGlobals(reactive({ path: "/", query: {} }), async (path) => {
+      const id = new URL(path, "http://localhost").searchParams.get("projectId")!;
+      await new Promise<void>((resolve) => releases.set(id, resolve));
+      return { items: [item(id)], nextCursor: null, total: 1 };
+    });
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    const first = workspace.toggleProject("first");
+    const second = workspace.toggleProject("second");
+    expect([...workspace.expandedProjectIds.value]).toEqual(["first", "second"]);
+    expect(workspace.projectPages.get("first")?.loading).toBe(true);
+    releases.get("second")!();
+    await second;
+    await workspace.toggleProject("first");
+    releases.get("first")!();
+    await first;
+    expect([...workspace.expandedProjectIds.value]).toEqual(["second"]);
+    scope.stop();
+  });
+
+  it("loads structural children without parent project or content filters and preserves later pages on refresh", async () => {
+    const paths: string[] = [];
+    stubWorkspaceGlobals(
+      reactive({
+        path: "/",
+        query: { q: "root text", model: "root model", cwd: "root cwd", media: "1" },
+      }),
+      async (path) => {
+        paths.push(path);
+        const second = path.includes("cursor=next");
+        return {
+          items: [item(second ? "second" : "first", "archived", "ready", "parent")],
+          nextCursor: second ? null : "next",
+          total: 2,
+        };
+      },
+    );
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    const parent = item("parent");
+    await workspace.loadChildren(parent);
+    await workspace.loadChildren(parent, true);
+    await workspace.loadChildren(parent);
+    expect(workspace.childPages.get("parent")?.items.map(({ summary }) => summary.id)).toEqual([
+      "first",
+      "second",
+    ]);
+    expect(paths).toHaveLength(4);
+    for (const path of paths) {
+      const params = new URL(path, "http://localhost").searchParams;
+      expect(params.get("parentThreadId")).toBe("parent");
+      for (const filter of ["projectId", "query", "model", "cwd", "hasMedia"]) {
+        expect(params.has(filter)).toBe(false);
+      }
+    }
+    scope.stop();
+  });
   it("settles delayed static counts once and retains them across session navigation", async () => {
     const route = reactive({ path: "/", query: {}, params: {} });
     let resolveProjects!: (value: unknown) => void;
@@ -387,17 +693,17 @@ describe("persistent library workspace state", () => {
         return { state: "ready", message: null };
       }
       if (path.startsWith("/api/search?")) {
-        searchCall += 1;
-        if (searchCall === 1) {
+        const currentCall = ++searchCall;
+        if (currentCall === 1) {
           await firstGate;
         }
-        if (searchCall === 3) {
+        if (currentCall === 3) {
           throw new Error("search failed");
         }
         return {
           items: [
             {
-              sessionId: `session-${searchCall}`,
+              sessionId: `session-${currentCall}`,
               turnId: "turn-1",
               messageId: null,
               scope: "active",
@@ -406,7 +712,7 @@ describe("persistent library workspace state", () => {
               score: 1,
             },
           ],
-          nextCursor: searchCall === 2 ? "next" : null,
+          nextCursor: currentCall === 2 ? "next" : null,
           total: 2,
         };
       }
@@ -731,7 +1037,8 @@ describe("persistent library workspace state", () => {
       requestFetch.mock.calls.filter(([path]) => path === "/api/projects").length,
     ).toBeGreaterThan(1);
     workspace.stop();
-    expect(removeEventListener).toHaveBeenCalledTimes(5);
+    expect(listeners.size).toBe(0);
+    expect(removeEventListener).toHaveBeenCalledWith("favicon.updated", expect.any(Function));
     expect(close).toHaveBeenCalledOnce();
     scope.stop();
     vi.useRealTimers();

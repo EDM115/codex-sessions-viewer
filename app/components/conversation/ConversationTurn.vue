@@ -11,6 +11,7 @@ import ConversationWorkStream from "./ConversationWorkStream.vue";
 import { agentWorkText } from "./format.ts";
 
 const props = defineProps<{
+  anchorPrefix?: string;
   reasoningDefault: PresentationSettings["reasoningDefault"];
   resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
   resolveFavicon?: (origin: string) => Promise<string | null>;
@@ -23,10 +24,11 @@ const emit = defineEmits<{
   beforeResize: [];
   inspect: [target: InspectorTarget];
   openMedia: [item: MediaViewerItem];
+  openChild: [id: string];
   resized: [];
 }>();
 
-const workText = computed(() => agentWorkText(props.turn));
+const workText = () => agentWorkText(props.turn);
 const finalAssistant = computed(
   () =>
     props.turn.assistantMessages.find(({ id }) => id === props.turn.finalAssistantMessageId) ??
@@ -36,7 +38,11 @@ const finalAssistant = computed(
 </script>
 
 <template>
-  <section class="conversation-turn" :id="`turn-${turn.id}`" :data-turn-id="turn.id">
+  <section
+    class="conversation-turn"
+    :id="`${anchorPrefix ?? 'turn-'}${turn.id}`"
+    :data-turn-id="turn.id"
+  >
     <ConversationMessage
       v-if="turn.userMessage !== null"
       :message="turn.userMessage"
@@ -51,6 +57,9 @@ const finalAssistant = computed(
       :resolve-favicon="resolveFavicon"
       @before-resize="emit('beforeResize')"
       @resized="emit('resized')"
+      @open-media="emit('openMedia', $event)"
+      @inspect="emit('inspect', $event)"
+      @open-child="emit('openChild', $event)"
     />
     <ConversationMessage
       v-if="finalAssistant !== null"

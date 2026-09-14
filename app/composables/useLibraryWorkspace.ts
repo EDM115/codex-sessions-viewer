@@ -90,6 +90,10 @@ export interface LibraryWorkspaceState {
   tool: Readonly<Ref<string>>;
   updateQuery(name: string, value: string | boolean): void;
   retryPreparation(id: string): Promise<void>;
+  sessionDestination(
+    id: string,
+    turnId?: string,
+  ): { path: string; query: Record<string, string>; hash?: string };
 }
 
 const libraryWorkspaceKey: InjectionKey<LibraryWorkspaceState> = Symbol("library-workspace");
@@ -210,6 +214,15 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
   const expandedSessionIds = ref(new Set<string>());
   const projectPages = reactive(new Map<string, LibraryPageState>());
   const childPages = reactive(new Map<string, LibraryPageState>());
+  const childParents = new Map<string, ConversationListItem>();
+  const pageRequests = new Map<LibraryPageState, AbortController>();
+  const dirtyPages = new WeakSet<LibraryPageState>();
+  let pageGeneration = 0;
+  let refreshGeneration = 0;
+  let stopped = false;
+  let refreshAllPages = false;
+  const refreshProjectIds = new Set<string>();
+  const refreshParentIds = new Set<string>();
   const hasSettledContent = computed(
     () => projects.value.length > 0 || items.value.length > 0 || hits.value.length > 0,
   );
@@ -284,23 +297,45 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     }
     page.loading = true;
     page.error = null;
+    const requestGeneration = pageGeneration;
+    const request = new AbortController();
+    pageRequests.set(page, request);
     try {
-      const result = await repository.listSessions({
-        ...listQuery(append ? (page.nextCursor ?? undefined) : undefined),
-        projectId,
-        parentThreadId: "__root__",
-      });
+      const result = await reloadPage(
+        {
+          ...listQuery(append ? (page.nextCursor ?? undefined) : undefined),
+          projectId,
+          parentThreadId: "__root__",
+        },
+        append ? 0 : page.items.length,
+        request.signal,
+      );
+      if (request.signal.aborted || requestGeneration !== pageGeneration) {
+        return;
+      }
       page.items = append ? [...page.items, ...result.items] : result.items;
       page.nextCursor = result.nextCursor;
       page.total = result.total;
+      for (const item of result.items) {
+        if (childParents.has(item.summary.id)) {
+          childParents.set(item.summary.id, item);
+        }
+      }
+      dirtyPages.delete(page);
     } catch (reason) {
-      page.error = errorMessage(reason);
+      if (!request.signal.aborted && requestGeneration === pageGeneration) {
+        page.error = errorMessage(reason);
+      }
     } finally {
-      page.loading = false;
+      if (pageRequests.get(page) === request) {
+        page.loading = false;
+        pageRequests.delete(page);
+      }
     }
   }
 
   async function loadChildren(parent: ConversationListItem, append = false): Promise<void> {
+    childParents.set(parent.summary.id, parent);
     const page = childPages.get(parent.summary.id) ?? reactive(emptyPage());
     childPages.set(parent.summary.id, page);
     if (page.loading || (append && page.nextCursor === null)) {
@@ -308,42 +343,107 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     }
     page.loading = true;
     page.error = null;
+    const requestGeneration = pageGeneration;
+    const request = new AbortController();
+    pageRequests.set(page, request);
     try {
-      const result = await repository.listSessions({
-        ...listQuery(append ? (page.nextCursor ?? undefined) : undefined),
-        projectId: parent.projectId,
-        parentThreadId: parent.summary.id,
-      });
+      const result = await reloadPage(
+        {
+          scope: scope.value,
+          limit: 20,
+          ...(append && page.nextCursor !== null ? { cursor: page.nextCursor } : {}),
+          parentThreadId: parent.summary.id,
+        },
+        append ? 0 : page.items.length,
+        request.signal,
+      );
+      if (request.signal.aborted || requestGeneration !== pageGeneration) {
+        return;
+      }
       page.items = append ? [...page.items, ...result.items] : result.items;
       page.nextCursor = result.nextCursor;
       page.total = result.total;
+      for (const item of result.items) {
+        if (childParents.has(item.summary.id)) {
+          childParents.set(item.summary.id, item);
+        }
+      }
+      dirtyPages.delete(page);
     } catch (reason) {
-      page.error = errorMessage(reason);
+      if (!request.signal.aborted && requestGeneration === pageGeneration) {
+        page.error = errorMessage(reason);
+      }
     } finally {
-      page.loading = false;
+      if (pageRequests.get(page) === request) {
+        page.loading = false;
+        pageRequests.delete(page);
+      }
     }
   }
 
   async function toggleProject(projectId: string): Promise<void> {
+    const requestGeneration = refreshGeneration;
     const expanded = new Set(expandedProjectIds.value);
     if (expanded.has(projectId)) {
       expanded.delete(projectId);
     } else {
       expanded.add(projectId);
-      await loadProject(projectId);
     }
     expandedProjectIds.value = expanded;
+    const page = projectPages.get(projectId);
+    if (expanded.has(projectId) && (page === undefined || dirtyPages.has(page))) {
+      await loadProject(projectId);
+    }
+    if (expandedProjectIds.value.has(projectId)) {
+      await refreshDirtyChildren(requestGeneration);
+    }
   }
 
   async function toggleSession(item: ConversationListItem): Promise<void> {
+    const requestGeneration = refreshGeneration;
     const expanded = new Set(expandedSessionIds.value);
     if (expanded.has(item.summary.id)) {
       expanded.delete(item.summary.id);
     } else {
       expanded.add(item.summary.id);
-      await loadChildren(item);
     }
     expandedSessionIds.value = expanded;
+    const page = childPages.get(item.summary.id);
+    if (expanded.has(item.summary.id) && (page === undefined || dirtyPages.has(page))) {
+      await loadChildren(item);
+    }
+    if (expandedSessionIds.value.has(item.summary.id)) {
+      await refreshDirtyChildren(requestGeneration);
+    }
+  }
+
+  // Refresh the already loaded range so a source update does not discard later pages.
+  async function reloadPage(
+    pageQuery: SessionListQuery,
+    retainedCount: number,
+    signal: AbortSignal,
+  ) {
+    const first = await repository.listSessions(pageQuery, { signal });
+    const result = { ...first, items: [...first.items] };
+    const cursors = new Set<string>();
+    while (
+      result.items.length < retainedCount &&
+      result.nextCursor !== null &&
+      !cursors.has(result.nextCursor)
+    ) {
+      signal.throwIfAborted();
+      cursors.add(result.nextCursor);
+      // Each opaque cursor comes from the preceding response.
+      // oxlint-disable-next-line no-await-in-loop
+      const next = await repository.listSessions(
+        { ...pageQuery, cursor: result.nextCursor },
+        { signal },
+      );
+      result.items.push(...next.items);
+      result.nextCursor = next.nextCursor;
+      result.total = next.total;
+    }
+    return result;
   }
 
   function updateMaterialization(id: string, state: ConversationListItem["materialization"]): void {
@@ -463,20 +563,244 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     readinessTimer = setTimeout(() => void pollReadiness(), 750);
   }
 
-  function scheduleRefresh(): void {
+  function cancelPage(page: LibraryPageState): void {
+    pageRequests.get(page)?.abort();
+    pageRequests.delete(page);
+    page.loading = false;
+  }
+
+  function markChangedPages(ids: readonly string[]): void {
+    for (const id of ids) {
+      let known = false;
+      for (const [projectId, page] of projectPages) {
+        if (page.items.some(({ summary }) => summary.id === id)) {
+          known = true;
+          refreshProjectIds.add(projectId);
+        }
+      }
+      for (const [parentId, page] of childPages) {
+        if (parentId === id || page.items.some(({ summary }) => summary.id === id)) {
+          known = true;
+          refreshParentIds.add(parentId);
+          let ancestor: string | null = parentId;
+          const visited = new Set<string>();
+          while (ancestor !== null && !visited.has(ancestor)) {
+            visited.add(ancestor);
+            const currentAncestor = ancestor;
+            for (const [projectId, roots] of projectPages) {
+              if (roots.items.some(({ summary }) => summary.id === currentAncestor)) {
+                refreshProjectIds.add(projectId);
+              }
+            }
+            ancestor = childParents.get(ancestor)?.parentThreadId ?? null;
+          }
+        }
+      }
+      // An unseen session may be a new root, moved child or newly discovered parent.
+      if (!known) {
+        refreshAllPages = true;
+      }
+    }
+  }
+
+  function scheduleRefresh(resetPages = false, changedIds?: readonly string[]): void {
+    if (stopped) {
+      return;
+    }
+    refreshGeneration += 1;
     if (timer !== null) {
       clearTimeout(timer);
     }
     controller?.abort();
-    projectPages.clear();
-    childPages.clear();
+    if (changedIds === undefined) {
+      refreshAllPages = true;
+    } else {
+      markChangedPages(changedIds);
+    }
+    for (const [id, page] of projectPages) {
+      if (resetPages || refreshAllPages || refreshProjectIds.has(id)) {
+        dirtyPages.add(page);
+        cancelPage(page);
+      }
+    }
+    for (const [id, page] of childPages) {
+      if (resetPages || refreshAllPages || refreshParentIds.has(id)) {
+        dirtyPages.add(page);
+        cancelPage(page);
+      }
+    }
+    if (resetPages) {
+      pageGeneration += 1;
+      projectPages.clear();
+      childPages.clear();
+    }
     timer = setTimeout(() => void refreshExpandedProjects(), query.value.trim() === "" ? 0 : 250);
   }
 
   async function refreshExpandedProjects(): Promise<void> {
+    const requestGeneration = refreshGeneration;
+    const previousProjects = projects.value;
     await refresh();
+    if (stopped || requestGeneration !== refreshGeneration) {
+      return;
+    }
+    for (const project of projects.value) {
+      const previous = previousProjects.find(({ id }) => id === project.id);
+      if (
+        previous?.activeCount !== project.activeCount ||
+        previous?.archivedCount !== project.archivedCount
+      ) {
+        refreshProjectIds.add(project.id);
+        const page = projectPages.get(project.id);
+        if (page !== undefined) {
+          cancelPage(page);
+        }
+      }
+    }
     if (query.value.trim() === "") {
-      await Promise.all([...expandedProjectIds.value].map((id) => loadProject(id)));
+      const previousRoots = new Map([...projectPages].map(([id, page]) => [id, page.items]));
+      const refreshedProjects = [...expandedProjectIds.value].filter(
+        (id) => refreshAllPages || refreshProjectIds.has(id) || !projectPages.has(id),
+      );
+      await Promise.all(refreshedProjects.map((id) => loadProject(id)));
+      if (stopped || requestGeneration !== refreshGeneration) {
+        return;
+      }
+      // A root leaving its loaded range may have moved to another project or parent.
+      if (
+        refreshedProjects.some((id) =>
+          previousRoots
+            .get(id)
+            ?.some(
+              (item) =>
+                !projectPages.get(id)?.items.some(({ summary }) => summary.id === item.summary.id),
+            ),
+        )
+      ) {
+        refreshAllPages = true;
+        for (const [id, page] of projectPages) {
+          if (!refreshedProjects.includes(id)) {
+            dirtyPages.add(page);
+            cancelPage(page);
+          }
+        }
+        await Promise.all(
+          [...expandedProjectIds.value]
+            .filter((id) => !refreshedProjects.includes(id))
+            .map((id) => loadProject(id)),
+        );
+      }
+      if (stopped || requestGeneration !== refreshGeneration) {
+        return;
+      }
+      const previousChildren = new Map([...childPages].map(([id, page]) => [id, page.items]));
+      const refreshedParents = [...expandedSessionIds.value].filter(
+        (id) => refreshAllPages || refreshParentIds.has(id) || !childPages.has(id),
+      );
+      await refreshChildPages(refreshedParents, requestGeneration);
+      if (stopped || requestGeneration !== refreshGeneration) {
+        return;
+      }
+      if (
+        refreshedParents.some((id) =>
+          previousChildren
+            .get(id)
+            ?.some(
+              (item) =>
+                !childPages.get(id)?.items.some(({ summary }) => summary.id === item.summary.id),
+            ),
+        )
+      ) {
+        await refreshChildPages(
+          [...expandedSessionIds.value].filter((id) => !refreshedParents.includes(id)),
+          requestGeneration,
+        );
+        for (const [id, page] of childPages) {
+          if (!expandedSessionIds.value.has(id)) {
+            dirtyPages.add(page);
+          }
+        }
+      }
+    }
+    if (stopped || requestGeneration !== refreshGeneration) {
+      return;
+    }
+    refreshAllPages = false;
+    refreshProjectIds.clear();
+    refreshParentIds.clear();
+  }
+
+  function parentIsVisible(parent: ConversationListItem): boolean {
+    const visited = new Set<string>();
+    let current = parent;
+    while (current.parentThreadId !== null) {
+      if (visited.has(current.summary.id)) {
+        return false;
+      }
+      visited.add(current.summary.id);
+      const ancestorId = current.parentThreadId;
+      const currentId = current.summary.id;
+      if (
+        !expandedSessionIds.value.has(ancestorId) ||
+        !childPages.get(ancestorId)?.items.some(({ summary }) => summary.id === currentId)
+      ) {
+        return false;
+      }
+      const ancestor = childParents.get(ancestorId);
+      if (ancestor === undefined) {
+        return false;
+      }
+      current = ancestor;
+    }
+    return (
+      projectPages.size === 0 ||
+      [...expandedProjectIds.value].some((projectId) =>
+        projectPages.get(projectId)?.items.some(({ summary }) => summary.id === current.summary.id),
+      )
+    );
+  }
+
+  async function refreshDirtyChildren(requestGeneration: number): Promise<void> {
+    await refreshChildPages(
+      [...expandedSessionIds.value].filter((id) => {
+        const page = childPages.get(id);
+        return page !== undefined && dirtyPages.has(page);
+      }),
+      requestGeneration,
+    );
+  }
+
+  async function refreshChildPages(ids: string[], requestGeneration: number): Promise<void> {
+    const pending = new Set(ids);
+    while (pending.size > 0) {
+      if (stopped || requestGeneration !== refreshGeneration) {
+        return;
+      }
+      const parents = [...pending].filter(
+        (id) => !pending.has(childParents.get(id)?.parentThreadId ?? ""),
+      );
+      if (parents.length === 0) {
+        return;
+      }
+      // A nested page is refreshed only after its containing page has settled.
+      // oxlint-disable-next-line no-await-in-loop
+      await Promise.all(
+        parents.map(async (id) => {
+          pending.delete(id);
+          const parent = childParents.get(id);
+          if (parent === undefined) {
+            return;
+          }
+          if (!parentIsVisible(parent)) {
+            const page = childPages.get(id);
+            if (page !== undefined) {
+              dirtyPages.add(page);
+            }
+            return;
+          }
+          await loadChildren(parent);
+        }),
+      );
     }
   }
 
@@ -490,13 +814,32 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     void router.replace({ query: next });
   }
 
-  watch([scope, query, model, cwd, tool, hasMedia], scheduleRefresh);
+  function sessionDestination(id: string, turnId?: string) {
+    const navigationQuery: Record<string, string> = {};
+    for (const name of ["scope", "q", "model", "cwd", "tool", "media"]) {
+      const value = stringQuery(name);
+      if (value !== "") {
+        navigationQuery[name] = value;
+      }
+    }
+    if (turnId !== undefined) {
+      navigationQuery["turn"] = turnId;
+    }
+    return {
+      path: `/session/${encodeURIComponent(id)}`,
+      query: navigationQuery,
+      ...(turnId === undefined ? {} : { hash: `#turn-${encodeURIComponent(turnId)}` }),
+    };
+  }
+
+  watch([scope, query, model, cwd, tool, hasMedia], () => scheduleRefresh(true));
 
   function start(): void {
+    stopped = false;
     unsubscribe = repository.subscribe((event) => {
       if (event.type === "library.updated") {
         if (event.ids.length > 0) {
-          scheduleRefresh();
+          scheduleRefresh(false, event.ids);
         }
       } else if (
         event.type === "search.updated" &&
@@ -519,6 +862,12 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
   }
 
   function stop(): void {
+    stopped = true;
+    refreshGeneration += 1;
+    pageGeneration += 1;
+    for (const page of pageRequests.keys()) {
+      cancelPage(page);
+    }
     unsubscribe();
     controller?.abort();
     preparationController?.abort();
@@ -573,6 +922,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     tool,
     updateQuery,
     retryPreparation,
+    sessionDestination,
   };
 }
 

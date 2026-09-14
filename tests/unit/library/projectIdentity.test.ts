@@ -26,9 +26,27 @@ describe("resolveConversationProject", () => {
     ).toMatchObject({ source: "cwd", name: "Workshop" });
   });
 
+  it.each([
+    ["/", "/work/viewer", "/"],
+    ["C:\\", "c:/Work/viewer", "C:\\"],
+  ])(
+    "matches descendants and the root itself for filesystem root %s",
+    (root, descendant, exact) => {
+      const projects = [{ id: "filesystem-root", name: "Filesystem root", rootPaths: [root] }];
+      for (const cwd of [descendant, exact]) {
+        expect(resolveConversationProject({ cwd, gitOriginUrl: null }, projects)).toEqual({
+          id: "codex:filesystem-root",
+          name: "Filesystem root",
+          source: "codex",
+          hint: root,
+        });
+      }
+    },
+  );
+
   it("falls back through Git origin, cwd, and No project without filesystem traversal", () => {
     const git = resolveConversationProject(
-      { cwd: null, gitOriginUrl: "https://github.com/openai/codex.git" },
+      { cwd: "/work/different-cwd-project", gitOriginUrl: "https://github.com/openai/codex.git" },
       [],
     );
     const cwd = resolveConversationProject(
@@ -49,17 +67,32 @@ describe("resolveConversationProject", () => {
     });
   });
 
-  it("produces stable fallback identities while preserving the full origin as the hint", () => {
+  it("keeps same-basename origins distinct and normalizes equivalent Windows cwd identities", () => {
     const first = resolveConversationProject(
       { cwd: null, gitOriginUrl: "ssh://git@example.test/team/repo.git" },
       [],
     );
     const second = resolveConversationProject(
-      { cwd: null, gitOriginUrl: "ssh://git@example.test/team/repo.git" },
+      { cwd: null, gitOriginUrl: "ssh://git@example.test/other-team/repo.git" },
       [],
     );
 
-    expect(first).toEqual(second);
+    expect(first.id).not.toBe(second.id);
     expect(first).toMatchObject({ name: "repo", hint: "ssh://git@example.test/team/repo.git" });
+    expect(second).toMatchObject({
+      name: "repo",
+      hint: "ssh://git@example.test/other-team/repo.git",
+    });
+    const windows = resolveConversationProject(
+      { cwd: "C:\\Work\\Viewer\\", gitOriginUrl: null },
+      [],
+    );
+    const equivalent = resolveConversationProject(
+      { cwd: "c:/work/viewer", gitOriginUrl: null },
+      [],
+    );
+    expect(windows.id).toBe(equivalent.id);
+    expect(windows.hint).toBe("C:\\Work\\Viewer\\");
+    expect(equivalent.hint).toBe("c:/work/viewer");
   });
 });

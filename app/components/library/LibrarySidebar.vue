@@ -88,7 +88,9 @@ function updateMedia(event: Event): void {
     <header class="library-sidebar__brand">
       <div>
         <p class="library-sidebar__eyebrow">Local archive</p>
-        <a class="library-sidebar__wordmark" href="/">Codex Sessions</a>
+        <NuxtLink class="library-sidebar__wordmark" to="/" :prefetch="false"
+          >Codex Sessions</NuxtLink
+        >
       </div>
       <UiIconButton
         class="library-sidebar__close"

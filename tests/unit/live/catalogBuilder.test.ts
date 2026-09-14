@@ -4,10 +4,18 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { catalogSession, listCatalogSessions } from "../../../server/cache/catalogStore.ts";
+import {
+  catalogSession,
+  listCatalogSessions,
+  markCatalogSessionReady,
+} from "../../../server/cache/catalogStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import type { SourceDiscoveryResult } from "../../../server/ingestion/discoverSources.ts";
-import { readSessionMetaPrefix } from "../../../server/ingestion/sessionMetaPrefix.ts";
+import {
+  observeSessionMetaSource,
+  readSessionMetaPrefix,
+  type SessionMetaPrefixObservation,
+} from "../../../server/ingestion/sessionMetaPrefix.ts";
 import { refreshLiveCatalog } from "../../../server/live/catalogBuilder.ts";
 import type { GlobalStateMetadata } from "../../../server/metadata/globalState.ts";
 import type { StateMetadataSnapshot } from "../../../server/metadata/stateSnapshot.ts";
@@ -40,9 +48,393 @@ const globalState: GlobalStateMetadata = {
 const emptyStateSnapshot: StateMetadataSnapshot = { threads: [], sections: [], spawnEdges: [] };
 
 describe("refreshLiveCatalog", () => {
+  it("preserves newly materialized metrics when metadata refresh was already awaiting source I/O", async () => {
+    const database = openCacheDatabase(":memory:");
+    const options = {
+      database,
+      discovery: discovery(["root.jsonl"]),
+      sessionIndexEntries: [],
+      globalState: { projects: [], pinnedThreadIds: [] },
+      stateSnapshot: null,
+    };
+    try {
+      await refreshLiveCatalog(options);
+      await refreshLiveCatalog({
+        ...options,
+        globalState: { projects: [], pinnedThreadIds: ["root"] },
+        observeSource: async (path) => {
+          const cold = catalogSession(database, "root")!;
+          markCatalogSessionReady(database, {
+            ...cold.summary,
+            turnCount: 99,
+            models: ["materialized-model"],
+            toolCounts: { exec: 7 },
+            hasMedia: true,
+          });
+          return observeSessionMetaSource(path);
+        },
+      });
+      expect(catalogSession(database, "root")).toMatchObject({
+        materialization: "ready",
+        summary: {
+          turnCount: 99,
+          models: ["materialized-model"],
+          toolCounts: { exec: 7 },
+          hasMedia: true,
+          pinned: true,
+        },
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("reattaches an unchanged orphan after parent discovery, removal, return and evidence migration", async () => {
+    const database = openCacheDatabase(":memory:");
+    const readPrefix = vi.fn<typeof readSessionMetaPrefix>(readSessionMetaPrefix);
+    const options = {
+      database,
+      sessionIndexEntries: [],
+      globalState: { projects: [], pinnedThreadIds: [] },
+      stateSnapshot: null,
+      readPrefix,
+    };
+    try {
+      await refreshLiveCatalog({ ...options, discovery: discovery(["subagent.jsonl"]) });
+      expect(catalogSession(database, "child")).toMatchObject({
+        kind: "root",
+        parentThreadId: null,
+        structuralEvidence: {
+          meta: { source: { subagent: { thread_spawn: { parent_thread_id: "root" } } } },
+        },
+      });
+      const attached = await refreshLiveCatalog({
+        ...options,
+        discovery: discovery(["root.jsonl", "subagent.jsonl"]),
+        changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
+      });
+      expect(attached.changedIds).toEqual(["child", "root"]);
+      expect(catalogSession(database, "child")).toMatchObject({
+        kind: "subagent",
+        parentThreadId: "root",
+      });
+      expect(catalogSession(database, "root")?.childCount).toBe(1);
+      expect(readPrefix).toHaveBeenCalledTimes(2);
+      await refreshLiveCatalog({
+        ...options,
+        discovery: discovery(["subagent.jsonl"]),
+        changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
+      });
+      expect(catalogSession(database, "child")?.kind).toBe("root");
+      await refreshLiveCatalog({
+        ...options,
+        discovery: discovery(["root.jsonl", "subagent.jsonl"]),
+        changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
+      });
+      expect(catalogSession(database, "child")?.parentThreadId).toBe("root");
+      database
+        .prepare(
+          "UPDATE session_catalog SET structural_evidence_json = NULL, session_kind = 'root', parent_thread_id = NULL WHERE id = 'child'",
+        )
+        .run();
+      const repaired = await refreshLiveCatalog({
+        ...options,
+        discovery: discovery(["root.jsonl", "subagent.jsonl"]),
+        changedSourcePaths: [],
+      });
+      expect(repaired.changedIds).toContain("child");
+      expect(catalogSession(database, "child")?.parentThreadId).toBe("root");
+      expect(readPrefix).toHaveBeenCalledTimes(4);
+      expect(
+        (
+          await refreshLiveCatalog({
+            ...options,
+            discovery: discovery(["root.jsonl", "subagent.jsonl"]),
+            changedSourcePaths: [],
+          })
+        ).changedIds,
+      ).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("recognizes a current-size ordinary metadata record without optional state and reveals a child across root filters", async () => {
+    const root = await mkdtemp(join(tmpdir(), "catalog-large-meta-"));
+    temporaryRoots.push(root);
+    const path = join(root, "large.jsonl");
+    await writeFile(
+      path,
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: "large-child",
+          padding: "x".repeat(24_000),
+          parent_thread_id: "root",
+          cwd: "D:/different-project",
+          source: {
+            subagent: {
+              thread_spawn: {
+                parent_thread_id: "root",
+                agent_path: "/root/large",
+                agent_nickname: "Large",
+                depth: 1,
+              },
+            },
+          },
+        },
+      }) +
+        "\n" +
+        "x".repeat(100_000),
+    );
+    const database = openCacheDatabase(":memory:");
+    try {
+      const result = await refreshLiveCatalog({
+        database,
+        discovery: {
+          ...discovery(["root.jsonl"]),
+          rollouts: [...discovery(["root.jsonl"]).rollouts, { path, scope: "archived" }],
+        },
+        sessionIndexEntries: [],
+        globalState: { projects: [], pinnedThreadIds: [] },
+        stateSnapshot: null,
+      });
+      expect(result.bytesRead).toBeLessThan(32_768);
+      const child = catalogSession(database, "large-child")!;
+      const parent = catalogSession(database, "root")!;
+      expect(child).toMatchObject({
+        kind: "subagent",
+        parentThreadId: "root",
+        agentPath: "/root/large",
+        agentNickname: "Large",
+        structuralEvidence: { status: "found" },
+      });
+      expect(child.project.id).not.toBe(parent.project.id);
+      const children = listCatalogSessions(database, {
+        scope: "active",
+        parentThreadId: "root",
+        projectId: parent.project.id,
+        model: "parent-only",
+        cwd: "unrelated",
+        tool: "unused",
+        hasMedia: true,
+        query: "not present",
+      });
+      expect(children.items.map((item) => item.summary.id)).toEqual(["large-child"]);
+      expect(children.total).toBe(parent.childCount);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("restores an unchanged declared edge when the other side of a rejected cycle is corrected", async () => {
+    const root = await mkdtemp(join(tmpdir(), "catalog-cycle-repair-"));
+    temporaryRoots.push(root);
+    const path = join(root, "cycle-b.jsonl");
+    await writeFile(path, await readFile(join(fixtureRoot, "cycle-b.jsonl")));
+    const database = openCacheDatabase(":memory:");
+    const readPrefix = vi.fn<typeof readSessionMetaPrefix>(readSessionMetaPrefix);
+    const options = {
+      database,
+      discovery: {
+        ...discovery(["cycle-a.jsonl"]),
+        rollouts: [...discovery(["cycle-a.jsonl"]).rollouts, { path, scope: "active" as const }],
+      },
+      sessionIndexEntries: [],
+      globalState,
+      stateSnapshot: null,
+      readPrefix,
+    };
+    try {
+      await refreshLiveCatalog(options);
+      expect(catalogSession(database, "cycle-a")?.parentThreadId).toBeNull();
+      await writeFile(
+        path,
+        JSON.stringify({ type: "session_meta", payload: { id: "cycle-b", source: "cli" } }) + "\n",
+      );
+      await refreshLiveCatalog({ ...options, changedSourcePaths: [path] });
+      expect(catalogSession(database, "cycle-a")).toMatchObject({
+        kind: "subagent",
+        parentThreadId: "cycle-b",
+      });
+      expect(catalogSession(database, "cycle-b")?.summary.childThreadIds).toEqual(["cycle-a"]);
+      expect(readPrefix).toHaveBeenCalledTimes(3);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("keeps watcher source observations proportional to one changed path in a 500-row catalog", async () => {
+    const database = openCacheDatabase(":memory:");
+    const observation = {
+      device: 1n,
+      inode: 1n,
+      size: 100n,
+      mtimeNs: 1_000_000n,
+      ctimeNs: 1_000_000n,
+      regular: true,
+      symbolicLink: false,
+    };
+    const sources = Array.from({ length: 500 }, (_, index) => ({
+      path: join(fixtureRoot, "synthetic-" + index + ".jsonl"),
+      scope: "active" as const,
+    }));
+    const readPrefix = vi.fn<typeof readSessionMetaPrefix>(async (path) => ({
+      status: "found",
+      meta: {
+        id: path,
+        parentThreadId: null,
+        timestamp: "2026-09-14T10:00:00.000Z",
+        cwd: null,
+        source: "cli",
+        modelProvider: null,
+        git: null,
+      },
+      parentThreadIdHint: null,
+      observation,
+      bytesRead: 100,
+      diagnostics: [],
+    }));
+    const options = {
+      database,
+      discovery: { ...discovery([]), rollouts: sources },
+      sessionIndexEntries: [],
+      globalState,
+      stateSnapshot: null,
+      readPrefix,
+    };
+    try {
+      await refreshLiveCatalog(options);
+      readPrefix.mockClear();
+      const observeSource = vi.fn<() => Promise<SessionMetaPrefixObservation>>(
+        async () => observation,
+      );
+      const selected = sources[123]!.path;
+      const result = await refreshLiveCatalog({
+        ...options,
+        changedSourcePaths: [selected],
+        observeSource,
+        sessionIndexEntries: [
+          { id: selected, threadName: "Updated", updatedAt: "2026-09-14T11:00:00.000Z" },
+        ],
+      });
+      expect(observeSource).toHaveBeenCalledExactlyOnceWith(selected);
+      expect(readPrefix).not.toHaveBeenCalled();
+      expect(result.changedIds).toEqual([selected]);
+      expect(result.bytesRead).toBe(0);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("lets materialization recover capped parent evidence under a source fence and retains it through unchanged refresh", async () => {
+    const root = await mkdtemp(join(tmpdir(), "catalog-capped-parent-"));
+    temporaryRoots.push(root);
+    const path = join(root, "child.jsonl");
+    await writeFile(
+      path,
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          padding: "x".repeat(300_000),
+          id: "child",
+          parent_thread_id: "root",
+          source: "cli",
+        },
+      }) + "\n",
+    );
+    const database = openCacheDatabase(":memory:");
+    const options = {
+      database,
+      discovery: {
+        ...discovery(["root.jsonl"]),
+        rollouts: [...discovery(["root.jsonl"]).rollouts, { path, scope: "active" as const }],
+      },
+      sessionIndexEntries: [],
+      globalState,
+      stateSnapshot: null,
+    };
+    try {
+      await refreshLiveCatalog(options);
+      const cold = catalogSession(database, "child")!;
+      expect(cold.structuralEvidence?.status).toBe("exhausted");
+      const summary = { ...cold.summary, parentThreadId: "root" };
+      expect(
+        markCatalogSessionReady(database, summary, { sourceRevision: "stale", sourcePath: path }),
+      ).toBe(false);
+      expect(catalogSession(database, "child")?.parentThreadId).toBeNull();
+      await refreshLiveCatalog({
+        ...options,
+        observeSource: async (observedPath) => {
+          if (observedPath === path) {
+            expect(
+              markCatalogSessionReady(database, summary, {
+                sourceRevision: cold.sourceRevision,
+                sourcePath: path,
+              }),
+            ).toBe(true);
+          }
+          return observeSessionMetaSource(observedPath);
+        },
+      });
+      expect(catalogSession(database, "child")).toMatchObject({
+        kind: "subagent",
+        parentThreadId: "root",
+        structuralEvidence: { origin: "materialized", meta: { parentThreadId: "root" } },
+      });
+      expect(catalogSession(database, "root")?.summary.childThreadIds).toEqual(["child"]);
+      await refreshLiveCatalog({ ...options, changedSourcePaths: [] });
+      expect(catalogSession(database, "child")).toMatchObject({
+        kind: "subagent",
+        parentThreadId: "root",
+        materialization: "ready",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
+  it("observes only watcher paths and performs zero source observations for metadata-only refreshes", async () => {
+    const database = openCacheDatabase(":memory:");
+    const options = {
+      database,
+      discovery: discovery(["root.jsonl", "subagent.jsonl", "guardian.jsonl"]),
+      sessionIndexEntries: [],
+      globalState,
+      stateSnapshot: null,
+    };
+    try {
+      await refreshLiveCatalog(options);
+      const observeSource = vi.fn<() => Promise<SessionMetaPrefixObservation>>(async () => {
+        throw new Error("Unexpected source observation");
+      });
+      const readPrefix = vi.fn<typeof readSessionMetaPrefix>(readSessionMetaPrefix);
+      const metadata = await refreshLiveCatalog({
+        ...options,
+        changedSourcePaths: [],
+        observeSource,
+        readPrefix,
+      });
+      expect(metadata.changedIds).toEqual([]);
+      expect(observeSource).not.toHaveBeenCalled();
+      expect(readPrefix).not.toHaveBeenCalled();
+      await refreshLiveCatalog({
+        ...options,
+        changedSourcePaths: [join(fixtureRoot, "subagent.jsonl")],
+        observeSource,
+        readPrefix,
+      });
+      expect(observeSource).toHaveBeenCalledExactlyOnceWith(join(fixtureRoot, "subagent.jsonl"));
+      expect(readPrefix).toHaveBeenCalledTimes(1);
+      expect(readPrefix.mock.calls[0]?.[0]).toBe(join(fixtureRoot, "subagent.jsonl"));
+    } finally {
+      database.close();
+    }
+  });
+
   it("skips unchanged prefixes and catalog writes after the baseline refresh", async () => {
     const database = openCacheDatabase(":memory:");
-    const readPrefix = vi.fn(readSessionMetaPrefix);
+    const readPrefix = vi.fn<typeof readSessionMetaPrefix>(readSessionMetaPrefix);
 
     try {
       const first = await refreshLiveCatalog({
@@ -134,7 +526,7 @@ describe("refreshLiveCatalog", () => {
     const path = join(root, "root.jsonl");
     await writeFile(path, await readFile(join(fixtureRoot, "root.jsonl")), "utf8");
     const database = openCacheDatabase(":memory:");
-    const readPrefix = vi.fn(readSessionMetaPrefix);
+    const readPrefix = vi.fn<typeof readSessionMetaPrefix>(readSessionMetaPrefix);
     const selectedDiscovery: SourceDiscoveryResult = {
       ...discovery([]),
       rollouts: [{ path, scope: "active" }],

@@ -10,6 +10,7 @@ import {
   type JsonValue,
   type TurnNavigatorItem,
 } from "../../shared/types/conversation.ts";
+import { viewerDiagnosticSchema, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { ConversationListItem } from "../../shared/types/library.ts";
 import {
   inspectorRecordSchema,
@@ -152,6 +153,7 @@ export function getCachedTurnNavigator(
         turns.id AS turn_id,
         turns.turn_index,
         turns.started_at,
+        turns.final_assistant_message_id AS final_assistant_id,
         messages.id AS message_id,
         messages.role,
         messages.created_at,
@@ -174,6 +176,8 @@ export function getCachedTurnNavigator(
       userCreatedAt: string | null;
       prompt: string;
       assistant: string;
+      finalAssistantId: string | null;
+      foundFinal: boolean;
       proseLength: number;
     }
   >();
@@ -189,6 +193,8 @@ export function getCachedTurnNavigator(
         userCreatedAt: null,
         prompt: "",
         assistant: "",
+        finalAssistantId: nullableText(row["final_assistant_id"], "final_assistant_id"),
+        foundFinal: false,
         proseLength: 0,
       };
       drafts.set(turnId, draft);
@@ -202,8 +208,13 @@ export function getCachedTurnNavigator(
     if (role === "user") {
       draft.userMessageId ??= requiredText(row["message_id"], "message_id");
       draft.userCreatedAt ??= requiredText(row["created_at"], "created_at");
-      draft.prompt ||= markdown;
-    } else if (draft.assistant === "") {
+      if (draft.userMessageId === row["message_id"]) {
+        draft.prompt = markdown;
+      }
+    } else if (row["message_id"] === draft.finalAssistantId) {
+      draft.assistant = markdown;
+      draft.foundFinal = true;
+    } else if (!draft.foundFinal) {
       draft.assistant = markdown;
     }
   }
@@ -265,6 +276,20 @@ export function getCachedTurnChunk(
     nextCursor: chunk + 1 < chunkCount ? String(chunk + 1) : null,
     revision: requiredText(session["revision"], "revision"),
   });
+}
+
+export function getCachedTurnsInRange(
+  database: DatabaseSync,
+  sessionId: string,
+  start: number,
+  count: number,
+): ConversationTurn[] {
+  return database
+    .prepare(
+      "SELECT payload_json FROM turns WHERE session_id = ? AND turn_index >= ? ORDER BY turn_index LIMIT ?",
+    )
+    .all(sessionId, start, count)
+    .map((row) => conversationTurnSchema.parse(parsedJson(row["payload_json"])));
 }
 
 function rawRecord(event: NormalizedRawEvent): JsonValue {
@@ -420,20 +445,48 @@ export function getCachedInspector(
     return null;
   }
   const turn = conversationTurnSchema.parse(parsedJson(turnRow["payload_json"]));
+  const diagnostics: ViewerDiagnostic[] = [];
+  const diagnosticStatement = database.prepare(
+    "SELECT * FROM diagnostics WHERE session_id = ? AND id = ?",
+  );
+  for (const id of turn.diagnosticIds) {
+    const row = diagnosticStatement.get(sessionId, id);
+    if (row === undefined) {
+      continue;
+    }
+    diagnostics.push(
+      viewerDiagnosticSchema.parse({
+        id: row["id"],
+        sessionId: row["session_id"],
+        code: row["code"],
+        severity: row["severity"],
+        area: row["area"],
+        message: row["message"],
+        path: row["path"],
+        recoverable: row["recoverable"] === 1,
+        createdAt: row["created_at"],
+        details: parsedJson(row["details_json"]),
+      }),
+    );
+  }
+  const enrich = (record: InspectorRecord): InspectorRecord =>
+    diagnostics.length === 0 ? record : { ...record, diagnostics };
   if (target.type === "turn") {
     const eventIds = turnEventIds(turn);
-    return targetRecord(
-      turn,
-      target,
-      {
-        phase: null,
-        createdAt: turn.startedAt,
-        completedAt: turn.completedAt,
-        durationMs: turn.durationMs,
-        eventIds,
-        activityIds: turn.activities.map(({ id }) => id),
-      },
-      rawEventsById(database, sessionId, eventIds),
+    return enrich(
+      targetRecord(
+        turn,
+        target,
+        {
+          phase: null,
+          createdAt: turn.startedAt,
+          completedAt: turn.completedAt,
+          durationMs: turn.durationMs,
+          eventIds,
+          activityIds: turn.activities.map(({ id }) => id),
+        },
+        rawEventsById(database, sessionId, eventIds),
+      ),
     );
   }
   if (target.type === "message") {
@@ -444,10 +497,14 @@ export function getCachedInspector(
     ].find((candidate) => candidate?.id === target.id);
     return message === undefined || message === null
       ? null
-      : messageInspector(turn, message, rawEventsById(database, sessionId, message.rawEventIds));
+      : enrich(
+          messageInspector(turn, message, rawEventsById(database, sessionId, message.rawEventIds)),
+        );
   }
   const activity = turn.activities.find(({ id }) => id === target.id);
   return activity === undefined
     ? null
-    : activityInspector(turn, activity, rawEventsById(database, sessionId, activity.rawEventIds));
+    : enrich(
+        activityInspector(turn, activity, rawEventsById(database, sessionId, activity.rawEventIds)),
+      );
 }

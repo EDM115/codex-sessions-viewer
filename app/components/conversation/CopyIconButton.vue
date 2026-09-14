@@ -4,7 +4,7 @@ import { onBeforeUnmount, ref } from "vue";
 
 const props = defineProps<{
   label: string;
-  text: string;
+  text: string | (() => string);
 }>();
 
 const state = ref<"default" | "error" | "success">("default");
@@ -15,7 +15,9 @@ async function copy(): Promise<void> {
     clearTimeout(resetTimer);
   }
   try {
-    await navigator.clipboard.writeText(props.text);
+    await navigator.clipboard.writeText(
+      typeof props.text === "function" ? props.text() : props.text,
+    );
     state.value = "success";
     resetTimer = setTimeout(() => {
       state.value = "default";

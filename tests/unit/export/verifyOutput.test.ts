@@ -407,6 +407,8 @@ describe("generated output verification", () => {
     );
 
     await expect(verifyGeneratedOutput(root)).resolves.toMatchObject({ assetCount: 1 });
+    await writeFile(join(root, "assets", `${sha256}.txt`), Buffer.alloc(bytes.byteLength, 120));
+    await expect(verifyGeneratedOutput(root)).rejects.toThrow("SHA-256 integrity check");
     await writeFile(join(root, "assets", `${sha256}.txt`), "corrupt");
     await expect(verifyGeneratedOutput(root)).rejects.toThrow("unexpected byte size");
   });

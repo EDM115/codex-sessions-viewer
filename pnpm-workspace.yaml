@@ -1,6 +1,10 @@
 nodeLinker: isolated
 engineStrict: true
+overrides:
+  # The environment adapter must use the same Vitest-compatible test-utils as the root package
+  "vitest-environment-nuxt>@nuxt/test-utils": "4.3.2"
 allowBuilds:
   esbuild: true
   node: true
   unrs-resolver: true
+minimumReleaseAge: 240

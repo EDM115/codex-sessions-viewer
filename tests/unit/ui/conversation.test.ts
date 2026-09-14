@@ -155,7 +155,11 @@ describe("conversation presentation", () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-15T12:00:00.000Z"));
     const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
     expect(formatTimestamp(null, "both")).toBe("Time unavailable");
-    expect(formatTimestamp("2026-08-15T11:59:40.000Z", "absolute")).not.toContain("ago");
+    expect(formatTimestamp("2026-08-15T11:59:40.000Z", "absolute")).toBe(
+      new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" }).format(
+        new Date("2026-08-15T11:59:40.000Z"),
+      ),
+    );
     expect(formatTimestamp("2026-08-15T11:59:40.000Z", "relative")).toBe(
       relative.format(-20, "second"),
     );
@@ -317,7 +321,7 @@ describe("conversation presentation", () => {
     const work = wrapper.get('[data-activity-group="worked"]');
     (work.element as HTMLDetailsElement).open = true;
     await work.trigger("toggle");
-    expect(wrapper.text()).toContain("filesystem/read_file");
+    expect(wrapper.text()).toContain("Read file");
     expect(wrapper.text()).toContain("Access denied");
   });
 
@@ -351,7 +355,6 @@ describe("conversation presentation", () => {
 
     await wrapper.get('button[aria-label="Copy assistant message"]').trigger("click");
     expect(writeText).toHaveBeenCalledWith("The parser is ready.");
-    expect(wrapper.get('button[aria-label="Assistant copy options"]')).toBeTruthy();
     await wrapper.get('button[aria-label="Assistant copy options"]').trigger("click");
     await wrapper.get('[role="menuitem"]').trigger("click");
     expect(writeText).toHaveBeenLastCalledWith("Inspect the event shapes.\n\nThe parser is ready.");
@@ -402,10 +405,10 @@ describe("conversation presentation", () => {
     let markerTop = 172;
     vi.spyOn(nav, "getBoundingClientRect").mockReturnValue({
       x: 0,
-      y: 0,
-      top: 0,
+      y: 47,
+      top: 47,
       right: 80,
-      bottom: 400,
+      bottom: 447,
       left: 0,
       width: 80,
       height: 400,
@@ -429,7 +432,7 @@ describe("conversation presentation", () => {
       (wrapper.get('[role="tooltip"]').element as HTMLElement).style.getPropertyValue(
         "--turn-preview-center",
       ),
-    ).toBe("173px");
+    ).toBe("126px");
 
     markerTop = 232;
     await wrapper.get(".turn-minimap__scroll").trigger("scroll");
@@ -437,11 +440,11 @@ describe("conversation presentation", () => {
       (wrapper.get('[role="tooltip"]').element as HTMLElement).style.getPropertyValue(
         "--turn-preview-center",
       ),
-    ).toBe("233px");
+    ).toBe("186px");
     wrapper.unmount();
   });
 
-  it("exposes complete inspector metadata and preserved protocol records", () => {
+  it("exposes complete inspector metadata and lazily opens preserved protocol records", async () => {
     const record: InspectorRecord = {
       sessionId: "session-1",
       target: { type: "message", id: "assistant-1" },
@@ -475,6 +478,13 @@ describe("conversation presentation", () => {
     expect(wrapper.text()).toContain("reasoning-1");
     expect(wrapper.text()).toContain("event-assistant-1");
     expect(wrapper.text()).toContain("diagnostic-1");
+    expect(wrapper.find("pre").exists()).toBe(false);
+    const raw = wrapper.get(".conversation-inspector__raw");
+    (raw.element as HTMLDetailsElement).open = true;
+    await raw.trigger("toggle");
+    const selected = wrapper.get(".conversation-raw");
+    (selected.element as HTMLDetailsElement).open = true;
+    await selected.trigger("toggle");
     expect(wrapper.get("pre").text()).toContain("future_payload");
   });
 
@@ -523,6 +533,6 @@ describe("conversation presentation", () => {
     expect(wrapper.text()).toContain("Unavailable");
     expect(wrapper.text()).toContain("No tool calls.");
     expect(wrapper.text()).toContain("None");
-    expect(wrapper.get("pre").text()).toBe("[]");
+    expect(wrapper.find("pre").exists()).toBe(false);
   });
 });

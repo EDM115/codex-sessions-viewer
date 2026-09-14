@@ -141,11 +141,18 @@ describe("viewer cache database", () => {
     database.exec(INITIAL_CACHE_SCHEMA_SQL);
     database.exec("PRAGMA user_version = 1");
     seedVersionOneSession(database);
+    const insertTurn = database.prepare(
+      "INSERT INTO turns (id, session_id, turn_index, started_at, completed_at, payload_json) VALUES (?, 'session-v1', ?, NULL, NULL, ?)",
+    );
+    insertTurn.run("valid-turn", 0, JSON.stringify({ finalAssistantMessageId: "final-choice" }));
+    insertTurn.run("invalid-turn", 1, "{");
 
     try {
       migrateCacheDatabase(database);
 
-      expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+      expect(database.prepare("PRAGMA user_version").get()).toEqual({
+        user_version: CACHE_SCHEMA_VERSION,
+      });
       expect(
         database
           .prepare(
@@ -157,6 +164,21 @@ describe("viewer cache database", () => {
         session_kind: "root",
         materialization_state: "ready",
       });
+      expect(
+        database
+          .prepare("SELECT structural_evidence_json FROM session_catalog WHERE id = 'session-v1'")
+          .get(),
+      ).toEqual({ structural_evidence_json: null });
+      expect(
+        database
+          .prepare(
+            "SELECT id, rich_revision, final_assistant_message_id FROM turns ORDER BY turn_index",
+          )
+          .all(),
+      ).toEqual([
+        { id: "valid-turn", rich_revision: null, final_assistant_message_id: "final-choice" },
+        { id: "invalid-turn", rich_revision: null, final_assistant_message_id: null },
+      ]);
       expect(() =>
         database
           .prepare(`

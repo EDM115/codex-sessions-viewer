@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { loadServerViewerConfig } from "../server/core/config.ts";
 
@@ -11,9 +13,11 @@ Options:
   --codex-home <path>  Read sessions from this Codex home
   --media-root <path>  Trust local attachments under this root (repeatable)
   -p, --port <number>  Listen on this loopback port
+  --dev                Run the development server with hot reload
   --help               Show this help and exit`;
 
 interface LiveArguments {
+  dev?: boolean;
   codexHome?: string | undefined;
   port?: number | undefined;
   trustedMediaRoots?: string[] | undefined;
@@ -39,7 +43,9 @@ function parseArguments(args: readonly string[]): LiveArguments {
   const parsed: LiveArguments = {};
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
-    if (argument === "--codex-home") {
+    if (argument === "--dev") {
+      parsed.dev = true;
+    } else if (argument === "--codex-home") {
       parsed.codexHome = optionValue(args, index, argument);
       index += 1;
     } else if (argument.startsWith("--codex-home=")) {
@@ -71,20 +77,38 @@ async function runNuxt(
   codexHome: string,
   port: number,
   trustedMediaRoots: readonly string[] | undefined,
+  development: boolean,
 ): Promise<void> {
   const pnpmEntrypoint = process.env["npm_execpath"]?.trim();
   const javascriptEntrypoint = pnpmEntrypoint !== undefined && /\.[cm]?js$/iu.test(pnpmEntrypoint);
-  const command = javascriptEntrypoint
+  const developmentCommand = javascriptEntrypoint
     ? process.execPath
     : (pnpmEntrypoint ?? (process.platform === "win32" ? "pnpm.cmd" : "pnpm"));
-  const args = javascriptEntrypoint
+  const developmentArgs = javascriptEntrypoint
     ? [pnpmEntrypoint, "exec", "nuxt", "dev", "--host", HOST, "--port", String(port)]
     : ["exec", "nuxt", "dev", "--host", HOST, "--port", String(port)];
+  const serverEntrypoint = resolve(
+    process.env["CODEX_VIEWER_BUILD_OUTPUT"]?.trim() ?? ".output-live",
+    "server/index.mjs",
+  );
+  if (!development && !existsSync(serverEntrypoint)) {
+    throw new Error(
+      `The live production build is missing at ${serverEntrypoint}. Run pnpm build, then pnpm live. Use pnpm dev for development with hot reload.`,
+    );
+  }
+  const command = development ? developmentCommand : process.execPath;
+  const args = development ? developmentArgs : [serverEntrypoint];
   await new Promise<void>((resolveProcess, rejectProcess) => {
     const child = spawn(command, args, {
       cwd: process.cwd(),
       env: {
         ...process.env,
+        NODE_ENV: development ? "development" : "production",
+        HOST,
+        NITRO_HOST: HOST,
+        PORT: String(port),
+        NITRO_PORT: String(port),
+        NITRO_UNIX_SOCKET: "",
         CODEX_VIEWER_MODE: "live",
         CODEX_VIEWER_CODEX_HOME: codexHome,
         CODEX_VIEWER_PORT: String(port),
@@ -125,7 +149,12 @@ async function main(): Promise<void> {
   }
   console.log(`Starting Codex Sessions Viewer on http://${HOST}:${config.settings.port}`);
   console.log(`Reading ${config.settings.codexHome} in read-only mode.`);
-  await runNuxt(config.settings.codexHome, config.settings.port, config.settings.trustedMediaRoots);
+  await runNuxt(
+    config.settings.codexHome,
+    config.settings.port,
+    config.settings.trustedMediaRoots,
+    parsedArguments.dev === true,
+  );
 }
 
 await main().catch((error: unknown) => {

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { PhCheck, PhCopy, PhWarning } from "@phosphor-icons/vue";
-import { nextTick, ref, useId } from "vue";
+import { nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 
 import { useClipboard } from "../../composables/useClipboard.ts";
 import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
 import UiIconButton from "../ui/UiIconButton.vue";
+import { useContentTheme } from "./useContentTheme.ts";
 
 const props = defineProps<{ source: string }>();
 const emit = defineEmits<{ openMedia: [item: MediaViewerItem] }>();
@@ -16,6 +17,9 @@ const preview = ref<HTMLElement | null>(null);
 const previewState = ref<"error" | "idle" | "loading" | "ready">("idle");
 const sanitizedSvg = ref<string | null>(null);
 const { copyText, state: copyState } = useClipboard();
+const theme = useContentTheme();
+let generation = 0;
+let library: Promise<typeof import("mermaid")> | undefined;
 
 function safeSvg(source: string): { element: SVGElement; serialized: string } {
   const parsed = new DOMParser().parseFromString(source, "image/svg+xml");
@@ -35,7 +39,7 @@ function safeSvg(source: string): { element: SVGElement; serialized: string } {
       if (
         /^on/iu.test(attribute.name) ||
         ((attribute.name === "href" || attribute.name === "xlink:href") &&
-          /^(?:data|javascript):/iu.test(attribute.value))
+          !attribute.value.startsWith("#"))
       ) {
         element.removeAttribute(attribute.name);
       }
@@ -55,13 +59,20 @@ async function renderPreview(): Promise<void> {
     return;
   }
   previewState.value = "loading";
+  const current = ++generation;
+  const source = props.source;
   await nextTick();
   try {
-    const { default: mermaid } = await import("mermaid");
+    const { default: mermaid } = await (library ??= import("mermaid"));
+    if (current !== generation) {
+      return;
+    }
     const rootStyle = getComputedStyle(document.documentElement);
     mermaid.initialize({
       fontFamily: rootStyle.getPropertyValue("--font-body").trim(),
       htmlLabels: false,
+      layout: "dagre",
+      look: "classic",
       securityLevel: "strict",
       secure: [
         "secure",
@@ -74,9 +85,12 @@ async function renderPreview(): Promise<void> {
       ],
       startOnLoad: false,
       suppressErrorRendering: true,
-      theme: rootStyle.colorScheme.includes("dark") ? "dark" : "neutral",
+      theme: theme.value === "dark" ? "dark" : "neutral",
     });
-    const rendered = await mermaid.render(diagramId, props.source);
+    const rendered = await mermaid.render(`${diagramId}-${current}`, source);
+    if (current !== generation) {
+      return;
+    }
     const safe = safeSvg(rendered.svg);
     const target = preview.value;
     if (target === null) {
@@ -86,10 +100,26 @@ async function renderPreview(): Promise<void> {
     sanitizedSvg.value = safe.serialized;
     previewState.value = "ready";
   } catch {
+    if (current !== generation) {
+      return;
+    }
     sanitizedSvg.value = null;
     previewState.value = "error";
   }
 }
+
+watch([() => props.source, theme], () => {
+  ++generation;
+  sanitizedSvg.value = null;
+  preview.value?.replaceChildren();
+  previewState.value = "idle";
+  if (tab.value === "preview") {
+    void renderPreview();
+  }
+});
+onBeforeUnmount(() => {
+  ++generation;
+});
 
 function showCode(): void {
   tab.value = "code";

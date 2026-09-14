@@ -1,15 +1,26 @@
 <script setup lang="ts">
+import { PhPencilSimple } from "@phosphor-icons/vue";
 import { computed, ref } from "vue";
 
 import type { FileChange, FileChangeActivity } from "#shared/types/conversation.ts";
 
 import DiffBlock from "../content/DiffBlock.client.vue";
+import { statusLabel } from "./toolPresentation.ts";
 
 const props = defineProps<{ activities: FileChangeActivity[] }>();
-const files = computed(() => props.activities.flatMap((activity) => activity.files));
+type PresentedFile = FileChange & { presentationKey: string };
+const files = computed(() =>
+  props.activities.flatMap((activity) =>
+    activity.files.map((file, index) => ({ ...file, presentationKey: `${activity.id}:${index}` })),
+  ),
+);
+const open = ref(false);
 const openedFiles = ref(new Set<string>());
 const label = computed(() => {
   const count = files.value.length;
+  if (props.activities.some((activity) => activity.status !== "succeeded")) {
+    return `File changes · ${count} files`;
+  }
   const created = files.value.every(({ change }) => change === "add");
   if (count === 1) {
     const file = files.value[0]!;
@@ -42,11 +53,11 @@ function diffSource(file: FileChange): string | null {
   return `--- ${before}\n+++ ${after}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}`;
 }
 
-function fileKey(file: FileChange): string {
-  return `${file.change}:${file.previousPath ?? ""}:${file.path}`;
+function fileKey(file: PresentedFile): string {
+  return file.presentationKey;
 }
 
-function onFileToggle(event: Event, file: FileChange): void {
+function onFileToggle(event: Event, file: PresentedFile): void {
   const details = event.currentTarget as HTMLDetailsElement;
   const next = new Set(openedFiles.value);
   if (details.open) {
@@ -59,15 +70,25 @@ function onFileToggle(event: Event, file: FileChange): void {
 </script>
 
 <template>
-  <details class="conversation-file-changes" :data-entry-id="activities[0]?.id">
+  <details
+    class="conversation-file-changes"
+    :data-entry-id="activities[0]?.id"
+    @toggle="open = ($event.currentTarget as HTMLDetailsElement).open"
+  >
     <summary>
+      <PhPencilSimple :size="18" aria-hidden="true" />
       <strong>{{ label }}</strong>
+      <span
+        v-for="status in new Set(activities.map((activity) => activity.status))"
+        :key="status"
+        >{{ statusLabel(status) }}</span
+      >
       <span class="tabular"
         >{{ files.reduce((total, file) => total + file.addedLines, 0) }} added ·
         {{ files.reduce((total, file) => total + file.removedLines, 0) }} removed</span
       >
     </summary>
-    <div class="conversation-file-changes__files">
+    <div v-if="open" class="conversation-file-changes__files">
       <details v-for="file in files" :key="fileKey(file)" @toggle="onFileToggle($event, file)">
         <summary>
           <span>{{ file.path }}</span>
