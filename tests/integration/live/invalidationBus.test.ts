@@ -89,7 +89,7 @@ describe("live invalidation bus", () => {
       defineEventHandler(async (event) => {
         const stream = createEventStream(event);
         resolveConnected?.();
-        await sendInvalidationStream(bus, stream);
+        return sendInvalidationStream(bus, stream);
       }),
     );
     const server = createServer(toNodeListener(app));

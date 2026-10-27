@@ -14,7 +14,7 @@ export default defineEventHandler(async (event) => {
   if (origin === null) {
     throw createError({ statusCode: 404, statusMessage: "Favicon not found" });
   }
-  await sendCachedContent(
+  return sendCachedContent(
     event,
     getCachedFaviconFile(runtime.database, origin),
     join(runtime.cacheDir, "favicons"),

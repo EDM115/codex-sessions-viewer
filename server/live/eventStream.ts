@@ -2,16 +2,16 @@ import type { EventStreamMessage } from "h3";
 
 import { InvalidationBus } from "./invalidationBus.ts";
 
-export interface InvalidationEventStream {
+export interface InvalidationEventStream<Response = void> {
   push(message: EventStreamMessage): Promise<void>;
-  send(): Promise<void>;
+  send(): Promise<Response>;
   close(): Promise<void>;
   onClosed(callback: () => void): void;
 }
 
-export function connectInvalidationStream(
+export function connectInvalidationStream<Response>(
   bus: InvalidationBus,
-  stream: InvalidationEventStream,
+  stream: InvalidationEventStream<Response>,
 ): () => void {
   const unsubscribe = bus.subscribe((invalidation) => {
     void stream
@@ -29,13 +29,13 @@ export function connectInvalidationStream(
   return unsubscribe;
 }
 
-export async function sendInvalidationStream(
+export async function sendInvalidationStream<Response>(
   bus: InvalidationBus,
-  stream: InvalidationEventStream,
-): Promise<void> {
+  stream: InvalidationEventStream<Response>,
+): Promise<Response> {
   const unsubscribe = connectInvalidationStream(bus, stream);
   try {
-    await stream.send();
+    return await stream.send();
   } catch (error) {
     unsubscribe();
     throw error;

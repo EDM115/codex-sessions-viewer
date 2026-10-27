@@ -6,5 +6,5 @@ import { useLiveViewerRuntime } from "../live/requestContext.ts";
 export default defineEventHandler(async (event) => {
   const runtime = useLiveViewerRuntime(event);
   const stream = createEventStream(event);
-  await sendInvalidationStream(runtime.bus, stream);
+  return sendInvalidationStream(runtime.bus, stream);
 });

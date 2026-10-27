@@ -10,7 +10,7 @@ import { assetId } from "../../_validation.ts";
 export default defineEventHandler(async (event) => {
   const runtime = useLiveViewerRuntime(event);
   const id = await assetId(event);
-  await sendCachedContent(
+  return sendCachedContent(
     event,
     getCachedAssetFile(runtime.database, id),
     join(runtime.cacheDir, "assets"),

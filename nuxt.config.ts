@@ -89,6 +89,12 @@ export default defineNuxtConfig({
     watcher: "builder",
   },
   typescript: {
+    nodeTsConfig: {
+      compilerOptions: { experimentalDecorators: true },
+    },
+    sharedTsConfig: {
+      compilerOptions: { experimentalDecorators: true },
+    },
     tsConfig: {
       compilerOptions: {
         allowArbitraryExtensions: true,

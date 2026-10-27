@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 
-import { createError, send, setResponseHeaders, type H3Event } from "h3";
+import { createError, setResponseHeaders, type H3Event } from "h3";
 
 import type { CachedContentFile } from "../cache/contentStore.ts";
 
@@ -20,7 +20,7 @@ export async function sendCachedContent(
   event: H3Event,
   content: CachedContentFile | null,
   root: string,
-): Promise<void> {
+): Promise<Buffer> {
   if (content === null || !isWithinRoot(root, content.path)) {
     throw createError({ statusCode: 404, statusMessage: "Cached content not found" });
   }
@@ -47,5 +47,5 @@ export async function sendCachedContent(
     "Content-Type": content.mimeType ?? "application/octet-stream",
     "X-Content-Type-Options": "nosniff",
   });
-  await send(event, bytes);
+  return bytes;
 }
