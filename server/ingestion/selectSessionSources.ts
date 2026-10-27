@@ -1,6 +1,7 @@
-import { basename, extname, resolve } from "node:path";
+import { resolve } from "node:path";
 
-import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import type { RolloutRef } from "../../shared/types/conversation.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import {
   selectPreferredSessionSource,
   type SessionSourceCandidate,
@@ -12,9 +13,11 @@ import {
   type ReadStableJsonlOptions,
   type StableJsonlResult,
 } from "./jsonlStream.ts";
+import { parseRolloutFilename, rolloutRefFromSource } from "./rolloutIdentity.ts";
 import {
   CATALOG_METADATA_MAX_BYTES,
   readSessionMetaPrefix,
+  observeSessionMetaSource,
   type SessionMetaPrefixResult,
 } from "./sessionMetaPrefix.ts";
 
@@ -28,11 +31,19 @@ export interface SelectedSessionSource {
 
 export interface SessionSourceSelectionResult {
   selected: SelectedSessionSource[];
+  physicalSegments: SelectedSessionSource[];
+  historyGraph: RolloutRef[];
+  representationChoices: {
+    physicalRolloutId: string | null;
+    selectedPath: string | null;
+    candidates: RolloutRef[];
+  }[];
   diagnostics: ViewerDiagnostic[];
   bytesRead: number;
 }
 
 export interface SessionSourceSelectionOptions {
+  currentRolloutPaths?: ReadonlyMap<string, string>;
   prefixBytes?: number | undefined;
   readPrefix?: typeof readSessionMetaPrefix | undefined;
   readJsonl?:
@@ -41,11 +52,7 @@ export interface SessionSourceSelectionOptions {
 }
 
 function filenameSessionId(path: string): string | null {
-  const name = basename(path, extname(path));
-  return (
-    name.match(/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu)?.[0] ??
-    null
-  );
+  return parseRolloutFilename(path)?.stableThreadId ?? null;
 }
 
 function candidateSessionId(entry: SelectedSessionSource): string | null {
@@ -81,15 +88,57 @@ async function readPrefixes(
     const batch = sources.slice(index, index + PREFIX_READ_CONCURRENCY);
     // oxlint-disable-next-line no-await-in-loop -- Bounded batches prevent hundreds of simultaneous rollout handles.
     const prefixes = await Promise.all(
-      batch.map(async (source) => ({
-        source,
-        prefix: await readPrefix(source.path, options.prefixBytes ?? DEFAULT_PREFIX_BYTES, {
-          firstRecordMaxBytes: Math.max(
-            options.prefixBytes ?? DEFAULT_PREFIX_BYTES,
-            CATALOG_METADATA_MAX_BYTES,
-          ),
-        }),
-      })),
+      batch.map(async (source): Promise<SelectedSessionSource> => {
+        try {
+          return {
+            source,
+            prefix: source.path.endsWith(".jsonl.zst")
+              ? {
+                  status: "missing" as const,
+                  meta: null,
+                  parentThreadIdHint: null,
+                  bytesRead: 0,
+                  observation: await observeSessionMetaSource(source.path),
+                  diagnostics: [],
+                }
+              : await readPrefix(source.path, options.prefixBytes ?? DEFAULT_PREFIX_BYTES, {
+                  firstRecordMaxBytes: Math.max(
+                    options.prefixBytes ?? DEFAULT_PREFIX_BYTES,
+                    CATALOG_METADATA_MAX_BYTES,
+                  ),
+                }),
+          };
+        } catch {
+          return {
+            source,
+            prefix: {
+              status: "changed",
+              meta: null,
+              parentThreadIdHint: null,
+              bytesRead: 0,
+              observation: {
+                device: 0n,
+                inode: 0n,
+                size: 0n,
+                mtimeNs: 0n,
+                ctimeNs: 0n,
+                regular: false,
+                symbolicLink: false,
+              },
+              diagnostics: [
+                createViewerDiagnostic({
+                  code: "source.changed_during_read",
+                  severity: "warning",
+                  area: "source",
+                  path: source.path,
+                  message:
+                    "Rollout representation is unavailable during source selection, retaining the last known catalog identity.",
+                }),
+              ],
+            },
+          };
+        }
+      }),
     );
     results.push(...prefixes);
   }
@@ -128,7 +177,9 @@ export async function selectSessionSources(
   const groups = new Map<string, SelectedSessionSource[]>();
   for (const entry of prefixed) {
     const sessionId = candidateSessionId(entry);
-    const key = sessionId === null ? `path:${resolve(entry.source.path)}` : `session:${sessionId}`;
+    const physicalId = parseRolloutFilename(entry.source.path)?.physicalRolloutId ?? sessionId;
+    const key =
+      physicalId === null ? `path:${resolve(entry.source.path)}` : `physical:${physicalId}`;
     const group = groups.get(key) ?? [];
     group.push(entry);
     groups.set(key, group);
@@ -136,7 +187,20 @@ export async function selectSessionSources(
 
   const selected: SelectedSessionSource[] = [];
   const readJsonl = options.readJsonl ?? readStableJsonl;
-  for (const group of groups.values()) {
+  for (const representations of groups.values()) {
+    const available = representations.filter(
+      (entry) =>
+        entry.prefix.observation.regular &&
+        !entry.prefix.observation.symbolicLink &&
+        entry.prefix.status !== "changed",
+    );
+    const plain = available.filter(
+      (entry) => entry.source.path.endsWith(".jsonl") && entry.prefix.status === "found",
+    );
+    const group = plain.length > 0 ? plain : available;
+    if (group.length === 0) {
+      continue;
+    }
     if (group.length === 1) {
       selected.push(group[0]!);
       continue;
@@ -148,6 +212,17 @@ export async function selectSessionSources(
     }
     const candidates: SessionSourceCandidate[] = [];
     for (const entry of group) {
+      if (entry.source.path.endsWith(".jsonl.zst")) {
+        candidates.push({
+          sessionId,
+          path: entry.source.path,
+          scope: entry.source.scope,
+          mtimeMs: Number(entry.prefix.observation.mtimeNs) / 1_000_000,
+          stable: true,
+          complete: false,
+        });
+        continue;
+      }
       // oxlint-disable-next-line no-await-in-loop -- Full stable reads are serialized and limited to rare duplicate groups.
       const result = await readJsonl(entry.source.path, { start: 0 });
       if (result.read.status === "stable") {
@@ -165,8 +240,72 @@ export async function selectSessionSources(
     }
   }
 
+  const physicalSegments = selected.toSorted((left, right) =>
+    left.source.path.localeCompare(right.source.path),
+  );
+  const historyGraph = physicalSegments.map((entry) =>
+    rolloutRefFromSource(entry.source.path, entry.prefix.meta),
+  );
+  const physicalOwners = new Map(
+    historyGraph.map((ref) => [ref.physicalRolloutId, ref.stableThreadId]),
+  );
+  const bases = new Set(
+    historyGraph.flatMap((ref) =>
+      ref.historyBase !== null &&
+      physicalOwners.get(ref.historyBase.physicalRolloutId) === ref.stableThreadId
+        ? [ref.historyBase.physicalRolloutId]
+        : [],
+    ),
+  );
+  const leaves = physicalSegments.filter(
+    (_, index) => !bases.has(historyGraph[index]!.physicalRolloutId!),
+  );
+  const logical = new Map<string, SelectedSessionSource>();
+  for (const [id, path] of options.currentRolloutPaths ?? []) {
+    const physicalId = parseRolloutFilename(path)?.physicalRolloutId;
+    const current = physicalSegments.find(
+      (entry, index) =>
+        historyGraph[index]!.stableThreadId === id &&
+        (resolve(entry.source.path) === resolve(path) ||
+          (physicalId !== undefined && historyGraph[index]!.physicalRolloutId === physicalId)),
+    );
+    if (current !== undefined) {
+      logical.set(id, current);
+    }
+  }
+  for (const entry of leaves) {
+    const id = candidateSessionId(entry) ?? entry.source.path;
+    if (options.currentRolloutPaths?.has(id)) {
+      continue;
+    }
+    if (logical.has(id)) {
+      diagnostics.push(
+        createViewerDiagnostic({
+          code: "source.duplicate_session",
+          severity: "warning",
+          area: "source",
+          message:
+            "Distinct physical histories share a stable thread ID without a current-rollout reference, all segments remain available in the history graph.",
+          path: entry.source.path,
+        }),
+      );
+    } else {
+      logical.set(id, entry);
+    }
+  }
   return {
-    selected: selected.toSorted((left, right) => left.source.path.localeCompare(right.source.path)),
+    selected: [...logical.values()],
+    physicalSegments,
+    historyGraph,
+    representationChoices: [...groups.values()].map((group) => {
+      const candidates = group.map((entry) =>
+        rolloutRefFromSource(entry.source.path, entry.prefix.meta),
+      );
+      const physicalRolloutId = candidates[0]!.physicalRolloutId;
+      const selectedPath =
+        historyGraph.find((ref) => ref.physicalRolloutId === physicalRolloutId)?.sourcePath ?? null;
+      return { physicalRolloutId, selectedPath, candidates };
+    }),
     diagnostics,
     bytesRead,
   };

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   catalogSession,
+  listCatalogProjects,
   listCatalogSessions,
   markCatalogSessionReady,
 } from "../../../server/cache/catalogStore.ts";
@@ -17,8 +18,16 @@ import {
   type SessionMetaPrefixObservation,
 } from "../../../server/ingestion/sessionMetaPrefix.ts";
 import { refreshLiveCatalog } from "../../../server/live/catalogBuilder.ts";
+import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
+import { LiveConversationRepository } from "../../../server/live/repository.ts";
 import type { GlobalStateMetadata } from "../../../server/metadata/globalState.ts";
-import type { StateMetadataSnapshot } from "../../../server/metadata/stateSnapshot.ts";
+import type {
+  StateMetadataSnapshot,
+  StateThreadMetadata,
+} from "../../../server/metadata/stateSnapshot.ts";
+import type { CatalogThreadMetadata } from "../../../server/metadata/threadClassification.ts";
+import type { JsonObject } from "../../../shared/types/conversation.ts";
+import { thread as nativeThread } from "../library/membershipFixtures.ts";
 
 const fixtureRoot = join(process.cwd(), "tests", "fixtures", "catalog");
 const temporaryRoots: string[] = [];
@@ -48,6 +57,468 @@ const globalState: GlobalStateMetadata = {
 const emptyStateSnapshot: StateMetadataSnapshot = { threads: [], sections: [], spawnEdges: [] };
 
 describe("refreshLiveCatalog", () => {
+  it("keeps native archive scope, recency and custom section placement independent from project membership", async () => {
+    const identityScopeKey = "a".repeat(64);
+    const root = await mkdtemp(join(tmpdir(), "catalog-native-membership-"));
+    temporaryRoots.push(root);
+    const sources = ["first", "second", "archived"].map((id) => ({
+      path: join(root, `${id}.jsonl`),
+      scope: "active" as const,
+    }));
+    await Promise.all(
+      sources.map((source, index) =>
+        writeFile(
+          source.path,
+          JSON.stringify({
+            type: "session_meta",
+            payload: {
+              id: ["first", "second", "archived"][index],
+              cwd: "C:/same",
+              source: "cli",
+              thread_source: "user",
+            },
+          }) + "\n",
+        ),
+      ),
+    );
+    const database = openCacheDatabase(":memory:");
+    try {
+      const options = {
+        database,
+        sidebarIdentityScopeKey: identityScopeKey,
+        discovery: { ...discovery([]), rollouts: sources },
+        sessionIndexEntries: [],
+        globalState: {
+          projects: [],
+          pinnedThreadIds: [],
+          sectionsByIdentity: {
+            [identityScopeKey]: {
+              sections: [{ id: "review", name: "Review", itemKeys: ["codex:thread:local:first"] }],
+              threadHostIds: { first: "local" },
+            },
+          },
+        },
+        stateSnapshot: {
+          ...emptyStateSnapshot,
+          projects: [{ id: "native", name: "Native", roots: [{ position: 0, path: "C:/same" }] }],
+          threads: [
+            nativeThread("first", {
+              rolloutPath: sources.at(0)!.path,
+              projectId: "native",
+              updatedAtMs: 10_000,
+            }),
+            nativeThread("second", {
+              rolloutPath: sources.at(1)!.path,
+              projectId: "native",
+              updatedAtMs: 20_000,
+            }),
+            nativeThread("archived", {
+              rolloutPath: sources.at(2)!.path,
+              projectId: "native",
+              archived: true,
+              updatedAtMs: 30_000,
+            }),
+          ],
+        },
+      };
+      const result = await refreshLiveCatalog(options);
+      expect(catalogSession(database, "first")?.project.id).toBe("native");
+      expect(
+        listCatalogSessions(database, { scope: "active", projectId: "native" }).items.map(
+          (item) => item.summary.id,
+        ),
+      ).toEqual(["second"]);
+      expect(
+        listCatalogSessions(database, {
+          scope: "active",
+          projectId: `custom:${identityScopeKey}:review`,
+        }).items.map((item) => item.summary.id),
+      ).toEqual(["first"]);
+      expect(
+        listCatalogSessions(database, { scope: "archived", projectId: "native" }).items.map(
+          (item) => item.summary.id,
+        ),
+      ).toEqual(["archived"]);
+      expect(
+        result.projects.map((project) => [project.id, project.activeCount, project.archivedCount]),
+      ).toEqual([
+        ["native", 1, 1],
+        [`custom:${identityScopeKey}:review`, 1, 0],
+        ["none", 0, 0],
+      ]);
+      const changed = await refreshLiveCatalog({
+        ...options,
+        globalState: { ...options.globalState, sectionsByIdentity: {} },
+        changedSourcePaths: [],
+      });
+      expect(changed.changedIds).toEqual([]);
+      expect(changed.groupsChanged).toBe(true);
+      expect(
+        listCatalogSessions(database, { scope: "active", projectId: "native", limit: 1 }).items.map(
+          (item) => item.summary.id,
+        ),
+      ).toEqual(["second"]);
+      expect(
+        listCatalogSessions(database, {
+          scope: "active",
+          projectId: "native",
+          limit: 1,
+          cursor: "1",
+        }).items.map((item) => item.summary.id),
+      ).toEqual(["first"]);
+    } finally {
+      database.close();
+    }
+  });
+  it("adapts saved membership, empty projects and manual order to independently paged groups", async () => {
+    const root = await mkdtemp(join(tmpdir(), "catalog-membership-"));
+    temporaryRoots.push(root);
+    const sibling = join(root, "sibling.jsonl");
+    await writeFile(
+      sibling,
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: "sibling", cwd: "C:/Work", source: "cli", thread_source: "user" },
+      }) + "\n",
+    );
+    const database = openCacheDatabase(":memory:");
+    try {
+      const result = await refreshLiveCatalog({
+        database,
+        discovery: {
+          ...discovery(["root.jsonl"]),
+          rollouts: [...discovery(["root.jsonl"]).rollouts, { path: sibling, scope: "active" }],
+        },
+        sessionIndexEntries: [],
+        globalState: {
+          projects: [
+            { id: "saved", name: "Saved", rootPaths: ["C:/Work"] },
+            { id: "empty", name: "Empty", rootPaths: [] },
+          ],
+          pinnedThreadIds: [],
+          projectlessThreadIds: ["root"],
+          projectOrder: ["empty", "saved"],
+          sidebarPreferences: { chatSortMode: "manual" },
+          projectThreadOrders: { saved: ["sibling"] },
+        },
+        stateSnapshot: emptyStateSnapshot,
+      });
+      expect(
+        result.projects.map((project) => [project.id, project.name, project.activeCount]),
+      ).toEqual([
+        ["empty", "Empty", 0],
+        ["saved", "Saved", 1],
+        ["none", "Recents", 1],
+      ]);
+      expect(catalogSession(database, "root")?.project.id).toBe("none");
+      expect(
+        listCatalogSessions(database, { scope: "active", projectId: "saved", limit: 1 }).items.map(
+          (item) => item.summary.id,
+        ),
+      ).toEqual(["sibling"]);
+      expect(
+        listCatalogSessions(database, { scope: "active", projectId: "none", limit: 1 }).items.map(
+          (item) => item.summary.id,
+        ),
+      ).toEqual(["root"]);
+      expect(listCatalogProjects(database).map((project) => project.id)).toEqual([
+        "empty",
+        "saved",
+        "none",
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+  it("keeps cross-source attachment and fork owners in root counts while explicit spawn controls remain children", async () => {
+    const root = await mkdtemp(join(tmpdir(), "catalog-cross-source-ownership-"));
+    temporaryRoots.push(root);
+    const cases: Array<{
+      id: string;
+      raw: JsonObject;
+      native: CatalogThreadMetadata;
+      edge?: boolean;
+    }> = [
+      { id: "raw-attached", raw: { attached_parent_thread_id: "owner" }, native: {} },
+      { id: "native-attached", raw: {}, native: { attachedParentThreadId: "owner" } },
+      { id: "raw-fork", raw: { forked_from_id: "owner" }, native: {} },
+      { id: "native-fork", raw: {}, native: { forkedFromId: "owner" } },
+      {
+        id: "raw-spawn",
+        raw: { source: { subagent: { thread_spawn: { parent_thread_id: "owner" } } } },
+        native: { attachedParentThreadId: "owner" },
+      },
+      {
+        id: "native-spawn",
+        raw: { forked_from_id: "owner" },
+        native: { source: { subAgent: { threadSpawn: { parentThreadId: "owner" } } } },
+      },
+      { id: "edge-spawn", raw: { attached_parent_thread_id: "owner" }, native: {}, edge: true },
+    ];
+    await Promise.all(
+      cases.map((entry) =>
+        writeFile(
+          join(root, `${entry.id}.jsonl`),
+          `${JSON.stringify({ type: "session_meta", payload: { id: entry.id, thread_source: "user", parent_thread_id: "owner", source: "cli", ...entry.raw } })}\n`,
+        ),
+      ),
+    );
+    await writeFile(
+      join(root, "owner.jsonl"),
+      `${JSON.stringify({ type: "session_meta", payload: { id: "owner", thread_source: "user", source: "cli" } })}\n`,
+    );
+    const threads: Array<StateThreadMetadata & CatalogThreadMetadata> = cases.map((entry) => ({
+      ...entry.native,
+      id: entry.id,
+      rolloutPath: join(root, `${entry.id}.jsonl`),
+      createdAt: 0,
+      updatedAt: 0,
+      modelProvider: "openai",
+      cwd: "",
+      title: "Untitled",
+      tokensUsed: 0,
+      archived: false,
+      archivedAt: null,
+      gitSha: null,
+      gitBranch: null,
+      gitOriginUrl: null,
+      firstUserMessage: "",
+      model: null,
+      reasoningEffort: null,
+      name: null,
+      pinned: false,
+      sectionId: null,
+      parentThreadId: "owner",
+      source:
+        typeof entry.native.source === "string"
+          ? entry.native.source
+          : entry.native.source == null
+            ? "cli"
+            : JSON.stringify(entry.native.source),
+    }));
+    const database = openCacheDatabase(":memory:");
+    try {
+      const result = await refreshLiveCatalog({
+        database,
+        discovery: {
+          ...discovery([]),
+          rollouts: ["owner", ...cases.map((entry) => entry.id)].map((id) => ({
+            path: join(root, `${id}.jsonl`),
+            scope: "active",
+          })),
+        },
+        sessionIndexEntries: [],
+        globalState: { projects: [], pinnedThreadIds: [] },
+        stateSnapshot: {
+          threads,
+          sections: [],
+          spawnEdges: cases
+            .filter((entry) => entry.edge)
+            .map((entry) => ({
+              childThreadId: entry.id,
+              parentThreadId: "owner",
+              status: "running",
+            })),
+        },
+      });
+      expect(
+        listCatalogSessions(database, { scope: "active" })
+          .items.map((entry) => entry.summary.id)
+          .toSorted(),
+      ).toEqual(["native-attached", "native-fork", "owner", "raw-attached", "raw-fork"]);
+      expect(result.projects.reduce((sum, project) => sum + project.activeCount, 0)).toBe(5);
+      expect(
+        listCatalogSessions(database, { scope: "active", parentThreadId: "owner" })
+          .items.map((entry) => entry.summary.id)
+          .toSorted(),
+      ).toEqual(["edge-spawn", "native-spawn", "raw-spawn"]);
+    } finally {
+      database.close();
+    }
+  });
+  it("honors current native role flags independently of name, user events, model and stale physical metadata", async () => {
+    const database = openCacheDatabase(":memory:");
+    const thread: StateThreadMetadata = {
+      id: "guardian",
+      rolloutPath: join(fixtureRoot, "current.jsonl"),
+      createdAt: 0,
+      updatedAt: 0,
+      source: "cli",
+      modelProvider: "openai",
+      cwd: "",
+      title: "Untitled",
+      tokensUsed: 0,
+      archived: false,
+      archivedAt: null,
+      gitSha: null,
+      gitBranch: null,
+      gitOriginUrl: null,
+      firstUserMessage: "",
+      model: "codex-auto-review",
+      reasoningEffort: null,
+      name: null,
+      pinned: false,
+      sectionId: null,
+      hasUserEvent: false,
+      threadSource: "user",
+    };
+    const options = {
+      database,
+      discovery: discovery(["guardian.jsonl"]),
+      sessionIndexEntries: [],
+      globalState: { projects: [], pinnedThreadIds: [] },
+      stateSnapshot: { ...emptyStateSnapshot, threads: [thread] },
+    };
+    try {
+      await refreshLiveCatalog({ ...options, stateSnapshot: null });
+      await refreshLiveCatalog(options);
+      expect(
+        listCatalogSessions(database, { scope: "active" }).items.map((row) => row.summary.id),
+      ).toEqual(["guardian"]);
+      expect(
+        catalogSession(database, "guardian")?.structuralEvidence?.classification,
+      ).toMatchObject({
+        visibility: "user-root",
+        reasons: ["explicit-user-thread", "stale-rollout-structure-ignored"],
+      });
+      thread.threadSource = "security_scan";
+      await refreshLiveCatalog(options);
+      expect(listCatalogSessions(database, { scope: "active" }).total).toBe(0);
+      thread.threadSource = "custom-role";
+      await refreshLiveCatalog(options);
+      const repository = new LiveConversationRepository(database, new InvalidationBus());
+      expect(repository.getClassification("guardian")).toMatchObject({
+        classification: { visibility: "unresolved" },
+        sourcePath: join(fixtureRoot, "guardian.jsonl"),
+      });
+      const nativeHelper = {
+        ...thread,
+        id: "root",
+        rolloutPath: join(fixtureRoot, "root.jsonl"),
+        threadSource: null,
+        source: JSON.stringify({ subAgent: { other: "guardian", parentThreadId: "owner" } }),
+      };
+      await refreshLiveCatalog({
+        ...options,
+        discovery: discovery(["root.jsonl"]),
+        stateSnapshot: { ...emptyStateSnapshot, threads: [nativeHelper] },
+      });
+      expect(catalogSession(database, "root")?.structuralEvidence?.classification).toMatchObject({
+        visibility: "internal",
+        transportSource: "cli",
+        parentThreadId: "owner",
+      });
+      const nativeChild = {
+        ...thread,
+        id: "child",
+        rolloutPath: join(fixtureRoot, "subagent.jsonl"),
+        threadSource: null,
+        source: "cli",
+        parentThreadId: "native-parent",
+      };
+      await refreshLiveCatalog({
+        ...options,
+        discovery: discovery(["subagent.jsonl"]),
+        stateSnapshot: {
+          ...emptyStateSnapshot,
+          threads: [nativeChild],
+          spawnEdges: [
+            { childThreadId: "child", parentThreadId: "edge-parent", status: "running" },
+          ],
+        },
+      });
+      expect(catalogSession(database, "child")?.structuralEvidence?.classification).toMatchObject({
+        visibility: "unresolved",
+        parentThreadId: null,
+        declarations: expect.arrayContaining([
+          expect.objectContaining({ origin: "raw", parentThreadIds: ["root"] }),
+          expect.objectContaining({ origin: "native", parentThreadIds: ["native-parent"] }),
+          expect.objectContaining({ origin: "spawn-edge", parentThreadIds: ["edge-parent"] }),
+        ]),
+      });
+      expect(catalogSession(database, "child")?.parentThreadId).toBeNull();
+    } finally {
+      database.close();
+    }
+  });
+  it("uses the structural policy for raw-only recovery, project counts and child discovery", async () => {
+    const root = await mkdtemp(join(tmpdir(), "catalog-policy-"));
+    temporaryRoots.push(root);
+    const rows = [
+      {
+        id: "user",
+        thread_source: "user",
+        source: "cli",
+        name: null,
+        title: "Untitled",
+        has_user_event: 0,
+      },
+      {
+        id: "guardian",
+        threadSource: "guardian_review",
+        source: "appServer",
+        parent_thread_id: "user",
+      },
+      { id: "scan", thread_source: "security_scan", source: "cli" },
+      { id: "unknown", thread_source: "custom" },
+      { id: "malformed-role", thread_source: 12 },
+      { id: "malformed-ephemeral", ephemeral: "true" },
+      { id: "malformed-source", source: 12 },
+      { id: "incomplete-spawn", source: { subagent: { thread_spawn: {} } } },
+      { id: "child", source: { subAgent: { threadSpawn: { parentThreadId: "user" } } } },
+      {
+        id: "attached",
+        thread_source: "user",
+        parent_thread_id: "user",
+        attached_parent_thread_id: "user",
+      },
+      { id: "orphan", source: { subagent: { thread_spawn: { parent_thread_id: "missing" } } } },
+    ];
+    await Promise.all(
+      rows.map((row) =>
+        writeFile(
+          join(root, `${row.id}.jsonl`),
+          `${JSON.stringify({ type: "session_meta", payload: row })}\n`,
+        ),
+      ),
+    );
+    const database = openCacheDatabase(":memory:");
+    try {
+      const result = await refreshLiveCatalog({
+        database,
+        discovery: {
+          ...discovery([]),
+          rollouts: rows.map((row) => ({ path: join(root, `${row.id}.jsonl`), scope: "active" })),
+        },
+        sessionIndexEntries: [],
+        globalState: { projects: [], pinnedThreadIds: [] },
+        stateSnapshot: null,
+      });
+      expect(
+        listCatalogSessions(database, { scope: "active" })
+          .items.map((row) => row.summary.id)
+          .toSorted(),
+      ).toEqual(["attached", "user"]);
+      expect(
+        listCatalogSessions(database, { scope: "active", parentThreadId: "user" }).items.map(
+          (row) => row.summary.id,
+        ),
+      ).toEqual(["child"]);
+      expect(result.projects.reduce((sum, project) => sum + project.activeCount, 0)).toBe(2);
+      expect(catalogSession(database, "unknown")?.structuralEvidence?.classification).toMatchObject(
+        { visibility: "unresolved" },
+      );
+      expect(catalogSession(database, "orphan")).toMatchObject({
+        kind: "subagent",
+        parentThreadId: "missing",
+      });
+      expect(
+        result.diagnostics.some((diagnostic) => diagnostic.details?.["threadId"] === "unknown"),
+      ).toBe(true);
+    } finally {
+      database.close();
+    }
+  });
   it("preserves newly materialized metrics when metadata refresh was already awaiting source I/O", async () => {
     const database = openCacheDatabase(":memory:");
     const options = {
@@ -102,8 +573,8 @@ describe("refreshLiveCatalog", () => {
     try {
       await refreshLiveCatalog({ ...options, discovery: discovery(["subagent.jsonl"]) });
       expect(catalogSession(database, "child")).toMatchObject({
-        kind: "root",
-        parentThreadId: null,
+        kind: "subagent",
+        parentThreadId: "root",
         structuralEvidence: {
           meta: { source: { subagent: { thread_spawn: { parent_thread_id: "root" } } } },
         },
@@ -113,7 +584,7 @@ describe("refreshLiveCatalog", () => {
         discovery: discovery(["root.jsonl", "subagent.jsonl"]),
         changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
       });
-      expect(attached.changedIds).toEqual(["child", "root"]);
+      expect(attached.changedIds).toEqual(["root"]);
       expect(catalogSession(database, "child")).toMatchObject({
         kind: "subagent",
         parentThreadId: "root",
@@ -125,7 +596,7 @@ describe("refreshLiveCatalog", () => {
         discovery: discovery(["subagent.jsonl"]),
         changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
       });
-      expect(catalogSession(database, "child")?.kind).toBe("root");
+      expect(catalogSession(database, "child")?.kind).toBe("subagent");
       await refreshLiveCatalog({
         ...options,
         discovery: discovery(["root.jsonl", "subagent.jsonl"]),
@@ -144,7 +615,7 @@ describe("refreshLiveCatalog", () => {
       });
       expect(repaired.changedIds).toContain("child");
       expect(catalogSession(database, "child")?.parentThreadId).toBe("root");
-      expect(readPrefix).toHaveBeenCalledTimes(4);
+      expect(readPrefix).toHaveBeenCalledTimes(3);
       expect(
         (
           await refreshLiveCatalog({
@@ -196,7 +667,13 @@ describe("refreshLiveCatalog", () => {
           rollouts: [...discovery(["root.jsonl"]).rollouts, { path, scope: "archived" }],
         },
         sessionIndexEntries: [],
-        globalState: { projects: [], pinnedThreadIds: [] },
+        globalState: {
+          projects: [
+            { id: "parent-project", name: "Parent", rootPaths: ["C:/Work"] },
+            { id: "child-project", name: "Child", rootPaths: ["D:/different-project"] },
+          ],
+          pinnedThreadIds: [],
+        },
         stateSnapshot: null,
       });
       expect(result.bytesRead).toBeLessThan(32_768);
@@ -460,6 +937,7 @@ describe("refreshLiveCatalog", () => {
       });
 
       expect(unchanged.changedIds).toEqual([]);
+      expect(unchanged.groupsChanged).toBe(false);
       expect(unchanged.removedIds).toEqual([]);
       expect(unchanged.bytesRead).toBe(0);
       expect(readPrefix).toHaveBeenCalledTimes(2);
@@ -618,7 +1096,9 @@ describe("refreshLiveCatalog", () => {
         sourcePath: archived,
         scope: "archived",
       });
-      expect(result.diagnostics).toEqual([
+      expect(
+        result.diagnostics.filter((diagnostic) => diagnostic.code === "source.duplicate_session"),
+      ).toEqual([
         expect.objectContaining({
           code: "source.duplicate_session",
           path: archived,
@@ -696,7 +1176,7 @@ describe("refreshLiveCatalog", () => {
       expect(result.rows.find(({ summary }) => summary.id === "root")).toMatchObject({
         kind: "root",
         materialization: "cold",
-        project: { id: "codex:viewer", name: "Viewer" },
+        project: { id: "viewer", name: "Viewer" },
         childCount: 1,
       });
       expect(result.rows.find(({ summary }) => summary.id === "child")).toMatchObject({
@@ -717,13 +1197,13 @@ describe("refreshLiveCatalog", () => {
       expect(
         listCatalogSessions(database, {
           scope: "active",
-          projectId: "codex:viewer",
+          projectId: "viewer",
           parentThreadId: "__root__",
         }).items.map(({ summary }) => summary.id),
       ).toEqual(["root"]);
       expect(result.projects).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ id: "codex:viewer", activeCount: 1, archivedCount: 0 }),
+          expect.objectContaining({ id: "viewer", activeCount: 1, archivedCount: 0 }),
         ]),
       );
       expect(result.bytesRead).toBeGreaterThan(0);
@@ -732,7 +1212,7 @@ describe("refreshLiveCatalog", () => {
     }
   });
 
-  it("rejects parent cycles, falls back to the filename ID, and removes stale catalog sources", async () => {
+  it("rejects parent cycles, falls back to the filename ID, and retains unavailable catalog sources", async () => {
     const database = openCacheDatabase(":memory:");
 
     try {
@@ -752,21 +1232,24 @@ describe("refreshLiveCatalog", () => {
       });
 
       expect(result.rows.filter(({ summary }) => summary.id.startsWith("cycle-"))).toEqual([
-        expect.objectContaining({ kind: "root", parentThreadId: null }),
-        expect.objectContaining({ kind: "root", parentThreadId: null }),
+        expect.objectContaining({ kind: "auxiliary", parentThreadId: null }),
+        expect.objectContaining({ kind: "auxiliary", parentThreadId: null }),
       ]);
       expect(result.rows.find(({ summary }) => summary.id === "missing-meta")).toMatchObject({
         kind: "root",
       });
       expect(result.diagnostics.some(({ message }) => message.includes("cycle"))).toBe(true);
-      expect(catalogSession(database, "root")).toBeNull();
-      expect(result.removedIds).toEqual(["root"]);
+      expect(catalogSession(database, "root")).toMatchObject({
+        materialization: "cold",
+        error: "Rollout source is temporarily unavailable, awaiting a stable representation.",
+      });
+      expect(result.removedIds).toEqual([]);
     } finally {
       database.close();
     }
   });
 
-  it("promotes a subagent whose parent is absent so it remains visible as a root conversation", async () => {
+  it("retains an orphan delegated child without promoting it to the root list", async () => {
     const database = openCacheDatabase(":memory:");
 
     try {
@@ -780,17 +1263,21 @@ describe("refreshLiveCatalog", () => {
 
       expect(result.rows).toEqual([
         expect.objectContaining({
-          kind: "root",
-          parentThreadId: null,
-          agentDepth: null,
-          summary: expect.objectContaining({ parentThreadId: null }),
+          kind: "subagent",
+          parentThreadId: "root",
+          agentDepth: 1,
+          summary: expect.objectContaining({ parentThreadId: "root" }),
         }),
       ]);
       expect(
         listCatalogSessions(database, { scope: "active", parentThreadId: "__root__" }).items,
-      ).toHaveLength(1);
-      expect(result.projects).toEqual([
-        expect.objectContaining({ activeCount: 1, archivedCount: 0 }),
+      ).toHaveLength(0);
+      expect(
+        result.projects.map((project) => [project.id, project.activeCount, project.archivedCount]),
+      ).toEqual([
+        ["viewer", 0, 0],
+        ["work", 0, 0],
+        ["none", 0, 0],
       ]);
     } finally {
       database.close();
@@ -864,7 +1351,13 @@ describe("refreshLiveCatalog", () => {
       expect(
         listCatalogSessions(database, { scope: "active", parentThreadId: "__root__" }).items,
       ).toEqual([]);
-      expect(result.projects).toEqual([]);
+      expect(
+        result.projects.map((project) => [project.id, project.activeCount, project.archivedCount]),
+      ).toEqual([
+        ["viewer", 0, 0],
+        ["work", 0, 0],
+        ["none", 0, 0],
+      ]);
     } finally {
       database.close();
     }

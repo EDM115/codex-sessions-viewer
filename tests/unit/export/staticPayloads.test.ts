@@ -14,6 +14,13 @@ import {
   reconcileStaticSessionArtifacts,
   writeStaticPayloads,
 } from "../../../server/export/writeStaticPayloads.ts";
+import {
+  classifyCatalogThread,
+  classifyNormalizedSession,
+  type CatalogThreadMetadata,
+} from "../../../server/metadata/threadClassification.ts";
+import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
+import type { JsonObject } from "../../../shared/types/conversation.ts";
 import { staticLibraryPayloadSchema } from "../../../shared/types/staticPayloads.ts";
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
@@ -82,7 +89,9 @@ describe("conversation Markdown files", () => {
       revision: "root-rev",
     });
     root.summary.parentThreadId = null;
+    root.classification = classifyCatalogThread({ threadSource: "user" });
     const child = structuredClone(root);
+    delete child.classification;
     child.summary = {
       ...child.summary,
       id: "cross-project-child",
@@ -208,6 +217,184 @@ describe("conversation Markdown files", () => {
 });
 
 describe("static repository payloads", () => {
+  it("exports cross-source ownership as roots and preserves explicit spawn coexistence", async () => {
+    const generatedRoot = await temporaryRoot();
+    const template = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: "C:/fixtures/ownership.jsonl",
+      scope: "active",
+      revision: "cross-source-ownership",
+    });
+    const cases: Array<{
+      id: string;
+      raw: JsonObject;
+      native: CatalogThreadMetadata;
+      edge?: boolean;
+    }> = [
+      { id: "raw-attached", raw: { attached_parent_thread_id: "owner" }, native: {} },
+      { id: "native-attached", raw: {}, native: { attachedParentThreadId: "owner" } },
+      { id: "raw-fork", raw: { forked_from_id: "owner" }, native: {} },
+      { id: "native-fork", raw: {}, native: { forkedFromId: "owner" } },
+      {
+        id: "raw-spawn",
+        raw: { source: { subagent: { thread_spawn: { parent_thread_id: "owner" } } } },
+        native: { attachedParentThreadId: "owner" },
+      },
+      {
+        id: "native-spawn",
+        raw: { forked_from_id: "owner" },
+        native: { source: { subAgent: { threadSpawn: { parentThreadId: "owner" } } } },
+      },
+      { id: "edge-spawn", raw: { attached_parent_thread_id: "owner" }, native: {}, edge: true },
+    ];
+    const sessions = cases.map((entry) => {
+      const session: NormalizedSession = {
+        summary: { ...template.summary, id: entry.id, parentThreadId: "owner", childThreadIds: [] },
+        turns: [],
+        rawEvents: [
+          {
+            id: `${entry.id}-meta`,
+            type: "session_meta",
+            timestamp: null,
+            turnId: null,
+            payload: {
+              type: "session_meta",
+              payload: {
+                id: entry.id,
+                source: "cli",
+                thread_source: "user",
+                parent_thread_id: "owner",
+                ...entry.raw,
+              },
+            },
+          },
+        ],
+      };
+      session.classification = classifyNormalizedSession(
+        session,
+        { source: "cli", parentThreadId: "owner", ...entry.native },
+        entry.edge ? { spawnParentThreadId: "owner" } : {},
+      );
+      return session;
+    });
+    sessions.push({
+      summary: { ...template.summary, id: "owner", parentThreadId: null, childThreadIds: [] },
+      turns: [],
+      rawEvents: [],
+      classification: classifyCatalogThread({ threadSource: "user" }),
+    });
+    await writeStaticPayloads(sessions, { generatedRoot });
+    const library = staticLibraryPayloadSchema.parse(
+      JSON.parse(await readFile(join(generatedRoot, "payloads/projects.json"), "utf8")),
+    );
+    expect(
+      Object.entries(library.entries)
+        .filter(([, entry]) => entry.kind === "root")
+        .map(([id]) => id)
+        .toSorted(),
+    ).toEqual(["native-attached", "native-fork", "owner", "raw-attached", "raw-fork"]);
+    expect(library.projects.reduce((sum, project) => sum + project.activeCount, 0)).toBe(5);
+    expect(library.entries["owner"]?.childCount).toBe(3);
+    expect(
+      Object.entries(library.entries)
+        .filter(([, entry]) => entry.kind === "subagent")
+        .map(([id]) => id)
+        .toSorted(),
+    ).toEqual(["edge-spawn", "native-spawn", "raw-spawn"]);
+  });
+  it("applies structural export visibility and retains orphan topology without counting it as a root", async () => {
+    const generatedRoot = await temporaryRoot();
+    const template = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: "C:/fixtures/template.jsonl",
+      scope: "active",
+      revision: "classification-export",
+    });
+    const metadata: Array<JsonObject & { id: string }> = [
+      { id: "user", thread_source: "user", source: "cli" },
+      { id: "helper", thread_source: "guardian_review" },
+      { id: "scan", threadSource: "security_scan" },
+      { id: "unknown", thread_source: "custom" },
+      {
+        id: "unknown-spawn",
+        thread_source: "custom",
+        source: { subagent: { thread_spawn: { parent_thread_id: "user" } } },
+      },
+      { id: "malformed-role", thread_source: 12 },
+      { id: "malformed-ephemeral", ephemeral: "true" },
+      { id: "malformed-source", source: 12 },
+      { id: "incomplete-spawn", source: { subagent: { thread_spawn: {} } } },
+      { id: "child", source: { subAgent: { threadSpawn: { parentThreadId: "user" } } } },
+      { id: "orphan", source: { subagent: { thread_spawn: { parent_thread_id: "missing" } } } },
+      {
+        id: "attached",
+        thread_source: "user",
+        parent_thread_id: "user",
+        attached_parent_thread_id: "user",
+      },
+    ];
+    const sessions: NormalizedSession[] = metadata.map((meta) => ({
+      summary: {
+        ...template.summary,
+        id: meta.id,
+        models: ["codex-auto-review"],
+        title: "Untitled",
+        parentThreadId: null,
+        childThreadIds: [],
+      },
+      turns: [],
+      rawEvents: [
+        {
+          id: `${meta.id}-meta`,
+          type: "session_meta",
+          timestamp: null,
+          turnId: null,
+          payload: { type: "session_meta", payload: meta },
+        },
+      ],
+    }));
+    sessions[0]!.approvalEvidence = {
+      sessionId: "user",
+      matched: [],
+      unattached: [
+        {
+          reason: "missing-tool-or-turn",
+          review: {
+            reviewedAction: { cmd: "same" },
+            outcome: null,
+            riskLevel: "unknown",
+            userAuthorization: null,
+            rationale: "Pending review",
+            reviewedAt: null,
+            parentThreadId: "user",
+            guardianSessionId: "helper",
+            rawEventIds: ["raw-v2-qualified-review"],
+          },
+        },
+      ],
+    };
+    await writeStaticPayloads(sessions, { generatedRoot });
+    const library = staticLibraryPayloadSchema.parse(
+      JSON.parse(await readFile(join(generatedRoot, "payloads/projects.json"), "utf8")),
+    );
+    expect(Object.keys(library.entries).toSorted()).toEqual([
+      "attached",
+      "child",
+      "orphan",
+      "user",
+    ]);
+    expect(library.projects.reduce((sum, project) => sum + project.activeCount, 0)).toBe(2);
+    expect(library.entries["orphan"]).toMatchObject({
+      kind: "subagent",
+      parentThreadId: "missing",
+    });
+    expect(library.entries["user"]?.childCount).toBe(1);
+    expect(
+      JSON.parse(
+        await readFile(join(generatedRoot, "payloads/sessions/user/approvals.json"), "utf8"),
+      ),
+    ).toEqual(sessions[0]!.approvalEvidence);
+  });
   it("writes one-turn chunks, navigator records, inspectors, and a small session index", async () => {
     const root = await temporaryRoot();
     const generatedRoot = join(root, ".generated");
@@ -242,14 +429,19 @@ describe("static repository payloads", () => {
     expect(result).toMatchObject({ sessionCount: 1, turnChunkCount: 2, published: true });
     expect(index).toEqual({
       version: 1,
-      sessions: [expect.objectContaining({ id: conversation.summary.id, parentThreadId: null })],
+      sessions: [
+        expect.objectContaining({
+          id: conversation.summary.id,
+          parentThreadId: conversation.summary.parentThreadId,
+        }),
+      ],
     });
     expect(projects.projects).toEqual([
-      expect.objectContaining({ activeCount: 1, archivedCount: 0, source: "git" }),
+      expect.objectContaining({ activeCount: 0, archivedCount: 0, source: "git" }),
     ]);
     expect(projects.entries[conversation.summary.id]).toMatchObject({
-      kind: "root",
-      parentThreadId: null,
+      kind: "subagent",
+      parentThreadId: conversation.summary.parentThreadId,
       childCount: 0,
     });
     expect(navigator).toMatchObject({
@@ -267,8 +459,8 @@ describe("static repository payloads", () => {
     ).toBe(true);
     expect(navigator.inspectorChunks).toMatchObject({
       "turn:turn-1": 0,
-      "message:message-raw-870": 0,
-      "activity:reasoning-raw-1093": 0,
+      [`message:${conversation.turns[0]!.userMessage!.id}`]: 0,
+      [`activity:${conversation.turns[0]!.activities.find((activity) => activity.kind === "reasoning")!.id}`]: 0,
       "turn:turn-2": 1,
     });
     expect(firstChunk).toMatchObject({
@@ -279,8 +471,16 @@ describe("static repository payloads", () => {
     expect(inspector.records).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ target: { type: "turn", id: "turn-1" } }),
-        expect.objectContaining({ target: { type: "message", id: "message-raw-870" } }),
-        expect.objectContaining({ target: { type: "activity", id: "reasoning-raw-1093" } }),
+        expect.objectContaining({
+          target: { type: "message", id: conversation.turns[0]!.userMessage!.id },
+        }),
+        expect.objectContaining({
+          target: {
+            type: "activity",
+            id: conversation.turns[0]!.activities.find((activity) => activity.kind === "reasoning")!
+              .id,
+          },
+        }),
       ]),
     );
     expect(Object.keys(inspector.rawRecords).length).toBeGreaterThan(0);

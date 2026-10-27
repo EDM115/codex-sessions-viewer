@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { writeConversationExport } from "../../server/export/writeConversationExport.ts";
 import { writeStaticPayloads } from "../../server/export/writeStaticPayloads.ts";
+import { classifyCatalogThread } from "../../server/metadata/threadClassification.ts";
 import { normalizedRolloutFixture } from "./cache/normalized.ts";
 
 export async function writeValidOutputFixture(
@@ -15,6 +16,7 @@ export async function writeValidOutputFixture(
     revision: "sha256:verified-output",
   });
   conversation.summary.parentThreadId = null;
+  conversation.classification = classifyCatalogThread({ threadSource: "user" });
   conversation.summary.childThreadIds = [];
   const sessionId = conversation.summary.id;
   await writeStaticPayloads([conversation], { generatedRoot: root, chunkSize: 1 });

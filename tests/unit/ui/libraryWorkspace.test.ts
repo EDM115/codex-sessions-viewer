@@ -125,7 +125,13 @@ async function startInvalidations(workspace: LibraryWorkspaceState) {
   });
   workspace.start();
   await flushPromises();
-  return (ids: string[]) => listener({ type: "library.updated", ids, revision: "next" });
+  return (ids: string[], groupsChanged = false) =>
+    listener({
+      type: "library.updated",
+      ids,
+      revision: "next",
+      ...(groupsChanged ? { groupsChanged: true } : {}),
+    });
 }
 
 afterEach(() => {
@@ -134,6 +140,126 @@ afterEach(() => {
 });
 
 describe("persistent library workspace state", () => {
+  it("uses scope-specific project order when active and archived recencies disagree", () => {
+    const route = reactive({ path: "/", query: {} });
+    stubWorkspaceGlobals(route, async () => undefined);
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    workspace.projects.value = [
+      {
+        ...project,
+        id: "a",
+        sidebar: {
+          kind: "project",
+          sectionId: null,
+          sectionName: null,
+          order: { active: 0, archived: 1 },
+        },
+      },
+      {
+        ...project,
+        id: "b",
+        sidebar: {
+          kind: "project",
+          sectionId: null,
+          sectionName: null,
+          order: { active: 1, archived: 0 },
+        },
+      },
+    ];
+    expect(
+      workspace.sidebarGroups.value.flatMap((group) => group.projects.map((project) => project.id)),
+    ).toEqual(["a", "b"]);
+    route.query.scope = "archived";
+    expect(
+      workspace.sidebarGroups.value.flatMap((group) => group.projects.map((project) => project.id)),
+    ).toEqual(["b", "a"]);
+    workspace.stop();
+    scope.stop();
+  });
+  it("refreshes the other loaded folder's same-count order on a mixed row and grouping invalidation", async () => {
+    vi.useFakeTimers();
+    let changed = false;
+    const projects = [
+      { ...project, id: "a", activeCount: 1 },
+      { ...project, id: "b", activeCount: 2 },
+    ];
+    stubWorkspaceGlobals(reactive({ path: "/", query: {} }), async (path) => {
+      if (path === "/api/projects") {
+        return projects;
+      }
+      if (path === "/api/status") {
+        return { state: "ready", message: null };
+      }
+      const id = new URL(path, "http://localhost").searchParams.get("projectId");
+      const ids = id === "a" ? ["row-a"] : changed ? ["row-c", "row-b"] : ["row-b", "row-c"];
+      return {
+        items: ids.map((id) => ({
+          ...item(id),
+          summary: {
+            ...session(id, "active"),
+            title: changed && id === "row-a" ? "Renamed A" : id,
+          },
+        })),
+        nextCursor: null,
+        total: ids.length,
+      };
+    });
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    let listener: Parameters<LibraryWorkspaceState["repository"]["subscribe"]>[0] = () => undefined;
+    vi.spyOn(workspace.repository, "subscribe").mockImplementation((callback) => {
+      listener = callback;
+      return () => undefined;
+    });
+    workspace.hydrate({
+      counts: { active: 3, archived: 0 },
+      hits: [],
+      items: [],
+      nextCursor: null,
+      projects,
+      runtimeStatus: { state: "ready", message: null },
+      total: 3,
+    });
+    workspace.start();
+    await flushPromises();
+    await workspace.toggleProject("a");
+    await workspace.toggleProject("b");
+    changed = true;
+    listener({ type: "library.updated", ids: ["row-a"], groupsChanged: true, revision: "mixed" });
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    expect(workspace.projectPages.get("a")?.items[0]?.summary.title).toBe("Renamed A");
+    expect(workspace.projectPages.get("b")?.items.map((item) => item.summary.id)).toEqual([
+      "row-c",
+      "row-b",
+    ]);
+    workspace.stop();
+    scope.stop();
+  });
+  it("refreshes project-only invalidations with no changed thread IDs", async () => {
+    vi.useFakeTimers();
+    const requestFetch = vi.fn<(path: string) => Promise<unknown>>(async (path) => {
+      if (path === "/api/projects") {
+        return [project];
+      }
+      if (path === "/api/status") {
+        return { state: "ready", message: null };
+      }
+      throw new Error(`Unexpected request ${path}`);
+    });
+    stubWorkspaceGlobals(reactive({ path: "/", query: {} }), requestFetch);
+    const scope = effectScope();
+    const workspace = scope.run(createLibraryWorkspace)!;
+    const invalidate = await startInvalidations(workspace);
+    requestFetch.mockClear();
+    invalidate([], true);
+    await vi.advanceTimersByTimeAsync(0);
+    await flushPromises();
+    expect(requestFetch.mock.calls.map(([path]) => path)).toContain("/api/projects");
+    workspace.stop();
+    scope.stop();
+  });
   it.each(["project", "children"])(
     "replaces an in-flight %s request when an invalidation arrives",
     async (kind) => {

@@ -10,7 +10,7 @@ import LibraryEmptyState from "./LibraryEmptyState.vue";
 import LibrarySessionTree from "./LibrarySessionTree.vue";
 import LibrarySkeleton from "./LibrarySkeleton.vue";
 
-const props = defineProps<{ project: ConversationProject }>();
+const props = defineProps<{ project: ConversationProject; label?: string | undefined }>();
 const workspace = useLibraryWorkspace();
 const expanded = computed(() => workspace.expandedProjectIds.value.has(props.project.id));
 const page = computed(() => workspace.projectPages.get(props.project.id));
@@ -38,7 +38,7 @@ const count = computed(() =>
       <PhFolderOpen v-if="expanded" :size="17" weight="regular" aria-hidden="true" />
       <PhFolder v-else :size="17" weight="regular" aria-hidden="true" />
       <span class="library-project-folder__label">
-        <span>{{ project.name }}</span>
+        <span>{{ label ?? project.name }}</span>
         <small v-if="project.hint">{{ project.hint }}</small>
       </span>
       <span class="tabular">{{ count }}</span>

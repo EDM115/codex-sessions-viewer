@@ -1,26 +1,30 @@
 import { basename, extname, resolve } from "node:path";
-import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
 
-import { resolveConversationProject } from "../../shared/library/projectIdentity.ts";
+import {
+  catalogProjects,
+  membershipProject,
+  resolveThreadMembershipFromSources,
+} from "../../shared/library/projectIdentity.ts";
 import type { ConversationSummary } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { ConversationProject } from "../../shared/types/library.ts";
 import {
   listCatalogProjects,
   listAllCatalogSessions,
-  removeCatalogSource,
   upsertCatalogSessions,
+  writeCatalogLibrary,
   type CatalogSessionInput,
   type CatalogSessionRecord,
   type CatalogSessionKind,
 } from "../cache/catalogStore.ts";
-import { removeCachedSource } from "../cache/conversationStore.ts";
 import {
   CACHE_PARSER_VERSION,
   refreshUnchangedSourceManifest,
   type StableJsonlReader,
 } from "../cache/sourceManifest.ts";
 import type { SourceDiscoveryResult } from "../ingestion/discoverSources.ts";
+import { parseRolloutFilename } from "../ingestion/rolloutIdentity.ts";
 import { selectSessionSources } from "../ingestion/selectSessionSources.ts";
 import {
   CATALOG_EVIDENCE_VERSION,
@@ -32,7 +36,13 @@ import {
 } from "../ingestion/sessionMetaPrefix.ts";
 import type { GlobalStateMetadata } from "../metadata/globalState.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
+import { resolveSidebarMetadata } from "../metadata/sidebarMetadata.ts";
 import type { StateMetadataSnapshot, StateThreadMetadata } from "../metadata/stateSnapshot.ts";
+import {
+  classifyThreadMetadata,
+  classificationKind,
+  isThreadVisible,
+} from "../metadata/threadClassification.ts";
 import { classifySessionStructure } from "../normalization/subagentTopology.ts";
 
 export interface SessionMetaClassification {
@@ -49,6 +59,7 @@ export interface RefreshLiveCatalogOptions {
   sessionIndexEntries: readonly SessionIndexEntry[];
   globalState: GlobalStateMetadata;
   stateSnapshot: StateMetadataSnapshot | null;
+  sidebarIdentityScopeKey?: string | undefined;
   prefixBytes?: number | undefined;
   /** Omit for recovery scans; [] refreshes metadata without rollout observations. */
   changedSourcePaths?: readonly string[] | undefined;
@@ -64,6 +75,7 @@ export interface CatalogRefreshResult {
   removedIds: string[];
   diagnostics: ViewerDiagnostic[];
   bytesRead: number;
+  groupsChanged: boolean;
 }
 
 interface DraftCatalogRow {
@@ -194,6 +206,7 @@ export function classifySessionMeta(
   fallbackSource: string | null | undefined = null,
 ): SessionMetaClassification {
   return classifySessionStructure({
+    ...meta,
     source: meta?.source ?? null,
     parentThreadId: meta?.parentThreadId,
     threadModel,
@@ -203,6 +216,10 @@ export function classifySessionMeta(
 }
 
 function fallbackSessionId(path: string): string {
+  const identity = parseRolloutFilename(path);
+  if (identity !== null) {
+    return identity.stableThreadId;
+  }
   const name = basename(path, extname(path));
   const uuid = name.match(
     /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu,
@@ -345,27 +362,74 @@ function applyTopology(
   diagnostics: ViewerDiagnostic[],
 ): void {
   const byId = new Map(drafts.map((draft) => [draft.input.summary.id, draft]));
-  for (const edge of stateSnapshot?.spawnEdges ?? []) {
-    const child = byId.get(edge.childThreadId);
-    if (child === undefined) {
-      continue;
+  const threads = new Map((stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread]));
+  for (const { input, prefix } of drafts) {
+    const thread = threads.get(input.summary.id);
+    const currentSource =
+      thread === undefined ||
+      thread.rolloutPath === "" ||
+      sourcePathKey(thread.rolloutPath) === sourcePathKey(input.summary.sourcePath);
+    const meta = currentSource ? (input.structuralEvidence?.meta ?? prefix.meta) : null;
+    const classification = classifyThreadMetadata(
+      {
+        metadata: meta,
+        status:
+          currentSource && prefix.status === "invalid"
+            ? "invalid"
+            : meta === null
+              ? "missing"
+              : "valid",
+        issues: currentSource && prefix.status === "invalid" ? ["rollout-prefix"] : [],
+      },
+      thread,
+      {
+        spawnParentThreadIds: (stateSnapshot?.spawnEdges ?? [])
+          .filter((edge) => edge.childThreadId === input.summary.id)
+          .map((edge) => edge.parentThreadId),
+        parentThreadIdHint: prefix.parentThreadIdHint,
+      },
+    );
+    if (!currentSource) {
+      classification.reasons.push("stale-rollout-structure-ignored");
     }
-    if (child.input.parentThreadId === null) {
-      child.input.parentThreadId = edge.parentThreadId;
-      if (child.input.kind !== "auxiliary") {
-        child.input.kind = "subagent";
-      }
+    input.kind = classificationKind(classification);
+    input.parentThreadId =
+      classification.relationship === "attached" || classification.relationship === "fork"
+        ? null
+        : classification.parentThreadId;
+    input.agentPath = classification.agentPath;
+    input.agentNickname = classification.agentNickname;
+    input.agentDepth = classification.agentDepth;
+    if (input.structuralEvidence == null) {
+      input.structuralEvidence = {
+        version: CATALOG_EVIDENCE_VERSION,
+        origin: "rollout-prefix",
+        status: prefix.status,
+        meta,
+        parentThreadIdHint: prefix.parentThreadIdHint,
+      };
     }
-  }
-  for (const { input } of drafts) {
+    input.structuralEvidence = { ...input.structuralEvidence, classification };
     if (
-      input.kind !== "auxiliary" &&
-      input.parentThreadId !== null &&
-      !byId.has(input.parentThreadId)
+      classification.visibility === "unresolved" ||
+      classification.reasons.includes("legacy-absent-role-compatible-root") ||
+      (input.parentThreadId !== null && !byId.has(input.parentThreadId))
     ) {
-      input.kind = "root";
-      input.parentThreadId = null;
-      input.agentDepth = null;
+      diagnostics.push(
+        createViewerDiagnostic({
+          code: "metadata.snapshot_invalid",
+          severity: "warning",
+          area: "metadata",
+          message: "Thread structural placement retains incomplete or conflicting evidence.",
+          details: {
+            threadId: input.summary.id,
+            visibility: classification.visibility,
+            reasons: classification.reasons,
+            parentThreadId: input.parentThreadId,
+            diagnosticPath: `/api/sessions/${encodeURIComponent(input.summary.id)}/classification`,
+          },
+        }),
+      );
     }
   }
   const parents = new Map(drafts.map(({ input }) => [input.summary.id, input.parentThreadId]));
@@ -380,13 +444,21 @@ function applyTopology(
       row.input.parentThreadId = null;
       row.input.agentDepth = null;
       if (row.input.kind !== "auxiliary") {
-        row.input.kind = "root";
+        row.input.kind = "auxiliary";
+        const classification = row.input.structuralEvidence?.classification;
+        if (classification !== undefined) {
+          classification.visibility = "unresolved";
+          classification.reasons.push("parent-cycle");
+        }
       }
     }
   }
   const childIds = new Map<string, string[]>();
   for (const { input } of drafts) {
-    if (input.kind !== "subagent" || input.parentThreadId === null) {
+    if (
+      !isThreadVisible(input.structuralEvidence!.classification!, "child") ||
+      input.parentThreadId === null
+    ) {
       continue;
     }
     const children = childIds.get(input.parentThreadId) ?? [];
@@ -418,14 +490,6 @@ function applyTopology(
   }
 }
 
-function requiredText(row: Record<string, SQLOutputValue>, key: string): string {
-  const value = row[key];
-  if (typeof value !== "string") {
-    throw new Error(`The viewer catalog column ${key} is not text.`);
-  }
-  return value;
-}
-
 export async function refreshLiveCatalog(
   options: RefreshLiveCatalogOptions,
 ): Promise<CatalogRefreshResult> {
@@ -436,6 +500,9 @@ export async function refreshLiveCatalog(
   const reusable = await reusablePrefixes(options, existingRows);
   const readPrefix = options.readPrefix ?? readSessionMetaPrefix;
   const sourceSelection = await selectSessionSources(options.discovery.rollouts, {
+    currentRolloutPaths: new Map(
+      (options.stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread.rolloutPath]),
+    ),
     prefixBytes: options.prefixBytes,
     readPrefix: (path, maxBytes, prefixOptions) =>
       Promise.resolve(
@@ -454,6 +521,13 @@ export async function refreshLiveCatalog(
   );
   const pinned = new Set(options.globalState.pinnedThreadIds);
   const drafts: DraftCatalogRow[] = [];
+  const metadata = {
+    threads: options.stateSnapshot?.threads ?? [],
+    projects: options.stateSnapshot?.projects ?? [],
+    sections: options.stateSnapshot?.sections ?? [],
+    globalState: options.globalState,
+  };
+  const projects = catalogProjects(metadata);
 
   for (const { source, prefix } of prefixes) {
     if (prefix.status === "changed") {
@@ -486,10 +560,7 @@ export async function refreshLiveCatalog(
       childThreadIds: [],
       existingSummary: existing?.summary,
     });
-    const project = resolveConversationProject(
-      { cwd: summary.cwd, gitOriginUrl: summary.gitOriginUrl },
-      options.globalState.projects,
-    );
+    const project = { id: "none", name: "Recents", source: "none" as const, hint: null };
     drafts.push({
       prefix,
       input: {
@@ -553,28 +624,136 @@ export async function refreshLiveCatalog(
       draft.input.agentDepth = classification.agentDepth;
     }
   }
-  applyTopology(drafts, options.stateSnapshot, diagnostics);
-  const rows = drafts.map(({ input }) => input);
-  const changedIds = upsertCatalogSessions(options.database, rows, currentRows);
-
-  const expectedPaths = new Set(prefixes.map(({ source }) => resolve(source.path)));
-  const removedIds: string[] = [];
-  for (const row of options.database.prepare("SELECT id, source_path FROM session_catalog").all()) {
-    const id = requiredText(row, "id");
-    const sourcePath = requiredText(row, "source_path");
-    if (expectedPaths.has(resolve(sourcePath))) {
+  const observedIds = new Set(drafts.map((draft) => draft.input.summary.id));
+  for (const existing of currentRows) {
+    if (observedIds.has(existing.summary.id)) {
       continue;
     }
-    removeCachedSource(options.database, sourcePath);
-    removeCatalogSource(options.database, sourcePath);
-    removedIds.push(id);
+    drafts.push({
+      input: {
+        ...existing,
+        materialization: "cold",
+        sourceRevision: existing.sourceRevision.endsWith(":unavailable")
+          ? existing.sourceRevision
+          : `${existing.sourceRevision}:unavailable`,
+        error: "Rollout source is temporarily unavailable, awaiting a stable representation.",
+      },
+      prefix: {
+        status: "missing",
+        meta: existing.structuralEvidence?.meta ?? null,
+        parentThreadIdHint: existing.parentThreadId,
+        bytesRead: 0,
+        diagnostics: [],
+        observation: {
+          device: BigInt(existing.sourceDevice ?? 0),
+          inode: BigInt(existing.sourceInode ?? 0),
+          size: BigInt(existing.sourceSize),
+          mtimeNs: BigInt(Math.round(existing.sourceMtimeMs * 1_000_000)),
+          ctimeNs: 0n,
+          regular: false,
+          symbolicLink: false,
+        },
+      },
+    });
   }
+  applyTopology(drafts, options.stateSnapshot, diagnostics);
+  const rows = drafts.map(({ input }) => input);
+  const prefixesById = new Map(drafts.map(({ input, prefix }) => [input.summary.id, prefix]));
+  const memberships = rows.map((row) => {
+    const id = row.summary.id;
+    const native = threads.get(id);
+    if (native) {
+      row.summary = { ...row.summary, scope: native.archived ? "archived" : "active" };
+    }
+    const workspace = metadata.globalState.workspaceStates?.[id];
+    const source = metadata.threads.some((thread) => thread.id === id)
+      ? metadata
+      : {
+          ...metadata,
+          globalState: {
+            ...metadata.globalState,
+            workspaceStates: {
+              ...metadata.globalState.workspaceStates,
+              [id]: {
+                ...workspace,
+                applied: { ...workspace?.applied, cwd: workspace?.applied?.cwd ?? row.summary.cwd },
+              },
+            },
+          },
+        };
+    const membership = resolveThreadMembershipFromSources(id, source);
+    row.project = membershipProject(membership, projects);
+    for (const reason of membership.diagnostics) {
+      diagnostics.push(
+        createViewerDiagnostic({
+          code: "metadata.snapshot_invalid",
+          severity: "warning",
+          area: "metadata",
+          sessionId: id,
+          message: "Project membership is unresolved.",
+          details: { reason },
+        }),
+      );
+    }
+    return { row, membership };
+  });
+  const sidebar = resolveSidebarMetadata(metadata, {
+    identityScopeKey: options.sidebarIdentityScopeKey,
+  });
+  for (const reason of sidebar.diagnostics) {
+    diagnostics.push(
+      createViewerDiagnostic({
+        code: "metadata.snapshot_invalid",
+        severity: "warning",
+        area: "metadata",
+        message: "Sidebar metadata could not be mapped safely.",
+        details: { reason },
+      }),
+    );
+  }
+  const changedIds = upsertCatalogSessions(options.database, rows, currentRows);
+  const groupsChanged = writeCatalogLibrary(options.database, {
+    projects,
+    sections: sidebar.sections,
+    preferences: sidebar.preferences,
+    diagnostics: sidebar.diagnostics,
+    threads: memberships.map(({ row, membership }) => {
+      const thread = threads.get(row.summary.id);
+      const legacyTimestamp =
+        sessionIndex.get(row.summary.id)?.updatedAt ??
+        prefixesById.get(row.summary.id)?.meta?.timestamp;
+      const updatedAt =
+        thread?.updatedAtMs ??
+        (thread ? thread.updatedAt * 1000 : legacyTimestamp ? Date.parse(legacyTimestamp) : null);
+      return {
+        id: row.summary.id,
+        title:
+          thread?.name ??
+          thread?.title ??
+          sessionIndex.get(row.summary.id)?.threadName ??
+          row.summary.id,
+        projectId: membership.projectId,
+        hostId: membership.hostId,
+        scope: row.summary.scope,
+        sectionId: thread?.sectionId ?? null,
+        sectionPosition: thread?.sectionPosition ?? null,
+        pinned: row.summary.pinned,
+        recencyAt:
+          thread?.recencyAtMs ??
+          (thread?.recencyAt === null || thread?.recencyAt === undefined
+            ? updatedAt
+            : thread.recencyAt * 1000),
+        classification: row.structuralEvidence!.classification!,
+      };
+    }),
+  });
 
   return {
     rows,
+    groupsChanged,
     changedIds,
     projects: listCatalogProjects(options.database),
-    removedIds: removedIds.toSorted(),
+    removedIds: [],
     diagnostics,
     bytesRead: sourceSelection.bytesRead,
   };

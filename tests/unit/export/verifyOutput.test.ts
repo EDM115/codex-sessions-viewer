@@ -9,6 +9,9 @@ import {
   parseVerifyOutputArguments,
   verifyGeneratedOutput,
 } from "../../../server/export/verifyOutput.ts";
+import { writeStaticPayloads } from "../../../server/export/writeStaticPayloads.ts";
+import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
+import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import {
   driftOutputDiagnosticCount,
   rewriteOutputJson,
@@ -37,6 +40,39 @@ async function rewriteJson(
 }
 
 describe("generated output verification", () => {
+  it("verifies an export that excludes incomplete spawns rather than publishing them as roots", async () => {
+    const output = await validOutput();
+    const user = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: join(output.root, "modern.jsonl"),
+      scope: "active",
+      revision: "sha256:verified-output",
+    });
+    user.summary.parentThreadId = null;
+    user.classification = classifyCatalogThread({ threadSource: "user" });
+    const incomplete = {
+      ...user,
+      summary: { ...user.summary, id: "incomplete-spawn", parentThreadId: null },
+      turns: [],
+      rawEvents: [
+        {
+          id: "incomplete-meta",
+          type: "session_meta",
+          turnId: null,
+          timestamp: null,
+          payload: {
+            type: "session_meta",
+            payload: { id: "incomplete-spawn", source: { subagent: { thread_spawn: {} } } },
+          },
+        },
+      ],
+    };
+    delete incomplete.classification;
+    expect(
+      await writeStaticPayloads([user, incomplete], { generatedRoot: output.root, chunkSize: 1 }),
+    ).toMatchObject({ sessionCount: 1 });
+    expect(await verifyGeneratedOutput(output.root)).toMatchObject({ sessionCount: 1 });
+  });
   it("parses the optional output path without accepting unrelated flags", () => {
     expect(parseVerifyOutputArguments([])).toEqual({ output: ".output/public" });
     expect(parseVerifyOutputArguments(["--output", "C:\\viewer output"])).toEqual({
@@ -173,7 +209,7 @@ describe("generated output verification", () => {
     await expect(verifyGeneratedOutput(duplicateTurn.root)).rejects.toThrow("duplicate turn IDs");
   });
 
-  it("requires the generated project catalog and excludes guardian sessions", async () => {
+  it("requires the generated project catalog without treating model names as structural evidence", async () => {
     const missingProjects = await validOutput();
     await rm(join(missingProjects.root, "payloads", "projects.json"));
     await expect(verifyGeneratedOutput(missingProjects.root)).rejects.toThrow(
@@ -186,12 +222,19 @@ describe("generated output verification", () => {
       const summary = (value["sessions"] as Array<Record<string, unknown>>)[0]!;
       summary["models"] = ["codex-auto-review"];
     });
+    await expect(verifyGeneratedOutput(guardian.root)).resolves.toMatchObject({ sessionCount: 1 });
+    await rewriteJson(join(guardian.root, "payloads/projects.json"), (value) => {
+      const entry = (value["entries"] as Record<string, Record<string, unknown>>)[
+        guardian.sessionId
+      ]!;
+      (entry["classification"] as Record<string, unknown>)["visibility"] = "internal";
+    });
     await expect(verifyGeneratedOutput(guardian.root)).rejects.toThrow(
-      "Auxiliary guardian session crossed",
+      "Internal or unresolved thread crossed",
     );
   });
 
-  it("rejects missing and cyclic subagent parent edges", async () => {
+  it("rejects orphan count drift and cyclic subagent parent edges", async () => {
     const missingParent = await validOutput();
     const missingIndexPath = join(missingParent.root, "payloads", "sessions", "index.json");
     const missingSummaryPath = join(
@@ -220,9 +263,10 @@ describe("generated output verification", () => {
       entry["kind"] = "subagent";
       entry["parentThreadId"] = "missing-parent";
       entry["agentDepth"] = 1;
+      delete entry["classification"];
     });
     await expect(verifyGeneratedOutput(missingParent.root)).rejects.toThrow(
-      "missing its parent edge",
+      "Generated project counts do not match",
     );
 
     const cycle = await validOutput();
@@ -252,6 +296,7 @@ describe("generated output verification", () => {
       entry["parentThreadId"] = cycle.sessionId;
       entry["agentDepth"] = 1;
       entry["childCount"] = 1;
+      delete entry["classification"];
     });
     await expect(verifyGeneratedOutput(cycle.root)).rejects.toThrow("topology contains a cycle");
   });

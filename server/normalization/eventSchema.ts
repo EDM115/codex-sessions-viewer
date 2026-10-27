@@ -4,8 +4,10 @@ import {
   jsonValueSchema,
   type JsonObject,
   type JsonValue,
+  type RawEventIdentity,
 } from "../../shared/types/conversation.ts";
 import type { JsonlRecord } from "../ingestion/jsonlStream.ts";
+import { rawRecordIdentity } from "../ingestion/rolloutIdentity.ts";
 
 const knownTopLevelTypes = new Set([
   "compacted",
@@ -79,6 +81,8 @@ export const sessionMetaPayloadSchema = z
   });
 
 export interface CodexEvent {
+  identity?: RawEventIdentity;
+  logicalOrder?: number;
   id: string;
   lineNumber: number;
   byteStart: number;
@@ -130,7 +134,9 @@ export function parseCodexEvent(record: JsonlRecord): CodexEventParseResult {
   return {
     success: true,
     event: {
-      id: `raw-${record.byteStart}`,
+      ...(record.identity === undefined ? {} : { identity: record.identity }),
+      ...(record.logicalOrder === undefined ? {} : { logicalOrder: record.logicalOrder }),
+      id: rawRecordIdentity(record),
       lineNumber: record.lineNumber,
       byteStart: record.byteStart,
       byteEnd: record.byteEnd,
@@ -141,6 +147,9 @@ export function parseCodexEvent(record: JsonlRecord): CodexEventParseResult {
       raw: record.value,
     },
   };
+}
+export function eventOrder(event: CodexEvent): number {
+  return event.logicalOrder ?? event.byteStart;
 }
 
 export function isUnknownCodexEvent(event: CodexEvent): boolean {

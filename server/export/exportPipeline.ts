@@ -17,12 +17,16 @@ import { selectSessionSources } from "../ingestion/selectSessionSources.ts";
 import { readGlobalState } from "../metadata/globalState.ts";
 import { readSessionIndex, type SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import { snapshotStateDatabase, type StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
+import { classifyNormalizedSession, isThreadVisible } from "../metadata/threadClassification.ts";
 import {
   attachGuardianEvidence,
-  parseGuardianConversation,
+  parseGuardianConversations,
+  associateApprovalReviews,
+  approvalEvidenceResult,
   type GuardianReview,
 } from "../normalization/guardianEvidence.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
+import { resolveSubagentTopology } from "../normalization/subagentTopology.ts";
 import {
   appendPagefindRecords,
   buildPagefindRecordSpool,
@@ -235,6 +239,7 @@ async function defaultGenerateRunner(cwd: string, input: StaticGenerateInput): P
 async function prepareConversations(
   database: DatabaseSync,
   sessionIds: ReadonlySet<string>,
+  stateSnapshot: StateMetadataSnapshot | null,
   paths: ViewerPaths,
   offline: boolean,
   trustedMediaRoots: readonly string[],
@@ -251,13 +256,47 @@ async function prepareConversations(
   const conversations: NormalizedSession[] = [];
   const assetIds = new Set<string>();
   const faviconOrigins = new Set<string>();
+  const native = new Map((stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread]));
+  const classifications = new Map(
+    [...sessionIds].flatMap((id) => {
+      const session = getCachedSession(database, id);
+      if (session === null) {
+        return [];
+      }
+      return [
+        [
+          id,
+          classifyNormalizedSession(session, native.get(id), {
+            spawnParentThreadIds: (stateSnapshot?.spawnEdges ?? [])
+              .filter((edge) => edge.childThreadId === id)
+              .map((edge) => edge.parentThreadId),
+          }),
+        ] as const,
+      ];
+    }),
+  );
+  const topology = resolveSubagentTopology(
+    [...classifications].map(([id, classification]) => ({
+      id,
+      parentThreadId: isThreadVisible(classification, "child")
+        ? classification.parentThreadId
+        : null,
+      agentPath: classification.agentPath,
+      agentNickname: classification.agentNickname,
+    })),
+  );
+  for (const [id, node] of topology) {
+    if (!node.cycle) {
+      continue;
+    }
+    const classification = classifications.get(id)!;
+    classification.visibility = "unresolved";
+    classification.reasons.push("parent-cycle");
+  }
   const guardianIds = new Set(
-    database
-      .prepare(
-        "SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM json_each(sessions.models_json) WHERE value = 'codex-auto-review')",
-      )
-      .all()
-      .flatMap((row) => (typeof row["id"] === "string" ? [row["id"]] : [])),
+    [...classifications]
+      .filter(([, classification]) => !isThreadVisible(classification))
+      .map(([id]) => id),
   );
   const guardianReviews = new Map<string, GuardianReview[]>();
   for (const guardianId of guardianIds) {
@@ -265,8 +304,10 @@ async function prepareConversations(
     if (guardian === null) {
       continue;
     }
-    const review = parseGuardianConversation(guardian);
-    if (review?.parentThreadId !== null && review?.parentThreadId !== undefined) {
+    for (const review of parseGuardianConversations(guardian)) {
+      if (review.parentThreadId === null) {
+        continue;
+      }
       guardianReviews.set(review.parentThreadId, [
         ...(guardianReviews.get(review.parentThreadId) ?? []),
         review,
@@ -282,11 +323,36 @@ async function prepareConversations(
       continue;
     }
     let conversation = cached;
+    conversation.classification = classifications.get(sessionId)!;
+    conversation.summary = {
+      ...conversation.summary,
+      parentThreadId: isThreadVisible(conversation.classification, "child")
+        ? conversation.classification.parentThreadId
+        : null,
+      childThreadIds: [...classifications]
+        .filter(
+          ([, classification]) =>
+            isThreadVisible(classification, "child") && classification.parentThreadId === sessionId,
+        )
+        .map(([id]) => id)
+        .toSorted(),
+    };
+    conversation.approvalEvidence = approvalEvidenceResult(
+      sessionId,
+      associateApprovalReviews(
+        conversation.turns.flatMap((turn) =>
+          turn.activities.filter((activity) => activity.kind === "tool"),
+        ),
+        guardianReviews.get(sessionId) ?? [],
+        { sessionId },
+      ),
+    );
     attachGuardianEvidence(
       conversation.turns.flatMap(({ activities }) =>
         activities.filter((activity) => activity.kind === "tool"),
       ),
       guardianReviews.get(sessionId) ?? [],
+      { sessionId },
     );
     let prepared: PreparedConversationExport | null = null;
     try {
@@ -303,7 +369,11 @@ async function prepareConversations(
     if (prepared !== null) {
       try {
         updateCachedSessionRichContent(database, prepared.conversation);
-        conversation = prepared.conversation;
+        conversation = {
+          ...prepared.conversation,
+          classification: cached.classification!,
+          approvalEvidence: cached.approvalEvidence!,
+        };
         for (const id of prepared.assetIds) {
           assetIds.add(id);
         }
@@ -316,7 +386,12 @@ async function prepareConversations(
     }
     // oxlint-disable-next-line no-await-in-loop -- Full raw events are staged before this loop releases the session object.
     await onPrepared(conversation);
-    conversations.push({ summary: conversation.summary, turns: [], rawEvents: [] });
+    conversations.push({
+      summary: conversation.summary,
+      turns: [],
+      rawEvents: [],
+      classification: conversation.classification!,
+    });
     onProgress(sessionIndex + 1, orderedSessionIds.length);
   }
   return { conversations, assetIds, faviconOrigins };
@@ -354,7 +429,12 @@ export async function runStaticExport(
   progress.step(`Resolved Codex home: ${config.settings.codexHome}`);
   progress.status("Discovering active and archived Codex sessions");
   const discovery = await discoverSources(config.settings.codexHome);
-  const sourceSelection = await selectSessionSources(discovery.rollouts);
+  const metadata = await loadExportMetadata(discovery, config.paths, progress);
+  const sourceSelection = await selectSessionSources(discovery.rollouts, {
+    currentRolloutPaths: new Map(
+      (metadata.stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread.rolloutPath]),
+    ),
+  });
   const selectedSources = sourceSelection.selected.map(({ source }) => source);
   progress.step(
     `Discovered ${selectedSources.length} ${pluralize("session", selectedSources.length)}`,
@@ -363,7 +443,6 @@ export async function runStaticExport(
       : "neutral",
   );
   progress.status("Reading optional Codex metadata");
-  const metadata = await loadExportMetadata(discovery, config.paths, progress);
   progress.step(
     metadata.diagnostics.length === 0
       ? "Codex metadata ready"
@@ -438,6 +517,7 @@ export async function runStaticExport(
     const prepared = await prepareConversations(
       database,
       sessionIds,
+      metadata.stateSnapshot,
       config.paths,
       options.offline === true || !config.settings.fetchFavicons,
       resolvedTrustedMediaRoots(config.settings),

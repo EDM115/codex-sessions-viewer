@@ -15,8 +15,8 @@ import type {
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { ConversationProject } from "../../shared/types/library.ts";
 import type { InspectorRecord, InspectorTarget, TurnChunk } from "../../shared/types/repository.ts";
+import { classifyNormalizedSession, isThreadVisible } from "../metadata/threadClassification.ts";
 import type { NormalizedRawEvent, NormalizedSession } from "../normalization/normalizeSession.ts";
-import { classifySessionStructure } from "../normalization/subagentTopology.ts";
 import { assertSafeOutputComponent, serializedJson, writeOutputFile } from "./outputFiles.ts";
 
 const DEFAULT_CHUNK_SIZE = 20;
@@ -107,6 +107,7 @@ function rawRecord(event: NormalizedRawEvent): JsonValue {
     type: event.type,
     timestamp: event.timestamp,
     payload: event.payload,
+    ...(event.identity === undefined ? {} : { identity: event.identity }),
   };
 }
 
@@ -382,48 +383,32 @@ function cyclicConversationIds(parentById: ReadonlyMap<string, string | null>): 
 }
 
 function reconcileStaticTopology(conversations: readonly NormalizedSession[]): NormalizedSession[] {
-  const ids = new Set(conversations.map(({ summary }) => summary.id));
   const parents = new Map(
-    conversations.map(({ summary }) => [
-      summary.id,
-      summary.parentThreadId !== null && ids.has(summary.parentThreadId)
-        ? summary.parentThreadId
-        : null,
-    ]),
+    conversations.map((conversation) => {
+      const classification = classifyNormalizedSession(conversation);
+      return [
+        conversation.summary.id,
+        isThreadVisible(classification, "child") ? classification.parentThreadId : null,
+      ];
+    }),
   );
-  for (const id of cyclicConversationIds(parents)) {
-    parents.set(id, null);
-  }
+  const cycles = cyclicConversationIds(parents);
   const children = new Map<string, string[]>();
   for (const [id, parentThreadId] of parents) {
-    if (parentThreadId !== null) {
+    if (parentThreadId !== null && !cycles.has(id)) {
       children.set(parentThreadId, [...(children.get(parentThreadId) ?? []), id]);
     }
   }
-  return conversations.map((conversation) => ({
-    ...conversation,
-    summary: {
-      ...conversation.summary,
-      parentThreadId: parents.get(conversation.summary.id) ?? null,
-      childThreadIds: (children.get(conversation.summary.id) ?? []).toSorted(),
-    },
-  }));
-}
-
-function staticSessionStructure(conversation: NormalizedSession) {
-  const payload = conversation.rawEvents.find((event) => event.type === "session_meta")?.payload;
-  const meta =
-    payload !== null && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
-  return classifySessionStructure({
-    source: meta?.["source"] ?? null,
-    parentThreadId:
-      typeof meta?.["parent_thread_id"] === "string" ? meta["parent_thread_id"] : null,
-    threadModel:
-      conversation.summary.models.every((model) => model === "codex-auto-review") &&
-      conversation.summary.models.length > 0
-        ? "codex-auto-review"
-        : null,
-  });
+  return conversations
+    .filter((conversation) => !cycles.has(conversation.summary.id))
+    .map((conversation) => ({
+      ...conversation,
+      summary: {
+        ...conversation.summary,
+        parentThreadId: parents.get(conversation.summary.id) ?? null,
+        childThreadIds: (children.get(conversation.summary.id) ?? []).toSorted(),
+      },
+    }));
 }
 
 function staticLibraryPayload(conversations: readonly NormalizedSession[]) {
@@ -456,19 +441,20 @@ function staticLibraryPayload(conversations: readonly NormalizedSession[]) {
   const entries: Record<string, Record<string, unknown>> = {};
   for (const conversation of conversations) {
     const { summary } = conversation;
-    const structure = staticSessionStructure(conversation);
+    const structure = classifyNormalizedSession(conversation);
     const project = directProjects.get(summary.id)!;
     const existing = projects.get(project.id) ?? {
       ...project,
       activeCount: 0,
       archivedCount: 0,
     };
-    if (summary.parentThreadId === null) {
+    if (isThreadVisible(structure, "root")) {
       existing[summary.scope === "active" ? "activeCount" : "archivedCount"] += 1;
     }
     projects.set(project.id, existing);
     entries[summary.id] = {
-      kind: summary.parentThreadId === null ? "root" : "subagent",
+      classification: structure,
+      kind: isThreadVisible(structure, "child") ? "subagent" : "root",
       projectId: project.id,
       parentThreadId: summary.parentThreadId,
       agentPath: structure.agentPath,
@@ -500,8 +486,8 @@ export async function writeStaticPayloads(
   }
   const dispositions: Array<"written" | "reused"> = [];
   const ordered = reconcileStaticTopology(
-    conversations.filter(
-      (conversation) => staticSessionStructure(conversation).kind !== "auxiliary",
+    conversations.filter((conversation) =>
+      isThreadVisible(classifyNormalizedSession(conversation)),
     ),
   ).toSorted(
     (left, right) =>
@@ -529,6 +515,15 @@ export async function writeStaticPayloads(
       diagnostics: options.diagnosticsBySession?.get(id) ?? [],
     });
     dispositions.push(...summaryDispositions);
+    if (conversation.approvalEvidence !== undefined) {
+      // oxlint-disable-next-line no-await-in-loop -- Approval attempts and unmatched evidence belong to this selected parent payload
+      const approvalDispositions = await writePayload(
+        options,
+        ["sessions", id, "approvals.json"],
+        conversation.approvalEvidence,
+      );
+      dispositions.push(...approvalDispositions);
+    }
     const rawEvents = new Map(conversation.rawEvents.map((event) => [event.id, event]));
     const turnChunks = boundedTurnChunks(
       id,

@@ -10,15 +10,22 @@ import {
   createUnknownActivity,
   sanitizeUnknownPayload,
 } from "../../../server/normalization/unknownEvents.ts";
+import { expectedRawIdentity } from "../../helpers/rawIdentity.ts";
 
+const expectedIds = new Map<number, string>();
+function expectedRaw(offset: number): string {
+  return expectedIds.get(offset)!;
+}
 function record(value: JsonlRecord["value"], lineNumber = 1): JsonlRecord {
-  return {
+  const result = {
     lineNumber,
     byteStart: (lineNumber - 1) * 100,
     byteEnd: lineNumber * 100,
     raw: JSON.stringify(value),
     value,
   };
+  expectedIds.set(result.byteStart, expectedRawIdentity(result));
+  return result;
 }
 
 describe("Codex event schema", () => {
@@ -66,7 +73,7 @@ describe("Codex event schema", () => {
     expect(parsed).toEqual({
       success: true,
       event: expect.objectContaining({
-        id: "raw-0",
+        id: expectedRaw(0),
         type: "event_msg",
         payloadType: "task_started",
         timestamp: "2026-01-01T10:00:00.000Z",
@@ -141,10 +148,10 @@ describe("unknown event preservation", () => {
     const activity = createUnknownActivity(parsed.event, "turn-1");
 
     expect(activity).toEqual({
-      id: "activity-raw-0",
+      id: `activity-${expectedRaw(0)}`,
       turnId: "turn-1",
       createdAt: "2026-01-01T10:00:00.000Z",
-      rawEventIds: ["raw-0"],
+      rawEventIds: [expectedRaw(0)],
       kind: "unknown",
       eventType: "event_msg:future_payload",
       payload: {

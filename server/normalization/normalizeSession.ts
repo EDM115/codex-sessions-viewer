@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
 
 import {
   conversationSummarySchema,
@@ -26,14 +25,24 @@ import {
   type TokenUsage,
   type TurnEntryReference,
   type WebSearchActivity,
+  type RolloutRef,
+  type RawEventIdentity,
 } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import type { ThreadClassification } from "../../shared/types/library.ts";
 import type { RichTextDocument } from "../../shared/types/richText.ts";
 import type { JsonlRecord } from "../ingestion/jsonlStream.ts";
+import {
+  qualifyRawRecord,
+  rolloutRefFromSource,
+  parseRolloutFilename,
+} from "../ingestion/rolloutIdentity.ts";
+import { SOURCE_GENERATION_PARSER_VERSION } from "../ingestion/sourceGeneration.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
 import {
   codexEventType,
+  eventOrder,
   isUnknownCodexEvent,
   parseCodexEvent,
   payloadObject,
@@ -41,18 +50,18 @@ import {
   type CodexEvent,
   type TurnScopedEvent,
 } from "./eventSchema.ts";
+import type { ApprovalEvidenceResult } from "./guardianEvidence.ts";
 import { mergeSessionMetadata } from "./metadataMerge.ts";
 import { classifySessionStructure } from "./subagentTopology.ts";
 import { pairToolCalls, type ToolPairingMemo } from "./toolPairing.ts";
 import { assembleTurnEvents, type AssembledTurnEvents } from "./turnAssembler.ts";
 import { createUnknownActivity, sanitizeUnknownPayload } from "./unknownEvents.ts";
 
-const filenameUuidPattern =
-  /([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?=\.jsonl$)/i;
 const epochTimestamp = "1970-01-01T00:00:00.000Z";
-export const NORMALIZATION_PARSER_VERSION = 5;
+export const NORMALIZATION_PARSER_VERSION = SOURCE_GENERATION_PARSER_VERSION;
 
 export interface NormalizeSessionInput {
+  rolloutRef?: RolloutRef;
   records: readonly JsonlRecord[];
   sourcePath: string;
   scope: ConversationScope;
@@ -62,6 +71,7 @@ export interface NormalizeSessionInput {
 }
 
 export interface NormalizedRawEvent {
+  identity?: RawEventIdentity;
   id: string;
   turnId: string | null;
   type: string;
@@ -73,6 +83,8 @@ export interface NormalizedSession {
   summary: ConversationSummary;
   turns: ConversationTurn[];
   rawEvents: NormalizedRawEvent[];
+  classification?: ThreadClassification;
+  approvalEvidence?: ApprovalEvidenceResult;
 }
 
 export interface NormalizeSessionResult {
@@ -233,7 +245,7 @@ function sessionMeta(events: readonly CodexEvent[]): SessionMetaEvidence {
 }
 
 function filenameSessionId(path: string): string | null {
-  return filenameUuidPattern.exec(basename(path))?.[1] ?? null;
+  return parseRolloutFilename(path)?.stableThreadId ?? null;
 }
 
 function invalidEnvelopeDiagnostic(path: string, line: number): ViewerDiagnostic {
@@ -1074,10 +1086,14 @@ function settingsEvidenceByTurn(
   let eventIndex = 0;
   const evidence = new Map<AssembledTurnEvents, ThreadSettingsEvidence>();
   const turnOffsets = turns
-    .map((turn, index) => ({ turn, index, offset: turn.events[0]?.event.byteStart ?? 0 }))
+    .map((turn, index) => ({
+      turn,
+      index,
+      offset: turn.events[0] === undefined ? 0 : eventOrder(turn.events[0].event),
+    }))
     .toSorted((left, right) => left.offset - right.offset || left.index - right.index);
   for (const { turn, offset } of turnOffsets) {
-    while (eventIndex < events.length && events[eventIndex]!.byteStart <= offset) {
+    while (eventIndex < events.length && eventOrder(events[eventIndex]!) <= offset) {
       const event = events[eventIndex]!;
       eventIndex += 1;
       if (event.type !== "event_msg" || event.payloadType !== "thread_settings_applied") {
@@ -1221,24 +1237,31 @@ export function normalizeSession(
 ): NormalizeSessionResult {
   const diagnostics: ViewerDiagnostic[] = [];
   const events: CodexEvent[] = [];
+  const contextOnlyIds = new Set<string>();
+  const physicalRef = input.rolloutRef ?? rolloutRefFromSource(input.sourcePath, null);
   for (const record of input.records) {
-    const parsed = memo?.records.get(record) ?? parseCodexEvent(record);
+    const parsed =
+      memo?.records.get(record) ?? parseCodexEvent(qualifyRawRecord(record, physicalRef));
     memo?.records.set(record, parsed);
     if (parsed.success) {
       events.push(parsed.event);
+      if (record.contextOnly) {
+        contextOnlyIds.add(parsed.event.id);
+      }
     } else {
       diagnostics.push(invalidEnvelopeDiagnostic(input.sourcePath, parsed.lineNumber));
     }
   }
-  const meta = sessionMeta(events);
-  const timestamps = sessionTimestamps(events, meta.timestamp);
+  const displayEvents = events.filter((event) => !contextOnlyIds.has(event.id));
+  const meta = sessionMeta(displayEvents);
+  const timestamps = sessionTimestamps(displayEvents, meta.timestamp);
   const sessionId = meta.id ?? filenameSessionId(input.sourcePath);
   if (sessionId === null) {
     diagnostics.push(missingSessionIdDiagnostic(input.sourcePath));
     return { session: null, diagnostics };
   }
 
-  const assembly = assembleTurnEvents(events, sessionId);
+  const assembly = assembleTurnEvents(displayEvents, sessionId);
   const unscopedUnknownEvents = assembly.unscopedEvents.filter((event) =>
     isUnknownCodexEvent(event),
   );
@@ -1254,7 +1277,7 @@ export function normalizeSession(
     }
     target.events.push(...unscopedUnknownEvents.map((event) => ({ event, turnId: target.id })));
   }
-  const eventOffsets = new Map(events.map((event) => [event.id, event.byteStart]));
+  const eventOffsets = new Map(events.map((event) => [event.id, eventOrder(event)]));
   const eventIdentities = new Map(
     events.map((event) => {
       let identity = memo?.identities.get(event);
@@ -1440,6 +1463,7 @@ export function normalizeSession(
     return {
       id: event.id,
       turnId: turnIds.get(event.id) ?? null,
+      ...(event.identity === undefined ? {} : { identity: event.identity }),
       type: codexEventType(event),
       timestamp: event.timestamp,
       payload,

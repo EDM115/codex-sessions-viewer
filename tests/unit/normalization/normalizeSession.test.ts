@@ -4,12 +4,24 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { JsonlStreamParser, type JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
-import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
+import { normalizeSession as actualNormalizeSession } from "../../../server/normalization/normalizeSession.ts";
 import {
   conversationSummarySchema,
   conversationTurnSchema,
   mediaReferenceSchema,
 } from "../../../shared/types/conversation.ts";
+import { expectedRawIdentity } from "../../helpers/rawIdentity.ts";
+
+const expectedIds = new Map<number, string>();
+function expectedRaw(offset: number): string {
+  return expectedIds.get(offset)!;
+}
+function normalizeSession(input: Parameters<typeof actualNormalizeSession>[0]) {
+  for (const record of input.records) {
+    expectedIds.set(record.byteStart, expectedRawIdentity(record, input.sourcePath));
+  }
+  return actualNormalizeSession(input);
+}
 
 async function fixtureRecords(name: string): Promise<JsonlRecord[]> {
   const path = join(process.cwd(), "tests", "fixtures", "rollouts", name);
@@ -369,9 +381,9 @@ describe("session normalization", () => {
         userMessage: expect.objectContaining({ sourceMarkdown: "initial prompt" }),
         steeringMessages: [expect.objectContaining({ sourceMarkdown: "steer the running model" })],
         entryOrder: [
-          { kind: "message", id: "message-raw-200" },
-          { kind: "activity", id: "reasoning-raw-300" },
-          { kind: "message", id: "message-raw-400" },
+          { kind: "message", id: `message-${expectedRaw(200)}` },
+          { kind: "activity", id: `reasoning-${expectedRaw(300)}` },
+          { kind: "message", id: `message-${expectedRaw(400)}` },
         ],
       }),
     ]);
@@ -468,15 +480,15 @@ describe("session normalization", () => {
     ]);
     expect(turn?.activities.filter(({ kind }) => kind === "reasoning")).toHaveLength(2);
     expect(turn?.entryOrder).toEqual([
-      { kind: "message", id: "message-raw-200" },
-      { kind: "activity", id: "reasoning-raw-300-0" },
-      { kind: "activity", id: "reasoning-raw-300-1" },
-      { kind: "message", id: "message-raw-400" },
-      { kind: "message", id: "message-raw-500" },
+      { kind: "message", id: `message-${expectedRaw(200)}` },
+      { kind: "activity", id: `reasoning-${expectedRaw(300)}-0` },
+      { kind: "activity", id: `reasoning-${expectedRaw(300)}-1` },
+      { kind: "message", id: `message-${expectedRaw(400)}` },
+      { kind: "message", id: `message-${expectedRaw(500)}` },
       { kind: "activity", id: "tool-call-1" },
-      { kind: "message", id: "message-raw-800" },
+      { kind: "message", id: `message-${expectedRaw(800)}` },
     ]);
-    expect(turn?.finalAssistantMessageId).toBe("message-raw-800");
+    expect(turn?.finalAssistantMessageId).toBe(`message-${expectedRaw(800)}`);
   });
 
   it("coalesces both web-search representations without losing completion details", () => {
@@ -532,7 +544,7 @@ describe("session normalization", () => {
         query: "Nuxt offline rendering",
         status: "succeeded",
         resultCount: 2,
-        rawEventIds: ["raw-300", "raw-400"],
+        rawEventIds: [expectedRaw(300), expectedRaw(400)],
       }),
     ]);
   });
@@ -598,7 +610,7 @@ describe("session normalization", () => {
         input: { cmd: "pnpm test" },
         output: "passed",
         status: "succeeded",
-        rawEventIds: ["raw-300", "raw-500"],
+        rawEventIds: [expectedRaw(300), expectedRaw(500)],
       }),
     ]);
   });
@@ -650,7 +662,7 @@ describe("session normalization", () => {
         items: [{ step: "Version one", status: "completed" }],
       }),
       expect.objectContaining({
-        id: "plan-plan-1:raw-400",
+        id: `plan-plan-1:${expectedRaw(400)}`,
         items: [{ step: "Version two", status: "completed" }],
       }),
     ]);
@@ -928,18 +940,18 @@ describe("session normalization", () => {
       { id: "turn-2", index: 1, models: ["gpt-between"], reasoningEfforts: ["high"] },
     ]);
     expect(result.session?.rawEvents.map(({ id, timestamp }) => ({ id, timestamp }))).toEqual([
-      { id: "raw-0", timestamp: "2026-01-01T00:00:05.000Z" },
-      { id: "raw-100", timestamp: null },
-      { id: "raw-200", timestamp: "2026-01-01T00:00:03.000Z" },
-      { id: "raw-300", timestamp: "2026-01-01T00:00:03.000Z" },
-      { id: "raw-400", timestamp: null },
-      { id: "raw-500", timestamp: "2026-01-01T00:00:07.000Z" },
-      { id: "raw-600", timestamp: "2026-01-01T00:00:02.000Z" },
-      { id: "raw-700", timestamp: "2026-01-01T00:00:08.000Z" },
-      { id: "raw-800", timestamp: "2026-01-01T01:00:08.000+01:00" },
-      { id: "raw-900", timestamp: "2026-01-01T00:00:08.000Z" },
-      { id: "raw-1000", timestamp: "2026-01-01T00:00:09.000Z" },
-      { id: "raw-1100", timestamp: "2026-01-01T00:00:10.000Z" },
+      { id: expectedRaw(0), timestamp: "2026-01-01T00:00:05.000Z" },
+      { id: expectedRaw(100), timestamp: null },
+      { id: expectedRaw(200), timestamp: "2026-01-01T00:00:03.000Z" },
+      { id: expectedRaw(300), timestamp: "2026-01-01T00:00:03.000Z" },
+      { id: expectedRaw(400), timestamp: null },
+      { id: expectedRaw(500), timestamp: "2026-01-01T00:00:07.000Z" },
+      { id: expectedRaw(600), timestamp: "2026-01-01T00:00:02.000Z" },
+      { id: expectedRaw(700), timestamp: "2026-01-01T00:00:08.000Z" },
+      { id: expectedRaw(800), timestamp: "2026-01-01T01:00:08.000+01:00" },
+      { id: expectedRaw(900), timestamp: "2026-01-01T00:00:08.000Z" },
+      { id: expectedRaw(1000), timestamp: "2026-01-01T00:00:09.000Z" },
+      { id: expectedRaw(1100), timestamp: "2026-01-01T00:00:10.000Z" },
     ]);
   });
 
@@ -1283,7 +1295,7 @@ describe("session normalization", () => {
       result.session?.turns[0]?.activities.filter((activity) => activity.kind === "media") ?? [];
     expect(media.map(({ assetId, reference }) => ({ assetId, reference }))).toEqual([
       {
-        assetId: "asset-raw-200-0",
+        assetId: `asset-${expectedRaw(200)}-0`,
         reference: {
           kind: "local-file",
           path: "C:/Users/viewer/photo.png",
@@ -1291,7 +1303,7 @@ describe("session normalization", () => {
         },
       },
       {
-        assetId: "asset-raw-200-1",
+        assetId: `asset-${expectedRaw(200)}-1`,
         reference: expect.objectContaining({
           kind: "data",
           mimeType: "image/png",
@@ -1300,7 +1312,7 @@ describe("session normalization", () => {
         }),
       },
       {
-        assetId: "asset-raw-200-2",
+        assetId: `asset-${expectedRaw(200)}-2`,
         reference: expect.objectContaining({
           kind: "data",
           mimeType: "image/svg+xml",
@@ -1308,37 +1320,37 @@ describe("session normalization", () => {
         }),
       },
       {
-        assetId: "asset-raw-200-3",
+        assetId: `asset-${expectedRaw(200)}-3`,
         reference: {
           kind: "remote",
           url: "https://example.test/photo.png",
         },
       },
       {
-        assetId: "asset-raw-200-4",
+        assetId: `asset-${expectedRaw(200)}-4`,
         reference: expect.objectContaining({ kind: "invalid", reason: "unsupported-scheme" }),
       },
       {
-        assetId: "asset-raw-200-5",
+        assetId: `asset-${expectedRaw(200)}-5`,
         reference: expect.objectContaining({ kind: "invalid", reason: "empty" }),
       },
       {
-        assetId: "asset-raw-200-6",
+        assetId: `asset-${expectedRaw(200)}-6`,
         reference: expect.objectContaining({ kind: "invalid", reason: "relative-path" }),
       },
       {
-        assetId: "asset-raw-200-7",
+        assetId: `asset-${expectedRaw(200)}-7`,
         reference: expect.objectContaining({
           kind: "invalid",
           reason: "unsupported-media-type",
         }),
       },
       {
-        assetId: "asset-raw-200-8",
+        assetId: `asset-${expectedRaw(200)}-8`,
         reference: expect.objectContaining({ kind: "invalid", reason: "malformed-data" }),
       },
       {
-        assetId: "asset-raw-200-9",
+        assetId: `asset-${expectedRaw(200)}-9`,
         reference: {
           kind: "local-file",
           path: "C:/Users/viewer/sample.wav",
@@ -1346,7 +1358,7 @@ describe("session normalization", () => {
         },
       },
       {
-        assetId: "asset-raw-300-0",
+        assetId: `asset-${expectedRaw(300)}-0`,
         reference: {
           kind: "local-file",
           path: "C:/Users/viewer/response.png",
@@ -1356,7 +1368,7 @@ describe("session normalization", () => {
     ]);
     expect(result.session?.turns[0]?.userMessage?.attachmentIds).toHaveLength(10);
     expect(result.session?.turns[0]?.steeringMessages?.[0]?.attachmentIds).toEqual([
-      "asset-raw-300-0",
+      `asset-${expectedRaw(300)}-0`,
     ]);
     expect(
       mediaReferenceSchema.safeParse({
@@ -1518,12 +1530,12 @@ describe("session normalization", () => {
     });
     expect(turn?.userMessage).toMatchObject({
       sourceMarkdown: "Duplicate user",
-      rawEventIds: ["raw-400", "raw-500"],
+      rawEventIds: [expectedRaw(400), expectedRaw(500)],
     });
     expect(turn?.steeringMessages).toEqual([
       expect.objectContaining({
         sourceMarkdown: "Reverse duplicate",
-        rawEventIds: ["raw-600", "raw-700"],
+        rawEventIds: [expectedRaw(600), expectedRaw(700)],
       }),
     ]);
     expect(turn?.activities).toEqual(

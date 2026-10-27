@@ -23,6 +23,7 @@ import { collectDoctorReport } from "../../../server/export/doctorReport.ts";
 import { runStaticExport } from "../../../server/export/exportPipeline.ts";
 import { CliExportProgress } from "../../../server/export/exportProgress.ts";
 import { discoverSources } from "../../../server/ingestion/discoverSources.ts";
+import { selectSessionSources } from "../../../server/ingestion/selectSessionSources.ts";
 import { refreshLiveCatalog } from "../../../server/live/catalogBuilder.ts";
 import {
   hydrateStaticInspectorRecords,
@@ -59,6 +60,179 @@ afterEach(async () => {
 });
 
 describe("static export pipeline", () => {
+  it("publishes only structurally visible chats and retains unmatched helper reviews beside their parent", async () => {
+    const root = await temporaryRoot();
+    const codexHome = join(root, "codex-home");
+    const sessions = join(codexHome, "sessions");
+    await mkdir(sessions, { recursive: true });
+    const userId = "11111111-1111-4111-8111-111111111111";
+    const helperId = "22222222-2222-4222-8222-222222222222";
+    const inputs = [
+      { id: userId, thread_source: "user" },
+      { id: helperId, thread_source: "guardian_review", parent_thread_id: userId },
+      { id: "33333333-3333-4333-8333-333333333333", thread_source: "security_scan" },
+      { id: "44444444-4444-4444-8444-444444444444", thread_source: "custom-role" },
+    ];
+    await Promise.all(
+      inputs.map((meta) =>
+        writeFile(
+          join(sessions, `${meta.id}.jsonl`),
+          [
+            {
+              type: "session_meta",
+              payload: { ...meta, source: "cli", name: null, has_user_event: 0 },
+            },
+            {
+              type: "event_msg",
+              payload: {
+                type: "user_message",
+                message:
+                  meta.id === helperId
+                    ? 'Planned action JSON: {"cmd":"same"}'
+                    : "Visible user prompt",
+              },
+            },
+            {
+              type: "event_msg",
+              payload: {
+                type: "agent_message",
+                message:
+                  meta.id === helperId
+                    ? '{"outcome":"deny","risk_level":"low","rationale":"Unmatched review"}'
+                    : "Answer",
+              },
+            },
+          ]
+            .map((record) => JSON.stringify(record))
+            .join("\n") + "\n",
+        ),
+      ),
+    );
+    const outputRoot = join(root, "output");
+    await runStaticExport({
+      cwd: root,
+      codexHome,
+      generatedRoot: join(root, "generated"),
+      outputRoot,
+      paths: viewerPaths(root),
+      offline: true,
+      index: false,
+      async generate({ outputRoot: destination }) {
+        await mkdir(destination, { recursive: true });
+        await writeFile(join(destination, "index.html"), "classification fixture");
+      },
+    });
+    const index = sessionIndexSchema.parse(
+      JSON.parse(await readFile(join(outputRoot, "payloads/sessions/index.json"), "utf8")),
+    );
+    expect(index.sessions.map((session) => session.id)).toEqual([userId]);
+    expect(await readdir(join(outputRoot, "downloads/active"))).toEqual([`${userId}.md`]);
+    expect(
+      JSON.parse(
+        await readFile(join(outputRoot, `payloads/sessions/${userId}/approvals.json`), "utf8"),
+      ),
+    ).toMatchObject({
+      sessionId: userId,
+      matched: [],
+      unattached: [
+        {
+          reason: "missing-tool-or-turn",
+          review: { guardianSessionId: helperId, outcome: "deny" },
+        },
+      ],
+    });
+    const database = openCacheDatabase(viewerPaths(root).cacheDatabase);
+    try {
+      expect(database.prepare("SELECT count(*) AS count FROM sessions").get()?.["count"]).toBe(4);
+    } finally {
+      database.close();
+    }
+  });
+  it("keeps a parent and its inheriting child as distinct selected, catalog and export identities", async () => {
+    const directory = join(process.cwd(), ".tmp", "task2-tests");
+    await mkdir(directory, { recursive: true });
+    const root = await mkdtemp(join(directory, "cross-thread-"));
+    temporaryDirectories.push(root);
+    const codexHome = join(root, "codex-home");
+    const sessions = join(codexHome, "sessions");
+    await mkdir(sessions, { recursive: true });
+    const parentId = "11111111-1111-4111-8111-111111111111";
+    const childId = "22222222-2222-4222-8222-222222222222";
+    const parentPath = join(sessions, `rollout-2026-10-27T10-00-00-${parentId}.jsonl`);
+    const childPath = join(sessions, `rollout-2026-10-27T10-00-01-${childId}.jsonl`);
+    const parent = [
+      { type: "session_meta", payload: { id: parentId, session_id: "parent-root" } },
+      { type: "event_msg", payload: { type: "user_message", message: "parent prompt" } },
+    ]
+      .map((value) => JSON.stringify(value) + "\n")
+      .join("");
+    const child = [
+      {
+        type: "session_meta",
+        payload: {
+          id: childId,
+          session_id: "child-root",
+          parent_thread_id: parentId,
+          history_base: {
+            thread_id: parentId,
+            end_ordinal_exclusive: 2,
+            end_byte_offset: Buffer.byteLength(parent),
+          },
+          subagent_history_start_ordinal: 3,
+        },
+      },
+      { type: "event_msg", payload: { type: "user_message", message: "child prompt" } },
+    ]
+      .map((value) => JSON.stringify(value) + "\n")
+      .join("");
+    await writeFile(parentPath, parent);
+    await writeFile(childPath, child);
+    const discovery = await discoverSources(codexHome);
+    const selected = await selectSessionSources(discovery.rollouts);
+    expect(
+      selected.selected
+        .map((source) => source.prefix.meta?.id)
+        .toSorted((a, b) => (a ?? "").localeCompare(b ?? "")),
+    ).toEqual([parentId, childId]);
+    expect(
+      selected.historyGraph
+        .map((source) => source.rootSessionId)
+        .toSorted((a, b) => (a ?? "").localeCompare(b ?? "")),
+    ).toEqual(["child-root", "parent-root"]);
+    const database = openCacheDatabase(":memory:");
+    try {
+      const catalog = await refreshLiveCatalog({
+        database,
+        discovery,
+        sessionIndexEntries: [],
+        globalState: { projects: [], pinnedThreadIds: [] },
+        stateSnapshot: null,
+      });
+      expect(catalog.rows.map((row) => row.summary.id).toSorted()).toEqual([parentId, childId]);
+      expect(catalog.rows.find((row) => row.summary.id === childId)?.parentThreadId).toBe(parentId);
+    } finally {
+      database.close();
+    }
+    const outputRoot = join(root, ".output", "public");
+    const exported = await runStaticExport({
+      cwd: root,
+      codexHome,
+      generatedRoot: join(root, ".generated"),
+      outputRoot,
+      paths: viewerPaths(root),
+      offline: true,
+      index: false,
+      async generate({ outputRoot: generatedOutput }) {
+        await mkdir(generatedOutput, { recursive: true });
+        await writeFile(join(generatedOutput, "index.html"), "lineage identities");
+      },
+    });
+    expect(exported).toMatchObject({ discovered: 2, transformed: 2, failed: 0 });
+    const index = sessionIndexSchema.parse(
+      JSON.parse(await readFile(join(outputRoot, "payloads", "sessions", "index.json"), "utf8")),
+    );
+    expect(index.sessions.map((session) => session.id).toSorted()).toEqual([parentId, childId]);
+  });
   it("selects the same newest stable complete duplicate as the live catalog", async () => {
     const root = await temporaryRoot();
     const codexHome = join(root, "codex-home");

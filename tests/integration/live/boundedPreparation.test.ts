@@ -1,19 +1,26 @@
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { upsertCatalogSessions } from "../../../server/cache/catalogStore.ts";
 import { getCachedSession, replaceCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
+import {
+  SessionCacheUpdater,
+  getSourceManifestEntry,
+} from "../../../server/cache/sourceManifest.ts";
 import * as richText from "../../../server/content/parseRichText.ts";
 import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
+import { rolloutRefFromSource } from "../../../server/ingestion/rolloutIdentity.ts";
 import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
 import { LiveReconciler } from "../../../server/live/reconciler.ts";
 import { LiveConversationRepository } from "../../../server/live/repository.ts";
 import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
-import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
+import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
+import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import { representativeLargeSession } from "../../performance/fixtures.ts";
 
 const roots: string[] = [];
@@ -27,6 +34,34 @@ async function root() {
   return path;
 }
 
+async function storeVerifiedFixture(database: DatabaseSync, session: NormalizedSession) {
+  let source = getSourceManifestEntry(database, session.summary.sourcePath);
+  if (source === null) {
+    await writeFile(
+      session.summary.sourcePath,
+      await readFile(join(process.cwd(), "tests/fixtures/rollouts/modern.jsonl")),
+    );
+    const result = await new SessionCacheUpdater(database).update({
+      path: session.summary.sourcePath,
+      scope: session.summary.scope,
+    });
+    if (result.status !== "updated") {
+      throw new Error(`Fixture source was not verified: ${JSON.stringify(result)}`);
+    }
+    source = getSourceManifestEntry(database, session.summary.sourcePath)!;
+  }
+  replaceCachedSession(database, {
+    session,
+    diagnostics: [],
+    source: {
+      fingerprint: source.fingerprint,
+      identity: source.identity,
+      scope: source.scope,
+      ...(source.generation === null ? {} : { generation: source.generation }),
+    },
+  });
+}
+
 describe("production live preparation boundaries", () => {
   it("recovers failed enrichment and rejects old rich payloads when normalized content advances mid-parse", async () => {
     const cacheDir = await root();
@@ -38,7 +73,7 @@ describe("production live preparation boundaries", () => {
     });
     const database = openCacheDatabase(":memory:");
     const bus = new InvalidationBus();
-    replaceCachedSession(database, { session, diagnostics: [], source: cachedSource(session) });
+    await storeVerifiedFixture(database, session);
     const reconciler = new LiveReconciler({
       database,
       bus,
@@ -78,7 +113,7 @@ describe("production live preparation boundaries", () => {
       const prompt = session.turns[0]!.userMessage!;
       prompt.sourceMarkdown = "A new prompt supersedes the in-flight rich page";
       prompt.body = { type: "document", children: [{ type: "text", text: prompt.sourceMarkdown }] };
-      replaceCachedSession(database, { session, diagnostics: [], source: cachedSource(session) });
+      await storeVerifiedFixture(database, session);
       release();
       const latest = await opening;
       expect(latest.revision).toBe("sha256:after-rich");
@@ -108,7 +143,7 @@ describe("production live preparation boundaries", () => {
     session.turns[0]!.activities = [tool];
     const database = openCacheDatabase(":memory:");
     const bus = new InvalidationBus();
-    replaceCachedSession(database, { session, diagnostics: [], source: cachedSource(session) });
+    await storeVerifiedFixture(database, session);
     const guardianId = "22222222-2222-4222-8222-222222222222";
     const guardianPath = join(cacheDir, "guardian.jsonl");
     await writeFile(
@@ -187,10 +222,32 @@ describe("production live preparation boundaries", () => {
         { ...tool, id: "second-tool", turnId: second.id, input: { path: "different-file" } },
       ];
       session.summary.revision = "sha256:guardian-unique";
-      replaceCachedSession(database, { session, diagnostics: [], source: cachedSource(session) });
+      await storeVerifiedFixture(database, session);
       const unique = await repository.getTurns(session.summary.id, { cursor: "0", limit: 1 });
       expect(
         unique.turns[0]?.activities.find((activity) => activity.kind === "tool")?.approval?.outcome,
+      ).toBeUndefined();
+      expect(await repository.getApprovalEvidence(session.summary.id)).toMatchObject({
+        unattached: [{ reason: "missing-tool-or-turn" }],
+      });
+      const qualified = (await readFile(guardianPath, "utf8"))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { type: string; payload: Record<string, unknown> });
+      qualified[0]!.payload["target_turn_id"] = tool.turnId;
+      qualified[1]!.payload["message"] =
+        `Planned action JSON:\n${JSON.stringify({ name: tool.name, namespace: tool.namespace, arguments: tool.input })}`;
+      await writeFile(
+        guardianPath,
+        `${qualified.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      );
+      database
+        .prepare("UPDATE turns SET rich_revision = NULL WHERE session_id = ?")
+        .run(session.summary.id);
+      const declared = await repository.getTurns(session.summary.id, { cursor: "0", limit: 1 });
+      expect(
+        declared.turns[0]?.activities.find((activity) => activity.kind === "tool")?.approval
+          ?.outcome,
       ).toBe("allow");
       database.prepare("DELETE FROM session_catalog WHERE id = ?").run(guardianId);
       database
@@ -224,7 +281,7 @@ describe("production live preparation boundaries", () => {
     }));
     const database = openCacheDatabase(":memory:");
     const bus = new InvalidationBus();
-    replaceCachedSession(database, { session, diagnostics: [], source: cachedSource(session) });
+    await storeVerifiedFixture(database, session);
     const reconciler = new LiveReconciler({
       database,
       bus,
@@ -276,6 +333,9 @@ describe("production live preparation boundaries", () => {
       expect(sql).not.toContain(
         "SELECT payload_json FROM turns WHERE session_id = ? ORDER BY turn_index",
       );
+      expect(sql).not.toContain(
+        "SELECT payload_json FROM activities WHERE session_id = ? AND kind = 'tool'",
+      );
       expect(
         sql.some((statement) =>
           /FROM raw_events WHERE session_id = \? ORDER BY source_order/u.test(statement),
@@ -312,7 +372,7 @@ describe("production live preparation boundaries", () => {
       type: "document",
       children: [{ type: "text", text: "hold rich page A" }],
     };
-    replaceCachedSession(database, { session, diagnostics: [], source: cachedSource(session) });
+    await storeVerifiedFixture(database, session);
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
       release = resolve;
@@ -409,7 +469,13 @@ describe("production live preparation boundaries", () => {
       ).toEqual(stored);
       const read = await readStableJsonl(path);
       const cached = getCachedSession(database, id)!;
+      const oracleRef = rolloutRefFromSource(path, null);
+      oracleRef.physicalRolloutId = getSourceManifestEntry(
+        database,
+        path,
+      )!.generation!.physicalRolloutId;
       const oracle = normalizeSession({
+        rolloutRef: oracleRef,
         records: read.records,
         sourcePath: path,
         scope: "active",

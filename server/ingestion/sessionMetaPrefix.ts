@@ -6,8 +6,12 @@ import {
   isoTimestampSchema,
   jsonValueSchema,
   type JsonValue,
+  rolloutHistoryBaseSchema,
+  type RolloutHistoryBase,
 } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import { threadClassificationSchema } from "../../shared/types/library.ts";
+import { rawThreadStructureSchema } from "../metadata/rawThreadMetadata.ts";
 
 export interface SessionMetaPrefixObservation {
   device: bigint;
@@ -44,6 +48,19 @@ export interface SessionMetaPrefixGit {
 
 export interface SessionMetaPrefix {
   id: string;
+  rootSessionId?: string | null;
+  historyBase?: RolloutHistoryBase | null;
+  subagentHistoryStartOrdinal?: number | null;
+  forkedFromId?: string | null;
+  forkedFromOrdinalExclusive?: number | null;
+  attachedThread?: JsonValue | null;
+  historyMode?: string | null;
+  threadSource?: string | null;
+  ephemeral?: boolean | null;
+  agentPath?: string | null;
+  agentNickname?: string | null;
+  agentRole?: string | null;
+  attachedParentThreadId?: string | null;
   parentThreadId: string | null;
   timestamp: string | null;
   cwd: string | null;
@@ -63,51 +80,130 @@ export interface SessionMetaPrefixResult {
 
 /** Catalog startup never reads an unbounded metadata record or a transcript fallback. */
 export const CATALOG_METADATA_MAX_BYTES = 256 * 1024;
-export const CATALOG_EVIDENCE_VERSION = 1;
+export const CATALOG_EVIDENCE_VERSION = 2;
 
-export const sessionMetaEvidenceSchema = z.strictObject({
-  version: z.int().positive(),
-  origin: z.enum(["rollout-prefix", "materialized"]),
-  status: z.enum(["found", "missing", "changed", "exhausted", "incomplete", "invalid"]),
-  parentThreadIdHint: z.string().nullable(),
-  meta: z
-    .strictObject({
-      id: z.string(),
-      parentThreadId: z.string().nullable(),
-      timestamp: z.string().nullable(),
-      cwd: z.string().nullable(),
-      source: jsonValueSchema.nullable(),
-      modelProvider: z.string().nullable(),
-      git: z
-        .strictObject({
-          branch: z.string().nullable(),
-          commitHash: z.string().nullable(),
-          repositoryUrl: z.string().nullable(),
-        })
-        .nullable(),
-    })
-    .nullable(),
-});
+export const sessionMetaEvidenceSchema = z
+  .strictObject({
+    version: z.union([z.literal(1), z.literal(2)]),
+    classification: threadClassificationSchema.optional(),
+    origin: z.enum(["rollout-prefix", "materialized"]),
+    status: z.enum(["found", "missing", "changed", "exhausted", "incomplete", "invalid"]),
+    parentThreadIdHint: z.string().nullable(),
+    meta: z
+      .strictObject({
+        id: z.string(),
+        rootSessionId: z.string().nullable().optional(),
+        historyBase: rolloutHistoryBaseSchema.nullable().optional(),
+        subagentHistoryStartOrdinal: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(Number.MAX_SAFE_INTEGER)
+          .nullable()
+          .optional(),
+        forkedFromId: z.string().nullable().optional(),
+        forkedFromOrdinalExclusive: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(Number.MAX_SAFE_INTEGER)
+          .nullable()
+          .optional(),
+        attachedThread: jsonValueSchema.nullable().optional(),
+        historyMode: z.string().nullable().optional(),
+        threadSource: z.string().nullable().optional(),
+        ephemeral: z.boolean().nullable().optional(),
+        agentPath: z.string().nullable().optional(),
+        agentNickname: z.string().nullable().optional(),
+        agentRole: z.string().nullable().optional(),
+        attachedParentThreadId: z.string().nullable().optional(),
+        parentThreadId: z.string().nullable(),
+        timestamp: z.string().nullable(),
+        cwd: z.string().nullable(),
+        source: jsonValueSchema.nullable(),
+        modelProvider: z.string().nullable(),
+        git: z
+          .strictObject({
+            branch: z.string().nullable(),
+            commitHash: z.string().nullable(),
+            repositoryUrl: z.string().nullable(),
+          })
+          .nullable(),
+      })
+      .nullable(),
+  })
+  .superRefine((evidence, context) => {
+    if (evidence.status === "found" && evidence.meta === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["meta"],
+        message: "Found evidence requires metadata",
+      });
+    }
+  });
 export type SessionMetaEvidence = z.infer<typeof sessionMetaEvidenceSchema>;
 
 const sessionMetaRecordSchema = z.object({
   type: z.literal("session_meta"),
-  payload: z.object({
-    id: z.string().min(1),
-    parent_thread_id: z.string().min(1).nullable().optional(),
-    timestamp: isoTimestampSchema.nullable().optional(),
-    cwd: z.string().nullable().optional(),
-    source: jsonValueSchema.nullable().optional(),
-    model_provider: z.string().nullable().optional(),
-    git: z
-      .object({
-        branch: z.string().nullable().optional(),
-        commit_hash: z.string().nullable().optional(),
-        repository_url: z.string().nullable().optional(),
-      })
-      .nullable()
-      .optional(),
-  }),
+  payload: z
+    .object({
+      id: z.string().min(1),
+      session_id: z.string().min(1).nullable().optional(),
+      history_base: z
+        .object({
+          thread_id: z.string().min(1),
+          end_ordinal_exclusive: z
+            .number()
+            .int()
+            .nonnegative()
+            .max(Number.MAX_SAFE_INTEGER - 1),
+          end_byte_offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        })
+        .nullable()
+        .optional(),
+      subagent_history_start_ordinal: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(Number.MAX_SAFE_INTEGER)
+        .nullable()
+        .optional(),
+      forked_from_id: z.string().min(1).nullable().optional(),
+      forked_from_ordinal_exclusive: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(Number.MAX_SAFE_INTEGER)
+        .nullable()
+        .optional(),
+      attached_thread: jsonValueSchema.nullable().optional(),
+      history_mode: z.string().nullable().optional(),
+      thread_source: z.string().nullable().optional(),
+      threadSource: z.string().nullable().optional(),
+      ephemeral: z.boolean().nullable().optional(),
+      agent_path: z.string().nullable().optional(),
+      agentPath: z.string().nullable().optional(),
+      agent_nickname: z.string().nullable().optional(),
+      agentNickname: z.string().nullable().optional(),
+      agent_role: z.string().nullable().optional(),
+      agentRole: z.string().nullable().optional(),
+      attached_parent_thread_id: z.string().nullable().optional(),
+      attachedParentThreadId: z.string().nullable().optional(),
+      parent_thread_id: z.string().min(1).nullable().optional(),
+      timestamp: isoTimestampSchema.nullable().optional(),
+      cwd: z.string().nullable().optional(),
+      source: jsonValueSchema.nullable().optional(),
+      model_provider: z.string().nullable().optional(),
+      git: z
+        .object({
+          branch: z.string().nullable().optional(),
+          commit_hash: z.string().nullable().optional(),
+          repository_url: z.string().nullable().optional(),
+        })
+        .nullable()
+        .optional(),
+    })
+    .and(rawThreadStructureSchema),
 });
 
 export async function observeSessionMetaSource(
@@ -155,7 +251,7 @@ function malformedMetaDiagnostic(path: string, line: number): ViewerDiagnostic {
   });
 }
 
-function parseCompleteLines(
+export function parseSessionMetaBytes(
   path: string,
   bytes: Buffer,
 ): { meta: SessionMetaPrefix | null; diagnostics: ViewerDiagnostic[] } {
@@ -186,7 +282,32 @@ function parseCompleteLines(
     return {
       meta: {
         id: parsed.data.payload.id,
-        parentThreadId: parsed.data.payload.parent_thread_id ?? null,
+        rootSessionId: parsed.data.payload.session_id ?? null,
+        historyBase:
+          parsed.data.payload.history_base == null
+            ? null
+            : {
+                physicalRolloutId: parsed.data.payload.history_base.thread_id,
+                endOrdinalExclusive: parsed.data.payload.history_base.end_ordinal_exclusive,
+                endByteOffset: parsed.data.payload.history_base.end_byte_offset,
+              },
+        subagentHistoryStartOrdinal: parsed.data.payload.subagent_history_start_ordinal ?? null,
+        forkedFromId: parsed.data.payload.forked_from_id ?? null,
+        forkedFromOrdinalExclusive: parsed.data.payload.forked_from_ordinal_exclusive ?? null,
+        attachedThread: parsed.data.payload.attached_thread ?? null,
+        historyMode: parsed.data.payload.history_mode ?? null,
+        threadSource: parsed.data.payload.thread_source ?? parsed.data.payload.threadSource ?? null,
+        ephemeral: parsed.data.payload.ephemeral ?? null,
+        agentPath: parsed.data.payload.agent_path ?? parsed.data.payload.agentPath ?? null,
+        agentNickname:
+          parsed.data.payload.agent_nickname ?? parsed.data.payload.agentNickname ?? null,
+        agentRole: parsed.data.payload.agent_role ?? parsed.data.payload.agentRole ?? null,
+        attachedParentThreadId:
+          parsed.data.payload.attached_parent_thread_id ??
+          parsed.data.payload.attachedParentThreadId ??
+          null,
+        parentThreadId:
+          parsed.data.payload.parent_thread_id ?? parsed.data.payload.parentThreadId ?? null,
         timestamp: parsed.data.payload.timestamp ?? null,
         cwd: parsed.data.payload.cwd ?? null,
         source: parsed.data.payload.source ?? null,
@@ -259,7 +380,7 @@ export async function readSessionMetaPrefix(
   } finally {
     await handle.close();
   }
-  const parsed = parseCompleteLines(path, buffer.subarray(0, bytesRead));
+  const parsed = parseSessionMetaBytes(path, buffer.subarray(0, bytesRead));
   const parentHint =
     parsed.meta?.parentThreadId ?? parentThreadIdHint(buffer.subarray(0, bytesRead));
   const after = await observeFile(path);

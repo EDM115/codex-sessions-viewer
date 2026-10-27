@@ -7,7 +7,12 @@ import {
 } from "../../../server/normalization/eventSchema.ts";
 import { pairToolCalls } from "../../../server/normalization/toolPairing.ts";
 import { jsonValueSchema } from "../../../shared/types/conversation.ts";
+import { expectedRawIdentity } from "../../helpers/rawIdentity.ts";
 
+const expectedIds = new Map<number, string>();
+function expectedRaw(offset: number): string {
+  return expectedIds.get(offset)!;
+}
 function event(
   lineNumber: number,
   timestamp: string,
@@ -15,13 +20,15 @@ function event(
   type: "event_msg" | "response_item" = "response_item",
 ): CodexEvent {
   const value = jsonValueSchema.parse({ timestamp, type, payload });
-  const parsed = parseCodexEvent({
+  const record = {
     lineNumber,
     byteStart: lineNumber * 100,
     byteEnd: lineNumber * 100 + 99,
     raw: JSON.stringify(value),
     value,
-  });
+  };
+  expectedIds.set(record.byteStart, expectedRawIdentity(record));
+  const parsed = parseCodexEvent(record);
   if (!parsed.success) {
     throw new Error("Expected tool fixture to parse");
   }
@@ -68,7 +75,7 @@ describe("tool call pairing", () => {
         id: "tool-call-1",
         turnId: "turn-1",
         createdAt: "2026-01-01T10:00:00.000Z",
-        rawEventIds: ["raw-100", "raw-400"],
+        rawEventIds: [expectedRaw(100), expectedRaw(400)],
         kind: "tool",
         namespace: "filesystem",
         name: "read_file",
@@ -85,13 +92,18 @@ describe("tool call pairing", () => {
         callId: "call-2",
         namespace: "network",
         name: "fetch",
-        rawEventIds: ["raw-200", "raw-300"],
+        rawEventIds: [expectedRaw(200), expectedRaw(300)],
         input: { url: "https://example.test/status" },
         output: { status: 503 },
         durationMs: 100,
       }),
     ]);
-    expect(result.consumedEventIds).toEqual(["raw-100", "raw-200", "raw-300", "raw-400"]);
+    expect(result.consumedEventIds).toEqual([
+      expectedRaw(100),
+      expectedRaw(200),
+      expectedRaw(300),
+      expectedRaw(400),
+    ]);
   });
 
   it("keeps a call without an output and marks unknown status and duration", () => {

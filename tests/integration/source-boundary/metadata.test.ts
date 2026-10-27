@@ -60,7 +60,7 @@ describe("session index metadata", () => {
 });
 
 describe("global state metadata", () => {
-  it("projects only local project labels, roots, and pinned thread ids", async () => {
+  it("projects only allowed project metadata and pinned thread ids", async () => {
     const root = await createFixtureRoot();
     const path = join(root, ".codex-global-state.json");
     await writeFile(
@@ -85,7 +85,9 @@ describe("global state metadata", () => {
     const result = await readGlobalState(path);
 
     expect(result.metadata).toEqual({
-      projects: [{ id: "project-1", name: "Viewer", rootPaths: ["C:/repo"] }],
+      projects: [
+        { id: "project-1", name: "Viewer", rootPaths: ["C:/repo"], createdAt: 100, updatedAt: 200 },
+      ],
       pinnedThreadIds: ["thread-1"],
     });
     expect(result.diagnostics).toEqual([]);
@@ -112,7 +114,7 @@ describe("state database snapshots", () => {
     writer.close();
     expect(result.status).toBe("created");
     expect(result.generationPath).toContain(snapshotRoot);
-    expect(result.metadata).toEqual({
+    expect(result.metadata).toMatchObject({
       threads: [
         {
           id: "thread-1",

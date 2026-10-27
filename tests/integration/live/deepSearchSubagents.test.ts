@@ -17,10 +17,22 @@ describe("deep search child discovery", () => {
     const rootId = "11111111-1111-4111-8111-111111111111";
     const childId = "22222222-2222-4222-8222-222222222222";
     const guardianId = "33333333-3333-4333-8333-333333333333";
+    const scanId = "44444444-4444-4444-8444-444444444444";
+    const unknownId = "55555555-5555-4555-8555-555555555555";
     const timestamp = "2026-09-14T10:00:00.000Z";
-    const rollout = (id: string, source: unknown, prompt: string) =>
+    const rollout = (id: string, source: unknown, prompt: string, threadSource?: string) =>
       [
-        { type: "session_meta", payload: { id, timestamp, source } },
+        {
+          type: "session_meta",
+          payload: {
+            id,
+            timestamp,
+            source,
+            thread_source: threadSource,
+            name: null,
+            has_user_event: 0,
+          },
+        },
         { timestamp, type: "event_msg", payload: { type: "task_started", turn_id: `${id}-turn` } },
         { timestamp, type: "event_msg", payload: { type: "user_message", message: prompt } },
         { timestamp, type: "event_msg", payload: { type: "task_complete", turn_id: `${id}-turn` } },
@@ -28,7 +40,15 @@ describe("deep search child discovery", () => {
         .map((record) => JSON.stringify(record))
         .join("\n") + "\n";
     await Promise.all([
-      writeFile(join(sessions, "root.jsonl"), rollout(rootId, "cli", "Ordinary parent")),
+      writeFile(join(sessions, "root.jsonl"), rollout(rootId, "cli", "Ordinary parent", "user")),
+      writeFile(
+        join(sessions, "scan.jsonl"),
+        rollout(scanId, "cli", "UniquelyDiscoverableChildTerm", "security_scan"),
+      ),
+      writeFile(
+        join(sessions, "unknown.jsonl"),
+        rollout(unknownId, "cli", "UniquelyDiscoverableChildTerm", "custom-role"),
+      ),
       writeFile(
         join(sessions, "child.jsonl"),
         rollout(
@@ -93,6 +113,14 @@ describe("deep search child discovery", () => {
       expect(
         database.prepare("SELECT 1 FROM sessions WHERE id = ?").get(guardianId),
       ).toBeUndefined();
+      expect(repository.getClassification(unknownId)).toMatchObject({
+        classification: { visibility: "unresolved" },
+      });
+      await expect(repository.getSession(unknownId)).resolves.toMatchObject({ id: unknownId });
+      expect((await repository.search(query)).items.map((hit) => hit.sessionId)).toEqual([childId]);
+      expect(
+        (await repository.listProjects()).reduce((sum, project) => sum + project.activeCount, 0),
+      ).toBe(1);
     } finally {
       await reconciler.close();
       database.close();

@@ -4,6 +4,7 @@ import {
   conversationSummarySchema,
   conversationTurnSchema,
   jsonValueSchema,
+  rawEventIdentitySchema,
   type ConversationActivity,
   type ConversationMessage,
   type ConversationTurn,
@@ -299,6 +300,7 @@ function rawRecord(event: NormalizedRawEvent): JsonValue {
     type: event.type,
     timestamp: event.timestamp,
     payload: event.payload,
+    ...(event.identity === undefined ? {} : { identity: event.identity }),
   };
 }
 
@@ -360,7 +362,7 @@ function rawEventsById(
     const placeholders = ids.map(() => "?").join(", ");
     for (const row of database
       .prepare(`
-        SELECT id, turn_id, type, timestamp, payload_json
+        SELECT id, turn_id, type, timestamp, payload_json, identity_json
         FROM raw_events
         WHERE session_id = ? AND id IN (${placeholders})
       `)
@@ -372,6 +374,9 @@ function rawEventsById(
         type: requiredText(row["type"], "type"),
         timestamp: nullableText(row["timestamp"], "timestamp"),
         payload: jsonValueSchema.parse(parsedJson(row["payload_json"])),
+        ...(row["identity_json"] == null
+          ? {}
+          : { identity: rawEventIdentitySchema.parse(parsedJson(row["identity_json"])) }),
       });
     }
   }

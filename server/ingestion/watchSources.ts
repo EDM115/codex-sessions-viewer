@@ -29,6 +29,7 @@ export interface SourceWatchBatch {
 
 export interface WatchSourcesOptions {
   codexHome: string;
+  metadataOnly?: boolean;
   debounceMs?: number | undefined;
   onBatch: (batch: SourceWatchBatch) => Promise<void> | void;
   onError?: ((error: unknown) => void) | undefined;
@@ -67,7 +68,7 @@ function rolloutChange(
   kind: SourceChangeKind,
 ): RolloutSourceChange | null {
   const resolvedPath = resolve(path);
-  return isWithinRoot(root, resolvedPath) && resolvedPath.toLowerCase().endsWith(".jsonl")
+  return isWithinRoot(root, resolvedPath) && /\.jsonl(?:\.zst)?$/iu.test(resolvedPath)
     ? { kind, path: resolvedPath, source: "rollout", scope }
     : null;
 }
@@ -113,6 +114,8 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
     [join(options.codexHome, ".codex-global-state.json"), "global-state"],
     [join(options.codexHome, "state_5.sqlite"), "state-database"],
     [join(options.codexHome, "state_5.sqlite-wal"), "state-wal"],
+    [join(options.codexHome, "sqlite", "state_5.sqlite"), "state-database"],
+    [join(options.codexHome, "sqlite", "state_5.sqlite-wal"), "state-wal"],
   ];
   const roots: WatchRoots = {
     active: resolve(options.codexHome, "sessions"),
@@ -121,7 +124,11 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
       metadataSources.map(([path, kind]) => [pathKey(path), kind]),
     ),
   };
-  const paths = [roots.active, roots.archived, ...roots.metadata.keys()];
+  const homeKey = pathKey(options.codexHome);
+  const legacyKey = pathKey(join(options.codexHome, "sqlite"));
+  const paths = options.metadataOnly
+    ? [resolve(options.codexHome)]
+    : [roots.active, roots.archived, ...roots.metadata.keys()];
   const pending = new Map<string, SourceChange>();
   const debounceTimers = new Map<string, NodeJS.Timeout>();
   let flushChain = Promise.resolve();
@@ -134,6 +141,15 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
       followSymlinks: false,
       awaitWriteFinish: false,
       atomic: true,
+      ...(options.metadataOnly
+        ? {
+            depth: 1,
+            ignored: (candidate: string) => {
+              const key = pathKey(candidate);
+              return key !== homeKey && key !== legacyKey && !roots.metadata.has(key);
+            },
+          }
+        : {}),
     }),
   );
 

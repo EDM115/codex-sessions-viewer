@@ -68,6 +68,9 @@ export interface LibraryWorkspaceState {
   model: Readonly<Ref<string>>;
   nextCursor: Ref<string | null>;
   projects: Ref<ConversationProject[]>;
+  sidebarGroups: Readonly<
+    Ref<{ id: string; name: string | null; projects: ConversationProject[] }[]>
+  >;
   projectPages: Map<string, LibraryPageState>;
   query: Readonly<Ref<string>>;
   refresh(append?: boolean): Promise<void>;
@@ -199,6 +202,50 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
 
   const counts = reactive<Record<ConversationScope, number>>({ active: 0, archived: 0 });
   const projects = ref<ConversationProject[]>([]);
+  const sidebarGroups = computed(() => {
+    const count = (project: ConversationProject) =>
+      scope.value === "active" ? project.activeCount : project.archivedCount;
+    const orderedProjects = projects.value.toSorted(
+      (a, b) =>
+        (a.sidebar?.order?.[scope.value] ?? Infinity) -
+        (b.sidebar?.order?.[scope.value] ?? Infinity),
+    );
+    const visible = orderedProjects.filter(
+      (project) =>
+        project.sidebar?.kind === "project" ||
+        project.sidebar?.kind === "recents" ||
+        count(project) > 0 ||
+        (project.sidebar?.kind === "section" &&
+          projects.value.some(
+            (child) => child.sidebar?.sectionId === project.id && child.sidebar.kind === "project",
+          )),
+    );
+    const sections = visible.filter((project) => project.sidebar?.kind === "section");
+    const standalone = visible.filter(
+      (project) =>
+        project.sidebar?.kind !== "section" &&
+        (!project.sidebar?.sectionId ||
+          !sections.some((section) => section.id === project.sidebar?.sectionId)),
+    );
+    const recents = standalone.filter((project) => project.sidebar?.kind === "recents");
+    return [
+      ...standalone
+        .filter((project) => project.sidebar?.kind !== "recents")
+        .map((project) => ({ id: project.id, name: null, projects: [project] })),
+      ...sections.map((section) => ({
+        id: section.id,
+        name: section.name,
+        projects: [
+          ...(count(section) > 0 ? [section] : []),
+          ...visible.filter(
+            (project) =>
+              project.sidebar?.kind === "project" && project.sidebar.sectionId === section.id,
+          ),
+        ],
+      })),
+      ...recents.map((project) => ({ id: project.id, name: null, projects: [project] })),
+    ];
+  });
   const items = ref<ConversationListItem[]>([]);
   const hits = ref<SearchHit[]>([]);
   const settledTotal = ref(0);
@@ -838,7 +885,9 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     stopped = false;
     unsubscribe = repository.subscribe((event) => {
       if (event.type === "library.updated") {
-        if (event.ids.length > 0) {
+        if (event.groupsChanged) {
+          scheduleRefresh();
+        } else if (event.ids.length > 0) {
           scheduleRefresh(false, event.ids);
         }
       } else if (
@@ -903,6 +952,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     model,
     nextCursor,
     projects,
+    sidebarGroups,
     projectPages,
     query,
     refresh,

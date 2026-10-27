@@ -135,12 +135,15 @@ describe("viewer cache database", () => {
     }
   });
 
-  it("migrates version-one normalized sessions into ready catalog rows", () => {
+  it("retains version-one normalized sessions while marking old parser identities cold", () => {
     const database = new DatabaseSync(":memory:");
     database.exec("PRAGMA foreign_keys = ON");
     database.exec(INITIAL_CACHE_SCHEMA_SQL);
     database.exec("PRAGMA user_version = 1");
     seedVersionOneSession(database);
+    database
+      .prepare("INSERT INTO session_fts (session_id, title) VALUES (?, ?)")
+      .run("session-v1", "old parser index");
     const insertTurn = database.prepare(
       "INSERT INTO turns (id, session_id, turn_index, started_at, completed_at, payload_json) VALUES (?, 'session-v1', ?, NULL, NULL, ?)",
     );
@@ -149,6 +152,9 @@ describe("viewer cache database", () => {
 
     try {
       migrateCacheDatabase(database);
+      expect(database.prepare("SELECT count(*) AS count FROM session_fts").get()).toEqual({
+        count: 0,
+      });
 
       expect(database.prepare("PRAGMA user_version").get()).toEqual({
         user_version: CACHE_SCHEMA_VERSION,
@@ -162,7 +168,7 @@ describe("viewer cache database", () => {
       ).toEqual({
         id: "session-v1",
         session_kind: "root",
-        materialization_state: "ready",
+        materialization_state: "cold",
       });
       expect(
         database

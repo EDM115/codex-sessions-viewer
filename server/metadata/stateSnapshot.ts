@@ -8,52 +8,16 @@ import * as z from "zod";
 
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import { stableRead } from "../ingestion/stableRead.ts";
+import { readStateMetadata, type StateMetadataSnapshot } from "./schemaCapabilities.ts";
 
-const booleanIntegerSchema = z
-  .union([z.literal(0), z.literal(1)])
-  .transform((value) => value === 1);
-
-const threadRowSchema = z.strictObject({
-  id: z.string(),
-  rolloutPath: z.string(),
-  createdAt: z.number(),
-  updatedAt: z.number(),
-  source: z.string(),
-  modelProvider: z.string(),
-  cwd: z.string(),
-  title: z.string(),
-  tokensUsed: z.number(),
-  archived: booleanIntegerSchema,
-  archivedAt: z.number().nullable(),
-  gitSha: z.string().nullable(),
-  gitBranch: z.string().nullable(),
-  gitOriginUrl: z.string().nullable(),
-  firstUserMessage: z.string(),
-  model: z.string().nullable(),
-  reasoningEffort: z.string().nullable(),
-  name: z.string().nullable(),
-  pinned: booleanIntegerSchema,
-  sectionId: z.string().nullable(),
-});
-
-const sectionRowSchema = z.strictObject({ id: z.string(), name: z.string() });
-const spawnEdgeRowSchema = z.strictObject({
-  parentThreadId: z.string(),
-  childThreadId: z.string(),
-  status: z.string(),
-});
 const quickCheckSchema = z.array(z.strictObject({ quick_check: z.literal("ok") })).length(1);
 const currentSnapshotSchema = z.strictObject({ generationPath: z.string().min(1) });
-
-export type StateThreadMetadata = z.output<typeof threadRowSchema>;
-export type StateSectionMetadata = z.output<typeof sectionRowSchema>;
-export type StateSpawnEdgeMetadata = z.output<typeof spawnEdgeRowSchema>;
-
-export interface StateMetadataSnapshot {
-  threads: StateThreadMetadata[];
-  sections: StateSectionMetadata[];
-  spawnEdges: StateSpawnEdgeMetadata[];
-}
+export type {
+  StateThreadMetadata,
+  StateSectionMetadata,
+  StateSpawnEdgeMetadata,
+  StateMetadataSnapshot,
+} from "./schemaCapabilities.ts";
 
 export interface StateSnapshotOptions {
   sourceDatabase: string;
@@ -162,52 +126,9 @@ function querySnapshot(generationPath: string): StateMetadataSnapshot {
   try {
     database.enableDefensive(true);
     database.exec("PRAGMA query_only = ON");
+    database.exec("PRAGMA trusted_schema = OFF");
     quickCheckSchema.parse(database.prepare("PRAGMA quick_check").all());
-    const threads = threadRowSchema.array().parse(
-      database
-        .prepare(`
-          SELECT
-            id,
-            rollout_path AS rolloutPath,
-            created_at AS createdAt,
-            updated_at AS updatedAt,
-            source,
-            model_provider AS modelProvider,
-            cwd,
-            title,
-            tokens_used AS tokensUsed,
-            archived,
-            archived_at AS archivedAt,
-            git_sha AS gitSha,
-            git_branch AS gitBranch,
-            git_origin_url AS gitOriginUrl,
-            first_user_message AS firstUserMessage,
-            model,
-            reasoning_effort AS reasoningEffort,
-            name,
-            is_pinned AS pinned,
-            thread_section_id AS sectionId
-          FROM threads
-          ORDER BY id
-        `)
-        .all(),
-    );
-    const sections = sectionRowSchema
-      .array()
-      .parse(database.prepare("SELECT id, name FROM thread_sections ORDER BY id").all());
-    const spawnEdges = spawnEdgeRowSchema.array().parse(
-      database
-        .prepare(`
-          SELECT
-            parent_thread_id AS parentThreadId,
-            child_thread_id AS childThreadId,
-            status
-          FROM thread_spawn_edges
-          ORDER BY child_thread_id
-        `)
-        .all(),
-    );
-    return { threads, sections, spawnEdges };
+    return readStateMetadata(database);
   } finally {
     database.close();
   }

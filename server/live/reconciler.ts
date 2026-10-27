@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
+import { conversationActivitySchema } from "../../shared/types/conversation.ts";
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { DeepSearchJob, PreparationResult } from "../../shared/types/library.ts";
 import type { SearchQuery, ViewerInvalidation, TurnChunk } from "../../shared/types/repository.ts";
@@ -17,6 +18,7 @@ import { countCachedSearchResults } from "../cache/searchStore.ts";
 import {
   CACHE_PARSER_VERSION,
   SessionCacheUpdater,
+  refreshUnchangedSourceManifest,
   type StableJsonlReader,
 } from "../cache/sourceManifest.ts";
 import { prepareConversationForExport } from "../export/prepareConversation.ts";
@@ -26,6 +28,7 @@ import {
   type SourceDiscoveryResult,
 } from "../ingestion/discoverSources.ts";
 import { readStableJsonl } from "../ingestion/jsonlStream.ts";
+import { rolloutRefFromSource } from "../ingestion/rolloutIdentity.ts";
 import {
   observeSessionMetaSource,
   readSessionMetaPrefix,
@@ -45,10 +48,12 @@ import {
   snapshotStateDatabase,
   type StateMetadataSnapshot,
 } from "../metadata/stateSnapshot.ts";
+import { catalogVisibilitySql } from "../metadata/threadClassification.ts";
 import {
   attachGuardianEvidence,
-  guardianActionHash,
-  parseGuardianTurn,
+  associateApprovalReviews,
+  approvalEvidenceResult,
+  parseGuardianTurns,
   type GuardianReview,
 } from "../normalization/guardianEvidence.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
@@ -385,29 +390,81 @@ export class LiveReconciler {
       if (result.read.status !== "stable") {
         continue;
       }
-      const review = parseGuardianTurn(result.records);
-      if (review !== null && review.parentThreadId === parentThreadId) {
-        reviews.push(review);
-      }
+      const parsedReviews = parseGuardianTurns(
+        result.records,
+        rolloutRefFromSource(
+          guardian.summary.sourcePath,
+          guardian.structuralEvidence?.meta ?? null,
+        ),
+      );
+      reviews.push(...parsedReviews.filter((review) => review.parentThreadId === parentThreadId));
     }
     return reviews;
   }
 
+  #approvalTools(sessionId: string, reviews: readonly GuardianReview[]) {
+    const turns = reviews.flatMap((review) =>
+      review.targetItemId == null &&
+      review.reviewId == null &&
+      review.toolName != null &&
+      review.targetTurnId != null
+        ? [review.targetTurnId]
+        : [],
+    );
+    const items = reviews.flatMap((review) =>
+      review.targetItemId == null ? [] : [review.targetItemId],
+    );
+    const ids = reviews.flatMap((review) => (review.reviewId == null ? [] : [review.reviewId]));
+    if (turns.length + items.length + ids.length === 0) {
+      return [];
+    }
+    return this.#database
+      .prepare(`
+      SELECT json_set(payload_json, '$.output', NULL, '$.error', NULL, '$.rawEventIds', json('[]'), '$.approval', NULL, '$.approvalAttempts', json('[]')) AS evidence_json
+      FROM activities WHERE session_id = ? AND kind = 'tool' AND (
+        turn_id IN (SELECT value FROM json_each(?)) OR id IN (SELECT value FROM json_each(?))
+        OR json_extract(payload_json, '$.nativeItemId') IN (SELECT value FROM json_each(?))
+        OR json_extract(payload_json, '$.approvalReviewId') IN (SELECT value FROM json_each(?))
+      )
+    `)
+      .all(
+        sessionId,
+        JSON.stringify([...new Set(turns)]),
+        JSON.stringify(items),
+        JSON.stringify(items),
+        JSON.stringify(ids),
+      )
+      .flatMap((row) => {
+        const parsed = conversationActivitySchema.safeParse(
+          JSON.parse(String(row["evidence_json"])),
+        );
+        return parsed.success && parsed.data.kind === "tool" ? [parsed.data] : [];
+      });
+  }
   async #attachGuardianReviews(session: NormalizedSession): Promise<void> {
     const reviews = await this.#guardianReviews(session.summary.id);
-    const count = this.#database.prepare(
-      "SELECT count(*) AS count FROM activities WHERE session_id = ? AND guardian_input_hash = ?",
-    );
-    const uniqueReviews = reviews.filter(
-      (review) =>
-        count.get(session.summary.id, guardianActionHash(review.reviewedAction))?.["count"] === 1,
-    );
+    const allTools = this.#approvalTools(session.summary.id, reviews);
+    const associations = associateApprovalReviews(allTools, reviews, {
+      sessionId: session.summary.id,
+    });
+    const matchedReviews = [...associations.matches.values()].flat();
     attachGuardianEvidence(
       session.turns.flatMap(({ activities }) =>
         activities.filter((activity) => activity.kind === "tool"),
       ),
-      uniqueReviews,
+      matchedReviews,
+      { sessionId: session.summary.id },
     );
+  }
+
+  async getApprovalEvidence(sessionId: string) {
+    if (catalogSession(this.#database, sessionId) === null) {
+      throw new Error("Session not found");
+    }
+    const reviews = await this.#guardianReviews(sessionId);
+    const tools = this.#approvalTools(sessionId, reviews);
+    const result = associateApprovalReviews(tools, reviews, { sessionId });
+    return approvalEvidenceResult(sessionId, result);
   }
 
   #enrichSubagents(session: NormalizedSession): void {
@@ -439,7 +496,7 @@ export class LiveReconciler {
       sessionIndexEntries: this.#metadata.sessionIndexEntries,
       stateSnapshot: this.#metadata.stateSnapshot,
     });
-    if (result.status === "stale-catalog") {
+    if (result.status === "stale-catalog" || result.status === "superseded") {
       return { id: expectedSessionId, state: "loading", error: null };
     }
     const currentCatalog = catalogSession(this.#database, expectedSessionId);
@@ -513,14 +570,27 @@ export class LiveReconciler {
   async #materialize(id: string, _priority: MaterializationPriority): Promise<PreparationResult> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const catalog = catalogSession(this.#database, id);
-      if (catalog === null || catalog.kind === "auxiliary") {
+      if (
+        catalog === null ||
+        (catalog.kind === "auxiliary" &&
+          catalog.structuralEvidence?.classification?.visibility !== "unresolved")
+      ) {
         return { id, state: "failed", error: "Conversation not found." };
       }
       if (
         catalog.materialization === "ready" &&
-        hasCachedSession(this.#database, id, CACHE_PARSER_VERSION)
+        hasCachedSession(this.#database, id, CACHE_PARSER_VERSION) &&
+        // oxlint-disable-next-line no-await-in-loop -- The bounded retry must validate the selected catalog revision before serving its cached body
+        (await refreshUnchangedSourceManifest(this.#database, catalog.summary.sourcePath, id))
       ) {
-        return { id, state: "ready", error: null };
+        const current = catalogSession(this.#database, id);
+        if (
+          current?.sourceRevision === catalog.sourceRevision &&
+          current.summary.sourcePath === catalog.summary.sourcePath
+        ) {
+          return { id, state: "ready", error: null };
+        }
+        continue;
       }
       setCatalogMaterialization(this.#database, id, "loading", null);
       let result: PreparationResult;
@@ -565,7 +635,12 @@ export class LiveReconciler {
       return result;
     }
     const latest = catalogSession(this.#database, id);
-    if (latest !== null && latest.kind !== "auxiliary" && latest.materialization === "loading") {
+    if (
+      latest !== null &&
+      (latest.kind !== "auxiliary" ||
+        latest.structuralEvidence?.classification?.visibility === "unresolved") &&
+      latest.materialization === "loading"
+    ) {
       setCatalogMaterialization(this.#database, id, "cold", null);
     }
     this.#publish({
@@ -589,9 +664,14 @@ export class LiveReconciler {
     const pending: string[] = [];
     for (const id of new Set(ids)) {
       const catalog = catalogSession(this.#database, id);
-      if (catalog === null || catalog.kind === "auxiliary") {
+      if (
+        catalog === null ||
+        (catalog.kind === "auxiliary" &&
+          catalog.structuralEvidence?.classification?.visibility !== "unresolved")
+      ) {
         immediate.set(id, { id, state: "failed", error: "Conversation not found." });
       } else if (
+        priority !== "open" &&
         catalog.materialization === "ready" &&
         hasCachedSession(this.#database, id, CACHE_PARSER_VERSION)
       ) {
@@ -721,7 +801,7 @@ export class LiveReconciler {
     const values: string[] = [query.scope];
     const filters = [
       "scope = ?",
-      "session_kind <> 'auxiliary'",
+      catalogVisibilitySql("ordinary"),
       "materialization_state <> 'ready'",
     ];
     if (query.projectId !== undefined) {
@@ -894,11 +974,17 @@ export class LiveReconciler {
       observeSource: this.#observeSource,
       changedSourcePaths,
     });
-    if (announce && (refreshed.changedIds.length > 0 || refreshed.removedIds.length > 0)) {
+    if (
+      announce &&
+      (refreshed.groupsChanged ||
+        refreshed.changedIds.length > 0 ||
+        refreshed.removedIds.length > 0)
+    ) {
       this.#publish({
         type: "library.updated",
         ids: [...new Set([...refreshed.changedIds, ...refreshed.removedIds])].toSorted(),
         revision: this.#nextRevision(),
+        ...(refreshed.groupsChanged ? { groupsChanged: true } : {}),
       });
     }
     const changedIds = new Set(refreshed.changedIds);

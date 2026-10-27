@@ -4,6 +4,9 @@ import type { JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
 import {
   matchGuardianEvidence,
   parseGuardianTurn,
+  associateApprovalReviews,
+  parseGuardianTurns,
+  parseNativeApprovalReview,
 } from "../../../server/normalization/guardianEvidence.ts";
 import type { ToolActivity } from "../../../shared/types/conversation.ts";
 
@@ -101,7 +104,9 @@ describe("guardian approval evidence", () => {
       rawEventIds: [],
     };
     const exact = tool("tool-a", { workdir: "C:/repo", cmd: "git status" });
-    expect(matchGuardianEvidence([exact], [review])).toEqual(
+    expect(matchGuardianEvidence([exact], [review])).toEqual(new Map());
+    const scopedReview = { ...review, toolName: "exec_command", targetTurnId: "turn-1" };
+    expect(matchGuardianEvidence([exact], [scopedReview], { sessionId: "parent-1" })).toEqual(
       new Map([["tool-a", expect.objectContaining({ outcome: "deny" })]]),
     );
     expect(
@@ -115,5 +120,185 @@ describe("guardian approval evidence", () => {
         records([{ type: "event_msg", payload: { type: "agent_message", message: "{bad" } }]),
       ),
     ).toBeNull();
+  });
+
+  it("requires declared session, turn and tool identity for legacy matches", () => {
+    const first = tool("first", { cmd: "same" });
+    const otherTool = { ...tool("other-tool", first.input), name: "apply_patch" };
+    const otherTurn = { ...tool("other-turn", first.input), turnId: "turn-2" };
+    const review = {
+      reviewedAction: first.input,
+      outcome: "deny" as const,
+      riskLevel: "low",
+      userAuthorization: null,
+      rationale: "Denied",
+      reviewedAt: null,
+      guardianSessionId: "review",
+      parentThreadId: "parent",
+      targetTurnId: "turn-1",
+      toolName: "exec_command",
+      rawEventIds: [],
+    };
+    const result = associateApprovalReviews([first, otherTool, otherTurn], [review], {
+      sessionId: "parent",
+    });
+    expect([...result.matches.keys()]).toEqual(["first"]);
+    for (const invalid of [
+      { ...review, parentThreadId: "wrong" },
+      { ...review, targetTurnId: null },
+      { ...review, toolName: null },
+    ]) {
+      expect(
+        associateApprovalReviews([first], [invalid], { sessionId: "parent" }).unattached,
+      ).toHaveLength(1);
+    }
+    expect(
+      associateApprovalReviews([first, { ...first, id: "duplicate" }], [review], {
+        sessionId: "parent",
+      }).unattached[0]?.reason,
+    ).toBe("ambiguous-target");
+    expect(
+      associateApprovalReviews(
+        [{ ...first, createdAt: "2026-10-27T12:00:00.000Z" }],
+        [{ ...review, reviewedAt: "2026-10-27T11:00:00.000Z" }],
+        { sessionId: "parent" },
+      ).matches.size,
+    ).toBe(0);
+  });
+
+  it("prefers exact native identities, keeps attempts and never falls back after a missing target", () => {
+    const target = {
+      ...tool("tool", { cmd: "same" }),
+      nativeItemId: "native-item",
+      approvalReviewId: "review-a",
+    };
+    const base = {
+      reviewedAction: null,
+      outcome: "deny" as const,
+      riskLevel: "low",
+      userAuthorization: null,
+      rationale: "Denied",
+      reviewedAt: null,
+      guardianSessionId: null,
+      parentThreadId: "parent",
+      rawEventIds: [],
+      targetItemId: "native-item",
+      targetTurnId: "turn-1",
+    };
+    const reviews = [
+      { ...base, reviewId: "review-a", status: "denied" },
+      { ...base, reviewId: "review-b", status: "approved", outcome: "allow" as const },
+    ];
+    const result = associateApprovalReviews([target], reviews, { sessionId: "parent" });
+    expect(result.matches.get("tool")).toEqual(reviews);
+    expect(
+      associateApprovalReviews(
+        [target],
+        [{ ...base, targetItemId: "missing", reviewedAction: target.input }],
+        { sessionId: "parent" },
+      ).unattached,
+    ).toHaveLength(1);
+    expect(
+      associateApprovalReviews(
+        [
+          target,
+          { ...target, id: "different", nativeItemId: "other-item", approvalReviewId: "review-b" },
+        ],
+        [reviews[1]!],
+        { sessionId: "parent" },
+      ).unattached,
+    ).toEqual([{ review: reviews[1], reason: "conflicting-targets" }]);
+  });
+
+  it("keeps separate legacy review attempts instead of collapsing the entire helper transcript", () => {
+    const values = records([
+      { type: "session_meta", payload: { id: "review", parent_thread_id: "parent" } },
+      {
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          turn_id: "one",
+          message: 'Planned action JSON: {"name":"exec_command","arguments":{"cmd":"same"}}',
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: '{"outcome":"deny","risk_level":"low","rationale":"Denied"}',
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          turn_id: "two",
+          message: 'Planned action JSON: {"name":"exec_command","arguments":{"cmd":"same"}}',
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "agent_message",
+          message: '{"outcome":"allow","risk_level":"low","rationale":"Approved"}',
+        },
+      },
+    ]);
+    expect(parseGuardianTurns(values).map((review) => review.outcome)).toEqual(["deny", "allow"]);
+  });
+  it("retains native pending statuses and validates correlation identities", () => {
+    expect(
+      parseNativeApprovalReview({
+        reviewId: "pending",
+        targetItemId: "item",
+        parentThreadId: "parent",
+        status: "pending",
+      }),
+    ).toMatchObject({
+      reviewId: "pending",
+      targetItemId: "item",
+      status: "pending",
+      outcome: null,
+    });
+    expect(
+      parseNativeApprovalReview({ reviewId: 12, targetItemId: "item", status: "approved" }),
+    ).toBeNull();
+  });
+  it("retains an unfinished legacy review as pending evidence", () => {
+    expect(
+      parseGuardianTurns(
+        records([
+          {
+            type: "session_meta",
+            payload: {
+              id: "helper",
+              parentThreadId: "parent",
+              source: { subAgent: { other: "guardian" } },
+            },
+          },
+          {
+            type: "event_msg",
+            payload: {
+              type: "user_message",
+              message: 'Planned action JSON: {"name":"exec_command","arguments":{"cmd":"same"}}',
+            },
+          },
+        ]),
+      ),
+    ).toEqual([
+      expect.objectContaining({ parentThreadId: "parent", outcome: null, status: "pending" }),
+    ]);
+  });
+  it("preserves repeated pending attempts while coalescing a mirrored user envelope", () => {
+    const message = 'Planned action JSON: {"name":"exec_command","arguments":{"cmd":"same"}}';
+    const attempts = parseGuardianTurns(
+      records([
+        { type: "event_msg", payload: { type: "user_message", message } },
+        { type: "response_item", payload: { type: "message", role: "user", content: message } },
+        { type: "event_msg", payload: { type: "user_message", message } },
+      ]),
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts.map((review) => review.status)).toEqual(["pending", "pending"]);
   });
 });

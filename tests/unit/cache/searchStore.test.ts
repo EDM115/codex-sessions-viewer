@@ -1,16 +1,131 @@
 import { describe, expect, it } from "vitest";
 
+import { listCatalogProjects, listCatalogSessions } from "../../../server/cache/catalogStore.ts";
 import { replaceCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import {
   countCachedSearchResults,
   searchCachedSessions,
 } from "../../../server/cache/searchStore.ts";
+import {
+  classifyCatalogThread,
+  cachedThreadClassification,
+} from "../../../server/metadata/threadClassification.ts";
 import { createViewerDiagnostic } from "../../../shared/types/diagnostics.ts";
 import { searchResponseSchema } from "../../../shared/types/repository.ts";
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 describe("cached full-text search", () => {
+  it("uses supported persisted-envelope policy for JavaScript, SQL lists, project counts and search", async () => {
+    const session = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: "C:/fixtures/envelope.jsonl",
+      scope: "active",
+      revision: "envelope",
+    });
+    session.summary.parentThreadId = null;
+    session.rawEvents = [
+      {
+        id: "meta",
+        type: "session_meta",
+        turnId: null,
+        timestamp: null,
+        payload: {
+          type: "session_meta",
+          payload: { id: session.summary.id, source: "cli", thread_source: "user" },
+        },
+      },
+    ];
+    const database = openCacheDatabase(":memory:");
+    try {
+      replaceCachedSession(database, { session, diagnostics: [], source: cachedSource(session) });
+      const base = {
+        version: 2,
+        origin: "rollout-prefix",
+        status: "missing",
+        parentThreadIdHint: null,
+        meta: null,
+      };
+      const cases: Array<[unknown, boolean]> = [
+        [null, true],
+        [{ ...base, version: 1 }, true],
+        [
+          {
+            ...base,
+            version: 999,
+            classification: classifyCatalogThread({ threadSource: "user" }),
+          },
+          false,
+        ],
+        [{ ...base, status: "invalid" }, false],
+        [base, false],
+      ];
+      for (const [evidence, visible] of cases) {
+        database
+          .prepare("UPDATE session_catalog SET structural_evidence_json = ? WHERE id = ?")
+          .run(evidence === null ? null : JSON.stringify(evidence), session.summary.id);
+        expect(cachedThreadClassification(evidence, "root").visibility).toBe(
+          visible ? "user-root" : "unresolved",
+        );
+        expect(listCatalogSessions(database, { scope: "active" }).total).toBe(visible ? 1 : 0);
+        expect(
+          listCatalogProjects(database).reduce((sum, project) => sum + project.activeCount, 0),
+        ).toBe(visible ? 1 : 0);
+        expect(countCachedSearchResults(database, { scope: "active", query: "Build parser" })).toBe(
+          visible ? 1 : 0,
+        );
+      }
+    } finally {
+      database.close();
+    }
+  });
+  it("excludes structural helpers from already materialized search while retaining users with helper model names", async () => {
+    const database = openCacheDatabase(":memory:");
+    try {
+      for (const [index, threadSource] of [
+        "user",
+        "security_scan",
+        "guardian_review",
+        "custom-role",
+      ].entries()) {
+        // oxlint-disable-next-line no-await-in-loop -- Each fixture is independently written into the same SQLite store before the next one
+        const session = await normalizedRolloutFixture({
+          name: "modern.jsonl",
+          sourcePath: `C:/fixtures/${index}.jsonl`,
+          scope: "active",
+          revision: `revision-${index}`,
+        });
+        session.summary.id = `session-${index}`;
+        session.summary.models = ["codex-auto-review"];
+        session.summary.parentThreadId = null;
+        session.rawEvents = [
+          {
+            id: `meta-${index}`,
+            turnId: null,
+            type: "session_meta",
+            timestamp: null,
+            payload: {
+              type: "session_meta",
+              payload: { id: session.summary.id, thread_source: threadSource, source: "cli" },
+            },
+          },
+        ];
+        replaceCachedSession(database, {
+          session,
+          diagnostics: [],
+          source: cachedSource(session, { inode: BigInt(index + 1) }),
+        });
+      }
+      expect(
+        searchCachedSessions(database, { scope: "active", query: "Build parser" }).items.map(
+          (hit) => hit.sessionId,
+        ),
+      ).toEqual(["session-0"]);
+      expect(database.prepare("SELECT count(*) AS count FROM sessions").get()?.["count"]).toBe(4);
+    } finally {
+      database.close();
+    }
+  });
   it("indexes normalized transcript content and applies structured filters", async () => {
     const active = await normalizedRolloutFixture({
       name: "modern.jsonl",

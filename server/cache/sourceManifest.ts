@@ -2,7 +2,13 @@ import { createHash, type Hash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
-import type { ConversationScope, SourceFingerprint } from "../../shared/types/conversation.ts";
+import {
+  sourceGenerationSchema,
+  type ConversationScope,
+  type SourceFingerprint,
+  type SourceGeneration,
+  type RolloutRef,
+} from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { DiscoveredRolloutSource } from "../ingestion/discoverSources.ts";
 import {
@@ -13,6 +19,14 @@ import {
   type ReadStableJsonlOptions,
   type StableJsonlResult,
 } from "../ingestion/jsonlStream.ts";
+import { rolloutRefFromSource } from "../ingestion/rolloutIdentity.ts";
+import {
+  filesystemRolloutResolver,
+  readPlainRolloutLineage,
+  type RolloutSourceResolver,
+} from "../ingestion/rolloutLineage.ts";
+import { parseSessionMetaBytes } from "../ingestion/sessionMetaPrefix.ts";
+import { SourceGenerationFence, validateSourceGeneration } from "../ingestion/sourceGeneration.ts";
 import { stableRead, type SourceIdentity } from "../ingestion/stableRead.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
@@ -30,6 +44,7 @@ export const CACHE_PARSER_VERSION = NORMALIZATION_PARSER_VERSION;
 const PREFIX_PROBE_BYTES = 64;
 
 export interface SourceManifestEntry {
+  generation: SourceGeneration | null;
   path: string;
   sessionId: string | null;
   scope: ConversationScope;
@@ -43,6 +58,7 @@ export type StableJsonlReader = (
 ) => Promise<StableJsonlResult>;
 
 export interface SessionCacheUpdaterOptions {
+  rolloutSources?: RolloutSourceResolver;
   parserVersion?: number | undefined;
   retainLiveSources?: boolean | undefined;
   maxRetainedSources?: number | undefined;
@@ -62,6 +78,7 @@ export interface SessionCacheUpdateContext {
 }
 
 export type SessionCacheUpdateResult =
+  | { status: "superseded"; retainedSessionId: string | null; diagnostics: [] }
   | {
       status: "unchanged";
       sessionId: string | null;
@@ -95,6 +112,10 @@ interface ObservedSource {
 }
 
 interface LiveSourceState {
+  rolloutRef?: RolloutRef;
+  dependencies?: NonNullable<SourceGeneration["dependencies"]>;
+  contentRevision?: string;
+  generation?: SourceGeneration;
   fingerprint: SourceFingerprint;
   identity: SourceIdentity;
   hash: Hash;
@@ -145,6 +166,10 @@ export function getSourceManifestEntry(
   }
   return {
     path,
+    generation:
+      typeof row["generation_json"] === "string"
+        ? sourceGenerationSchema.parse(JSON.parse(row["generation_json"]))
+        : null,
     sessionId,
     scope,
     identity: {
@@ -257,11 +282,11 @@ export async function refreshUnchangedSourceManifest(
   }
   try {
     const observed = await observeSource(path);
-    if (matchesFingerprint(entry, observed, CACHE_PARSER_VERSION)) {
-      return true;
-    }
     const fingerprint = await verifyTouchedSource(entry, observed, CACHE_PARSER_VERSION);
     if (fingerprint === null) {
+      return false;
+    }
+    if (!(await dependenciesMatch(entry.generation))) {
       return false;
     }
     storeTouchedSourceFingerprint(database, entry, fingerprint);
@@ -270,6 +295,16 @@ export async function refreshUnchangedSourceManifest(
   } catch {
     return false;
   }
+}
+async function dependenciesMatch(generation: SourceGeneration | null): Promise<boolean> {
+  for (const dependency of generation?.dependencies ?? []) {
+    // oxlint-disable-next-line no-await-in-loop -- Serialize full ancestry validation to bound file handles and stop at the first mismatch
+    const validated = await validateSourceGeneration(dependency.ref, null);
+    if (validated.generation.encodedSha256 !== dependency.encodedSha256) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function appendProbe(previous: Buffer, bytes: Uint8Array): Buffer {
@@ -362,7 +397,10 @@ function clearSourceFailureDiagnostics(database: DatabaseSync, path: string): vo
   }
 }
 
+const generationFences = new WeakMap<DatabaseSync, SourceGenerationFence>();
 export class SessionCacheUpdater {
+  readonly #rolloutSources: RolloutSourceResolver | undefined;
+  readonly #fence: SourceGenerationFence;
   readonly #database: DatabaseSync;
   readonly #parserVersion: number;
   readonly #normalize: (input: NormalizeSessionInput) => NormalizeSessionResult;
@@ -377,6 +415,9 @@ export class SessionCacheUpdater {
 
   constructor(database: DatabaseSync, options: SessionCacheUpdaterOptions = {}) {
     this.#database = database;
+    this.#fence = generationFences.get(database) ?? new SourceGenerationFence();
+    generationFences.set(database, this.#fence);
+    this.#rolloutSources = options.rolloutSources;
     this.#parserVersion = options.parserVersion ?? CACHE_PARSER_VERSION;
     this.#normalize = options.normalize ?? normalizeSession;
     this.#readJsonl = options.readJsonl ?? readStableJsonl;
@@ -418,8 +459,47 @@ export class SessionCacheUpdater {
     ) {
       return null;
     }
+    const first = result.records[0];
+    const meta =
+      first === undefined
+        ? null
+        : parseSessionMetaBytes(source.path, Buffer.from(first.raw + "\n")).meta;
+    const ref = rolloutRefFromSource(source.path, meta);
+    const lineage =
+      ref.historyBase !== null || ref.subagentHistoryStartOrdinal !== null
+        ? await readPlainRolloutLineage(
+            ref,
+            this.#rolloutSources ?? filesystemRolloutResolver(ref),
+            undefined,
+            { parserVersion: this.#parserVersion },
+          )
+        : null;
+    if (
+      lineage !== null &&
+      (lineage.currentGeneration.encodedSha256 !== hash.copy().digest("hex") ||
+        lineage.currentGeneration.observation.encodedSize !== observed.size ||
+        lineage.currentGeneration.parserVersion !== this.#parserVersion)
+    ) {
+      return null;
+    }
     return {
       mode: "full",
+      ...(lineage === null ? {} : { generation: lineage.currentGeneration }),
+      rolloutRef: ref,
+      dependencies: lineage?.dependencies ?? [],
+      ...(lineage === null
+        ? {}
+        : {
+            contentRevision: `lineage:${createHash("sha256")
+              .update(
+                JSON.stringify([
+                  lineage.historyEpoch,
+                  hash.copy().digest("hex"),
+                  lineage.dependencies.map((dependency) => dependency.encodedSha256),
+                ]),
+              )
+              .digest("hex")}`,
+          }),
       fingerprint: {
         path: source.path,
         size: observed.size,
@@ -431,7 +511,7 @@ export class SessionCacheUpdater {
       identity: observed.identity,
       hash,
       parserState: result.state,
-      records: result.records,
+      records: lineage?.records ?? result.records,
       errors: result.errors,
       prefixProbe,
       normalize: this.#normalize === normalizeSession ? createSessionNormalizer() : this.#normalize,
@@ -472,6 +552,8 @@ export class SessionCacheUpdater {
     }
     return {
       mode: "append",
+      ...(live.rolloutRef === undefined ? {} : { rolloutRef: live.rolloutRef }),
+      dependencies: [],
       fingerprint: {
         path: source.path,
         size: observed.size,
@@ -499,11 +581,12 @@ export class SessionCacheUpdater {
   ): SessionCacheUpdateResult {
     const normalized = candidate.normalize({
       records: candidate.records,
+      ...(candidate.rolloutRef === undefined ? {} : { rolloutRef: candidate.rolloutRef }),
       sourcePath: source.path,
       scope: source.scope,
       sessionIndexEntries: context.sessionIndexEntries ?? this.#defaultSessionIndexEntries,
       stateSnapshot: context.stateSnapshot ?? this.#defaultStateSnapshot,
-      revision: `sha256:${candidate.fingerprint.sha256}`,
+      revision: candidate.contentRevision ?? `sha256:${candidate.fingerprint.sha256}`,
     });
     const diagnostics = [...normalized.diagnostics, ...parseErrors(source.path, candidate.errors)];
     if (normalized.session === null) {
@@ -543,6 +626,7 @@ export class SessionCacheUpdater {
         fingerprint: candidate.fingerprint,
         scope: source.scope,
         identity: candidate.identity,
+        ...(candidate.generation === undefined ? {} : { generation: candidate.generation }),
       },
       expectedCatalogSourceRevision: context.expectedCatalogSourceRevision,
       ...(mode === "full" || candidate.normalized === undefined
@@ -603,9 +687,37 @@ export class SessionCacheUpdater {
     source: DiscoveredRolloutSource,
     context: SessionCacheUpdateContext = {},
   ): Promise<SessionCacheUpdateResult> {
+    const jobKey =
+      context.expectedCatalogSessionId ?? rolloutRefFromSource(source.path, null).stableThreadId;
+    const jobToken = this.#fence.begin(jobKey);
     const persisted = getSourceManifestEntry(this.#database, source.path);
     try {
+      const sourceRef = rolloutRefFromSource(source.path, null);
+      if (persisted?.generation !== null && persisted?.generation !== undefined) {
+        sourceRef.physicalRolloutId = persisted.generation.physicalRolloutId;
+      }
+      const validated = await validateSourceGeneration(
+        sourceRef,
+        persisted?.generation ?? null,
+        undefined,
+        { parserVersion: this.#parserVersion },
+      );
+      const dependenciesValid = await dependenciesMatch(persisted?.generation ?? null);
+      if (!this.#fence.isCurrent(jobKey, jobToken)) {
+        return {
+          status: "superseded",
+          retainedSessionId: persisted?.sessionId ?? null,
+          diagnostics: [],
+        };
+      }
       const observed = await observeSource(source.path);
+      if (!this.#fence.isCurrent(jobKey, jobToken)) {
+        return {
+          status: "superseded",
+          retainedSessionId: persisted?.sessionId ?? null,
+          diagnostics: [],
+        };
+      }
       const live = this.#liveSources.get(source.path);
       if (live !== undefined) {
         this.#liveSources.delete(source.path);
@@ -617,9 +729,11 @@ export class SessionCacheUpdater {
         hasCachedSession(this.#database, persisted.sessionId);
       if (
         !context.force &&
+        dependenciesValid &&
         persisted !== null &&
         normalizedExists &&
-        matchesFingerprint(persisted, observed, this.#parserVersion)
+        matchesFingerprint(persisted, observed, this.#parserVersion) &&
+        validated.generation.encodedSha256 === persisted.fingerprint.sha256
       ) {
         return {
           status: "unchanged",
@@ -627,8 +741,17 @@ export class SessionCacheUpdater {
           fingerprint: persisted.fingerprint,
         };
       }
-      if (!context.force && persisted !== null && normalizedExists) {
+      if (
+        !context.force &&
+        dependenciesValid &&
+        persisted !== null &&
+        normalizedExists &&
+        validated.generation.encodedSha256 === persisted.fingerprint.sha256
+      ) {
         const fingerprint = await verifyTouchedSource(persisted, observed, this.#parserVersion);
+        if (!this.#fence.isCurrent(jobKey, jobToken)) {
+          return { status: "superseded", retainedSessionId: persisted.sessionId, diagnostics: [] };
+        }
         if (fingerprint !== null) {
           storeTouchedSourceFingerprint(this.#database, persisted, fingerprint);
           clearSourceFailureDiagnostics(this.#database, source.path);
@@ -641,21 +764,46 @@ export class SessionCacheUpdater {
       }
       if (
         context.force &&
+        dependenciesValid &&
         live !== undefined &&
+        live.fingerprint.sha256 === validated.generation.encodedSha256 &&
         live.fingerprint.size === observed.size &&
         live.fingerprint.mtimeMs === observed.mtimeMs &&
         sameIdentity(live.identity, observed.identity)
       ) {
+        live.generation = { ...validated.generation, dependencies: live.dependencies ?? [] };
         return this.#normalizeAndStore(source, live, "memory", context);
       }
       const canAppend =
         live !== undefined &&
+        (live.dependencies?.length ?? 0) === 0 &&
+        live.rolloutRef?.subagentHistoryStartOrdinal == null &&
         live.fingerprint.parserVersion === this.#parserVersion &&
         observed.size > live.fingerprint.size &&
         sameIdentity(live.identity, observed.identity);
-      const candidate = canAppend
+      let candidate = canAppend
         ? await this.#readAppend(source, live)
         : await this.#readFull(source);
+      if (
+        candidate !== null &&
+        candidate.fingerprint.sha256 !== validated.generation.encodedSha256 &&
+        candidate.mode === "append"
+      ) {
+        candidate = await this.#readFull(source);
+      }
+      if (!this.#fence.isCurrent(jobKey, jobToken)) {
+        return {
+          status: "superseded",
+          retainedSessionId: persisted?.sessionId ?? null,
+          diagnostics: [],
+        };
+      }
+      if (
+        candidate !== null &&
+        candidate.fingerprint.sha256 !== validated.generation.encodedSha256
+      ) {
+        candidate = null;
+      }
       if (candidate === null) {
         const diagnostics = [changedDuringRead(source.path)];
         replaceSourceFailureDiagnostics(this.#database, source.path, diagnostics);
@@ -665,8 +813,22 @@ export class SessionCacheUpdater {
           diagnostics,
         };
       }
+      candidate.generation = {
+        ...(candidate.generation ?? validated.generation),
+        semanticEpoch: validated.generation.semanticEpoch,
+        physicalRolloutId:
+          candidate.rolloutRef?.physicalRolloutId ?? validated.generation.physicalRolloutId,
+        dependencies: candidate.dependencies ?? [],
+      };
       return this.#normalizeAndStore(source, candidate, candidate.mode, context);
     } catch (error) {
+      if (!this.#fence.isCurrent(jobKey, jobToken)) {
+        return {
+          status: "superseded",
+          retainedSessionId: persisted?.sessionId ?? null,
+          diagnostics: [],
+        };
+      }
       this.#liveSources.delete(source.path);
       const diagnostics = [cacheFailure(source.path, error)];
       replaceSourceFailureDiagnostics(this.#database, source.path, diagnostics);
@@ -691,6 +853,7 @@ export class SessionCacheUpdater {
   }
 
   clear(): void {
+    this.#fence.clear();
     this.#liveSources.clear();
   }
 }

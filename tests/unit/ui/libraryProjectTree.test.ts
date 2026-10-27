@@ -83,6 +83,58 @@ afterEach(() => {
 });
 
 describe("project and preparation library tree", () => {
+  it("renders saved empty projects first, populated custom sections once, and projectless Recents last", () => {
+    stubWorkspaceGlobals(vi.fn());
+    const workspace = createLibraryWorkspace();
+    workspace.projects.value = [
+      {
+        id: "saved",
+        name: "Saved empty",
+        source: "codex",
+        hint: null,
+        activeCount: 0,
+        archivedCount: 0,
+        sidebar: { kind: "project", sectionId: null, sectionName: null },
+      },
+      {
+        id: "section",
+        name: "Review",
+        source: "none",
+        hint: null,
+        activeCount: 1,
+        archivedCount: 0,
+        sidebar: { kind: "section", sectionId: "section", sectionName: "Review" },
+      },
+      {
+        id: "in-section",
+        name: "Section project",
+        source: "codex",
+        hint: null,
+        activeCount: 0,
+        archivedCount: 0,
+        sidebar: { kind: "project", sectionId: "section", sectionName: "Review" },
+      },
+      {
+        id: "none",
+        name: "Recents",
+        source: "none",
+        hint: null,
+        activeCount: 1,
+        archivedCount: 0,
+        sidebar: { kind: "recents", sectionId: null, sectionName: null },
+      },
+    ];
+    const wrapper = mountWithWorkspace(workspace, () => h(LibraryProjectTree));
+    expect(wrapper.findAll(".library-project-folder__label").map((label) => label.text())).toEqual([
+      "Saved empty",
+      "Chats",
+      "Section project",
+      "Recents",
+    ]);
+    expect(wrapper.findAll('[aria-label="Review"]')).toHaveLength(1);
+    expect(wrapper.findAll("h3").map((heading) => heading.text())).toEqual(["Review"]);
+    wrapper.unmount();
+  });
   it("pages 20 roots per project and loads nested subagents only from their parent disclosure", async () => {
     const roots = Array.from({ length: 21 }, (_, index) =>
       item(`root-${index}`, index === 0 ? { childCount: 1 } : {}),

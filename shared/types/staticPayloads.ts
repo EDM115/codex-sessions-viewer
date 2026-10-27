@@ -1,7 +1,7 @@
 import * as z from "zod";
 
 import { jsonValueSchema, turnNavigatorItemSchema } from "./conversation.ts";
-import { conversationProjectSchema } from "./library.ts";
+import { conversationProjectSchema, threadClassificationSchema } from "./library.ts";
 import { inspectorRecordSchema, type InspectorRecord } from "./repository.ts";
 
 export const compactInspectorRecordSchema = inspectorRecordSchema.omit({ rawRecords: true });
@@ -13,6 +13,7 @@ export const staticLibraryPayloadSchema = z.strictObject({
     z.string(),
     z.strictObject({
       kind: z.enum(["root", "subagent"]),
+      classification: threadClassificationSchema.optional(),
       projectId: z.string().min(1),
       parentThreadId: z.string().min(1).nullable(),
       agentPath: z.string().min(1).nullable(),

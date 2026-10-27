@@ -1,4 +1,10 @@
-import { jsonValueSchema, type JsonValue } from "../../shared/types/conversation.ts";
+import { createHash } from "node:crypto";
+
+import {
+  jsonValueSchema,
+  type JsonValue,
+  type RawEventIdentity,
+} from "../../shared/types/conversation.ts";
 import {
   stableRead,
   type ExpectedSourcePrefix,
@@ -7,6 +13,12 @@ import {
 } from "./stableRead.ts";
 
 export interface JsonlRecord {
+  rangeSha256?: string;
+  identity?: RawEventIdentity;
+  ordinal?: number;
+  rawEventId?: string;
+  contextOnly?: boolean;
+  logicalOrder?: number;
   lineNumber: number;
   byteStart: number;
   byteEnd: number;
@@ -104,6 +116,9 @@ export class JsonlStreamParser {
         try {
           const value = jsonValueSchema.parse(JSON.parse(raw));
           this.#onRecord?.({
+            rangeSha256: createHash("sha256")
+              .update(combined.subarray(lineStart, newline + 1))
+              .digest("hex"),
             lineNumber: this.#state.nextLineNumber,
             byteStart,
             byteEnd,

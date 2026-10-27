@@ -8,12 +8,34 @@ import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
 import { selectSessionSources } from "../../../server/ingestion/selectSessionSources.ts";
 import {
   readSessionMetaPrefix,
+  parseSessionMetaBytes,
   type SessionMetaPrefixFile,
 } from "../../../server/ingestion/sessionMetaPrefix.ts";
+import { rawThreadMetadata } from "../../../server/metadata/rawThreadMetadata.ts";
 
 const fixtureRoot = join(process.cwd(), "tests", "fixtures", "catalog");
 
 describe("readSessionMetaPrefix", () => {
+  it.each([
+    { thread_source: 12 },
+    { ephemeral: "true" },
+    { source: 12 },
+    { source: { subAgent: { thread_spawn: { parent_thread_id: 12 } } } },
+  ])(
+    "shares malformed structural field validation with the normalized raw adapter: %j",
+    (fields) => {
+      const payload = { id: "chat", ...fields };
+      const prefix = parseSessionMetaBytes(
+        "fixture.jsonl",
+        Buffer.from(`${JSON.stringify({ type: "session_meta", payload })}\n`),
+      );
+      expect(prefix.meta).toBeNull();
+      expect(prefix.diagnostics).toEqual([
+        expect.objectContaining({ code: "source.invalid_jsonl" }),
+      ]);
+      expect(rawThreadMetadata(payload)).toMatchObject({ status: "invalid", metadata: null });
+    },
+  );
   it("reads only the bounded prefix and parses root, subagent, and guardian metadata", async () => {
     const readCalls: Array<{ offset: number; length: number; position: number }> = [];
     const openFile = async (path: string): Promise<SessionMetaPrefixFile> => {

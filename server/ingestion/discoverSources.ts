@@ -19,6 +19,8 @@ export interface DiscoveredMetadataSources {
   globalState: string | null;
   stateDatabase: string | null;
   stateWal: string | null;
+  legacyStateDatabase?: string;
+  legacyStateWal?: string;
 }
 
 export interface SourceDiscoveryResult {
@@ -72,7 +74,7 @@ async function discoverRollouts(
         return discoverRollouts(path, scope);
       }
 
-      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      if (entry.isFile() && (entry.name.endsWith(".jsonl") || entry.name.endsWith(".jsonl.zst"))) {
         return { rollouts: [{ path, scope }], diagnostics: [] };
       }
 
@@ -101,43 +103,55 @@ async function discoverMetadataFile(
   }
 }
 
-export async function discoverSources(codexHome: string): Promise<SourceDiscoveryResult> {
-  const metadataPaths = {
-    sessionIndex: join(codexHome, "session_index.jsonl"),
-    globalState: join(codexHome, ".codex-global-state.json"),
-    stateDatabase: join(codexHome, "state_5.sqlite"),
-    stateWal: join(codexHome, "state_5.sqlite-wal"),
+export async function discoverMetadataSources(
+  codexHome: string,
+): Promise<Pick<SourceDiscoveryResult, "metadata" | "diagnostics">> {
+  const paths: [keyof DiscoveredMetadataSources, string][] = [
+    ["sessionIndex", join(codexHome, "session_index.jsonl")],
+    ["globalState", join(codexHome, ".codex-global-state.json")],
+    ["stateDatabase", join(codexHome, "state_5.sqlite")],
+    ["stateWal", join(codexHome, "state_5.sqlite-wal")],
+    ["legacyStateDatabase", join(codexHome, "sqlite", "state_5.sqlite")],
+    ["legacyStateWal", join(codexHome, "sqlite", "state_5.sqlite-wal")],
+  ];
+  const files = await Promise.all(
+    paths.map(async ([key, path]) => Object.assign({ key }, await discoverMetadataFile(path))),
+  );
+  const metadata: DiscoveredMetadataSources = {
+    sessionIndex: null,
+    globalState: null,
+    stateDatabase: null,
+    stateWal: null,
   };
-  const [active, archived, sessionIndex, globalState, stateDatabase, stateWal] = await Promise.all([
+  for (const file of files) {
+    if (file.key === "legacyStateDatabase" || file.key === "legacyStateWal") {
+      if (file.path) {
+        metadata[file.key] = file.path;
+      }
+    } else {
+      metadata[file.key] = file.path;
+    }
+  }
+  return {
+    metadata,
+    diagnostics: files.flatMap((file) => (file.diagnostic ? [file.diagnostic] : [])),
+  };
+}
+
+export async function discoverSources(codexHome: string): Promise<SourceDiscoveryResult> {
+  const [active, archived, metadata] = await Promise.all([
     discoverRollouts(join(codexHome, "sessions"), "active"),
     discoverRollouts(join(codexHome, "archived_sessions"), "archived"),
-    discoverMetadataFile(metadataPaths.sessionIndex),
-    discoverMetadataFile(metadataPaths.globalState),
-    discoverMetadataFile(metadataPaths.stateDatabase),
-    discoverMetadataFile(metadataPaths.stateWal),
+    discoverMetadataSources(codexHome),
   ]);
-
   return {
     rollouts: [...active.rollouts, ...archived.rollouts].toSorted((left, right) =>
       left.path.localeCompare(right.path),
     ),
-    metadata: {
-      sessionIndex: sessionIndex.path,
-      globalState: globalState.path,
-      stateDatabase: stateDatabase.path,
-      stateWal: stateWal.path,
-    },
-    diagnostics: [
-      ...active.diagnostics,
-      ...archived.diagnostics,
-      sessionIndex.diagnostic,
-      globalState.diagnostic,
-      stateDatabase.diagnostic,
-      stateWal.diagnostic,
-    ].filter((diagnostic): diagnostic is ViewerDiagnostic => diagnostic !== null),
+    metadata: metadata.metadata,
+    diagnostics: [...active.diagnostics, ...archived.diagnostics, ...metadata.diagnostics],
   };
 }
-
 export function discoverReferencedMedia(
   activities: Iterable<ConversationActivity>,
 ): ReferencedMediaSource[] {

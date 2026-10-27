@@ -17,6 +17,7 @@ import {
   staticLibraryPayloadSchema,
   staticNavigatorPayloadSchema,
 } from "../../shared/types/staticPayloads.ts";
+import { isThreadVisible } from "../metadata/threadClassification.ts";
 import { assertSafeOutputComponent } from "./outputFiles.ts";
 
 const exportManifestSchema = z.strictObject({
@@ -229,20 +230,20 @@ function assertLibraryTopology(
     "Generated project payload does not match the public session index.",
   );
   for (const summary of sessions) {
-    if (
-      summary.models.length > 0 &&
-      summary.models.every((model) => model === "codex-auto-review")
-    ) {
+    const entry = library.entries[summary.id]!;
+    if (entry.classification !== undefined && !isThreadVisible(entry.classification)) {
       throw new Error(
-        `Auxiliary guardian session crossed the public output boundary: ${summary.id}`,
+        `Internal or unresolved thread crossed the public output boundary: ${summary.id}`,
       );
     }
-    const entry = library.entries[summary.id]!;
     if (!projectIds.has(entry.projectId)) {
       throw new Error(`Session references a missing generated project: ${summary.id}`);
     }
     if (
       entry.parentThreadId !== summary.parentThreadId ||
+      (entry.classification !== undefined &&
+        entry.kind !==
+          (entry.classification.visibility === "delegated-child" ? "subagent" : "root")) ||
       entry.kind !== (summary.parentThreadId === null ? "root" : "subagent") ||
       entry.childCount !== summary.childThreadIds.length
     ) {
@@ -252,7 +253,7 @@ function assertLibraryTopology(
     }
     if (summary.parentThreadId !== null) {
       const parent = summaries.get(summary.parentThreadId);
-      if (parent === undefined || !parent.childThreadIds.includes(summary.id)) {
+      if (parent !== undefined && !parent.childThreadIds.includes(summary.id)) {
         throw new Error(`Generated subagent is missing its parent edge: ${summary.id}`);
       }
     }

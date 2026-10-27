@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
-import { appendFile, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,12 +20,15 @@ import {
   type StableJsonlReader,
 } from "../../../server/cache/sourceManifest.ts";
 import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
+import * as lineageReader from "../../../server/ingestion/rolloutLineage.ts";
 import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
 
 const temporaryRoots: string[] = [];
 
 async function temporaryRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "codex-viewer-incremental-"));
+  const directory = join(process.cwd(), ".tmp", "task2-tests");
+  await mkdir(directory, { recursive: true });
+  const root = await mkdtemp(join(directory, "codex-viewer-incremental-"));
   temporaryRoots.push(root);
   return root;
 }
@@ -33,6 +44,238 @@ afterEach(async () => {
 });
 
 describe("incremental session cache", () => {
+  it.each(["body", "display-header", "history-base"] as const)(
+    "rejects a %s rewrite between the first current read and lineage composition",
+    async (changedPart) => {
+      const root = await temporaryRoot();
+      const path = join(root, "source.jsonl");
+      const id = "11111111-1111-4111-8111-111111111111";
+      const baseId = "22222222-2222-4222-8222-222222222222";
+      const baseHeader =
+        JSON.stringify({ type: "session_meta", payload: { id: baseId, session_id: "base-root" } }) +
+        "\n";
+      const baseText =
+        baseHeader +
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "user_message", message: "inherited base" },
+        }) +
+        "\n";
+      await mkdir(join(root, "sessions"));
+      await writeFile(
+        join(root, "sessions", `rollout-2026-10-27T10-00-00-${baseId}.jsonl`),
+        baseText,
+      );
+      const header = {
+        type: "session_meta",
+        payload: {
+          id,
+          session_id: "root-a",
+          subagent_history_start_ordinal: 3,
+          history_base: {
+            thread_id: baseId,
+            end_ordinal_exclusive: 2,
+            end_byte_offset: Buffer.byteLength(baseText),
+          },
+        },
+      };
+      const original = [
+        header,
+        { type: "event_msg", payload: { type: "user_message", message: "generation A" } },
+      ]
+        .map((value) => JSON.stringify(value) + "\n")
+        .join("");
+      const replacement =
+        changedPart === "body"
+          ? original.replace("generation A", "generation B")
+          : changedPart === "display-header"
+            ? original.replace(
+                '"subagent_history_start_ordinal":3',
+                '"subagent_history_start_ordinal":4',
+              )
+            : original
+                .replace('"end_ordinal_exclusive":2', '"end_ordinal_exclusive":1')
+                .replace(
+                  `"end_byte_offset":${Buffer.byteLength(baseText)}`,
+                  `"end_byte_offset":${Buffer.byteLength(baseHeader)}`,
+                );
+      await writeFile(path, original);
+      const database = openCacheDatabase(":memory:");
+      let release!: () => void;
+      let entered!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const paused = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let pending: Promise<unknown> | undefined;
+      try {
+        expect(
+          (await new SessionCacheUpdater(database).update({ path, scope: "active" })).status,
+        ).toBe("updated");
+        const before = getCachedSession(database, id);
+        const oldManifest = database
+          .prepare("SELECT sha256, generation_json FROM source_files WHERE path = ?")
+          .get(path);
+        const actualRead = lineageReader.readPlainRolloutLineage;
+        const spy = vi
+          .spyOn(lineageReader, "readPlainRolloutLineage")
+          .mockImplementationOnce(async (...args) => {
+            entered();
+            await gate;
+            return actualRead(...args);
+          });
+        try {
+          pending = new SessionCacheUpdater(database).update(
+            { path, scope: "active" },
+            { force: true },
+          );
+          await paused;
+          await writeFile(path, replacement);
+          release();
+          expect(await pending).toMatchObject({ status: "failed", retainedSessionId: id });
+          expect(getCachedSession(database, id)).toEqual(before);
+          expect(
+            database
+              .prepare("SELECT sha256, generation_json FROM source_files WHERE path = ?")
+              .get(path),
+          ).toEqual(oldManifest);
+        } finally {
+          release();
+          await pending;
+          spy.mockRestore();
+        }
+        const updated = await new SessionCacheUpdater(database).update({ path, scope: "active" });
+        expect(updated.status).toBe("updated");
+        expect(
+          database.prepare("SELECT sha256 FROM source_files WHERE path = ?").get(path)?.["sha256"],
+        ).toBe(createHash("sha256").update(replacement).digest("hex"));
+      } finally {
+        release();
+        database.close();
+      }
+    },
+  );
+  it("rejects a late worker across updater instances without overwriting the newer generation", async () => {
+    const root = await temporaryRoot();
+    const path = join(root, "source.jsonl");
+    const original = await fixture("modern.jsonl");
+    await writeFile(path, original);
+    const date = (await stat(path)).mtime;
+    const database = openCacheDatabase(":memory:");
+    let unblock!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const reading = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const slow = new SessionCacheUpdater(database, {
+      async readJsonl(sourcePath, options) {
+        const result = await readStableJsonl(sourcePath, options);
+        started();
+        await gate;
+        return result;
+      },
+    });
+    try {
+      const old = slow.update({ path, scope: "active" });
+      await reading;
+      await writeFile(path, original.replace("Build the parser", "Build NEW parser"));
+      await utimes(path, date, date);
+      const current = await new SessionCacheUpdater(database).update({ path, scope: "active" });
+      expect(current.status).toBe("updated");
+      unblock();
+      expect((await old).status).toBe("superseded");
+      if (current.status !== "updated") {
+        throw new Error("Expected the new generation to commit");
+      }
+      expect(getCachedSession(database, current.sessionId)?.summary.preview).toBe(
+        "Build NEW parser",
+      );
+    } finally {
+      unblock();
+      database.close();
+    }
+  });
+  it("materializes bounded ancestry and revalidates changed bases when the current file is unchanged", async () => {
+    const root = await temporaryRoot();
+    const directory = join(root, "sessions");
+    await mkdir(directory);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const physical = "22222222-2222-4222-8222-222222222222";
+    const base = join(directory, `rollout-2026-10-27T10-00-00-${id}.jsonl`);
+    const path = join(directory, `rollout-2026-10-27T10-00-01-${id}_${physical}.jsonl`);
+    const body = [
+      { type: "session_meta", payload: { id } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "shared-turn" } },
+      { type: "event_msg", payload: { type: "user_message", message: "old base prompt" } },
+    ]
+      .map((value) => JSON.stringify(value) + "\n")
+      .join("");
+    await writeFile(base, body);
+    await writeFile(
+      path,
+      [
+        {
+          type: "session_meta",
+          payload: {
+            id,
+            history_base: {
+              thread_id: id,
+              end_ordinal_exclusive: 3,
+              end_byte_offset: Buffer.byteLength(body),
+            },
+          },
+        },
+        { type: "event_msg", payload: { type: "agent_message", message: "current answer" } },
+      ]
+        .map((value) => JSON.stringify(value) + "\n")
+        .join(""),
+    );
+    const database = openCacheDatabase(":memory:");
+    try {
+      const updater = new SessionCacheUpdater(database);
+      expect((await updater.update({ path, scope: "active" })).status).toBe("updated");
+      expect(getCachedSession(database, id)?.summary.preview).toBe("old base prompt");
+      const oldRevision = getCachedSession(database, id)?.summary.revision;
+      const date = (await stat(base)).mtime;
+      await writeFile(base, body.replace("old base prompt", "new base prompt"));
+      await utimes(base, date, date);
+      expect((await updater.update({ path, scope: "active" })).status).toBe("updated");
+      expect(getCachedSession(database, id)?.summary.preview).toBe("new base prompt");
+      expect(getCachedSession(database, id)?.summary.revision).not.toBe(oldRevision);
+    } finally {
+      database.close();
+    }
+  });
+  it("invalidates a same-size rewrite with preserved timestamps even after restart", async () => {
+    const root = await temporaryRoot();
+    const path = join(root, "source.jsonl");
+    const original = await fixture("modern.jsonl");
+    const date = new Date("2026-01-01T00:00:00Z");
+    await writeFile(path, original);
+    await utimes(path, date, date);
+    const database = openCacheDatabase(":memory:");
+    try {
+      const first = await new SessionCacheUpdater(database).update({ path, scope: "active" });
+      expect(first.status).toBe("updated");
+      await writeFile(path, original.replace("Build the parser", "Build NEW parser"));
+      await utimes(path, date, date);
+      const second = await new SessionCacheUpdater(database).update({ path, scope: "active" });
+      expect(second.status).toBe("updated");
+      if (second.status !== "updated") {
+        throw new Error("Expected changed bytes to invalidate the persisted cache");
+      }
+      expect(getCachedSession(database, second.sessionId)?.summary.preview).toBe(
+        "Build NEW parser",
+      );
+    } finally {
+      database.close();
+    }
+  });
   it("drops advanced memo state after a rejected cache commit and retains the last good revision", async () => {
     const root = await temporaryRoot();
     const path = join(root, "source.jsonl");

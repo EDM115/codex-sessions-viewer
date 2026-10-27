@@ -19,9 +19,12 @@ import {
   getCachedTurnNavigator,
 } from "../cache/repositoryStore.ts";
 import { searchCachedSessions } from "../cache/searchStore.ts";
+import { cachedThreadClassification } from "../metadata/threadClassification.ts";
+import type { ApprovalEvidenceResult } from "../normalization/guardianEvidence.ts";
 import { InvalidationBus } from "./invalidationBus.ts";
 
 export interface LiveRepositoryMaterializer {
+  getApprovalEvidence?(sessionId: string): Promise<ApprovalEvidenceResult>;
   prepareSessions(ids: readonly string[]): ReturnType<ConversationRepository["prepareSessions"]>;
   ensureMaterialized(id: string): Promise<void>;
   prepareTurnChunk?(chunk: TurnChunk): Promise<TurnChunk>;
@@ -117,6 +120,32 @@ export class LiveConversationRepository implements ConversationRepository {
           parentThreadId: catalog.parentThreadId,
           childThreadIds: catalog.summary.childThreadIds,
         };
+  }
+
+  getClassification(id: string) {
+    const record = catalogSession(this.#database, id);
+    if (record === null) {
+      throw new Error("Session not found");
+    }
+    return {
+      id,
+      sourcePath: record.summary.sourcePath,
+      sourceRevision: record.sourceRevision,
+      classification: cachedThreadClassification(record.structuralEvidence, record.kind),
+      evidence: record.structuralEvidence ?? null,
+      rawStructuralEvidence:
+        this.#database
+          .prepare("SELECT structural_evidence_json FROM session_catalog WHERE id = ?")
+          .get(id)?.["structural_evidence_json"] ?? null,
+      effectiveParentThreadId: record.parentThreadId,
+    };
+  }
+
+  async getApprovalEvidence(id: string) {
+    if (this.#materializer.getApprovalEvidence === undefined) {
+      throw new Error("Approval evidence is unavailable");
+    }
+    return this.#materializer.getApprovalEvidence(id);
   }
 
   async getTurnNavigator(id: string) {

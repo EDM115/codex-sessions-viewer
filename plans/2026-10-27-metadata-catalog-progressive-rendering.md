@@ -5,8 +5,15 @@
 **Goal:** Display the complete local chat library from SQLite and JSON metadata, group actual projects above projectless Recents, and open conversations at their latest available turns with progressive history and readable native tool activity.  
 **Architecture:** Separate the metadata catalog from conversation history and presentation. Read validated viewer-owned metadata snapshots first, resolve stable thread identity and physical rollout lineage, use native SQLite history pages when their lineage and watermarks are usable, and fall back to source-safe JSONL readers and viewer-owned Zstd decoding/indexing. Render chronological windows near the bottom, prepend older windows on demand, and prepare rich content only for visible or explicitly opened content.  
 **Tech stack:** Existing Nuxt/Vue application, TypeScript, Node `node:sqlite` and `node:zlib`, the existing viewer cache, virtualizer, repository interfaces, Vitest and Playwright.  
-**Spec:** The user's 2026-10-27 request and recompression lifecycle clarification, captured in the requirements and contracts in this single document. This is a proposed implementation plan, the library and rendering changes below have not been implemented.
+**Spec:** The user's 2026-10-27 request and recompression lifecycle clarification, captured in the requirements and contracts in this single document. Execution began on 2026-10-27, implementation and review status is recorded below
 
+## Execution checkpoint (2026-10-27)
+
+Checked items record implemented foundations with focused verification, they do not certify the final integrated application. Tasks 1–4 passed independent task review, Tasks 5–12 have not started. Cross-task runtime/compressed-source gates inside Tasks 1/2 remain unchecked until their later integration tasks.  
+Task 4's three Important review findings were fixed and passed scoped re-review: mixed row/group invalidations now refresh loaded folders, separate active/archive ranks survive the compatibility adapter, partial custom Section translation preserves residual native members. There are no open Critical/Important findings from Tasks 1–4, deferred Minor findings and integrated acceptance remain below/in the handoff.  
+Completed foundations: capability-detected read-only metadata snapshots and retained source authority, stable/root/physical identity and lineage/generation primitives, shared structural visibility and conservative approval association, explicit project membership plus grouping/Sections implementation. The documentation inventory covered all 19 docs/plans files, its one new compatible child-link modifier gap remains assigned to Task 10.  
+Task 4 verification before review: 88 focused Node tests and 37 library UI tests passed. Its fixes passed 24 covering Node tests, 31 UI tests and a final affected-store rerun (9 tests), final typecheck/custom tsc and formatting passed. Initial touched lint had 21 inherited warnings, the final nine-file fix lint has zero errors and 12 warnings (eight inherited, four new test-only shadow warnings deferred as Minor debt). Tasks 1–3 reports retain their exact focused/fix commands and independent review results. The full suite, integration/performance/coverage/build/E2E acceptance and whole-branch review remain Task 12, an early full test run had 521 passes, two 5s timeouts and subsequent cleanup ENOTEMPTY (unresolved validation debt, no causal conclusion).  
+Resume at Task 5 (metadata-only catalog/LibraryEntry/runtime/sidebar), then Tasks 6–12 in order. Execution records are in .superpowers/sdd/2026-10-27-metadata-catalog-progressive-rendering/progress.md and task reports (ignored local scratch), durable resumption constraints are in THOUGHTS.md. The user requested this end-of-day stop, no Task 5 implementation was started.
 ## Global constraints
 
 - Work locally and offline at runtime, bind live serving to loopback, and preserve static export
@@ -33,7 +40,7 @@
 
 | Requirement | Concrete behavior | Owner |
 | --- | --- | --- |
-| Compressed active and archived sessions | Recognize `.jsonl.zst` and the requested `.json.zst` candidate suffix, validate the decoded rollout format, and preserve plain JSONL compatibility | Tasks 2 and 7 |
+| Compressed active and archived sessions | Recognize `.jsonl.zst` candidate suffix, validate the decoded rollout format, and preserve plain JSONL compatibility | Tasks 2 and 7 |
 | Correct ordinary conversation list | Classify metadata structurally, exclude internal helper/review/security threads from ordinary roots and search, expose delegated children through their parent | Task 3 |
 | Complete SQLite/JSON metadata use | Read capability-detected thread/project/topology/section metadata, preserve format-specific names, timestamps, membership and ordering | Tasks 1 and 4 |
 | Lightweight sidebar | Render titles and actual project groups above projectless Recents without preparing any transcript | Task 5 |
@@ -148,55 +155,55 @@ Prefer the valid plain sibling over compressed content for the same physical rol
 **Files:** Modify `server/metadata/stateSnapshot.ts`, `server/metadata/globalState.ts`, `server/metadata/sessionIndex.ts`, `server/ingestion/discoverSources.ts`, `server/ingestion/watchSources.ts`, add `server/metadata/schemaCapabilities.ts` and `server/metadata/catalogMetadata.ts`. Tests belong in `tests/unit/metadata/` and `tests/integration/source-boundary/metadata.test.ts`.  
 **Interfaces:** Produce `readCatalogMetadata(codexHome: string, snapshotRoot: string, signal?: AbortSignal): Promise<CatalogMetadataSnapshot>` with source generations/capabilities, threads, projects, ordered roots, sections, spawn/attachment edges, JSON membership/order data, snapshot freshness and diagnostics. This function must not enumerate session folders or open history bodies.
 
-- [ ] Add schema fixtures for current root state, old/minimal state, absent optional project/section tables and unknown extra columns, assert optional absence does not reject otherwise valid threads
-- [ ] Reuse the validated viewer-owned DB/WAL snapshot mechanism, introspect schema before selecting optional columns, reject moving/corrupt copies and retain a known good generation with visible freshness
-- [ ] Select current millisecond timestamps/recency, `thread_source`, source/originator, history/ephemeral fields, project IDs, agent/creator identity, preview and relationships, preserve unsupported fields for diagnostics without exposing unrelated settings in API responses
-- [ ] Read native `projects`, `project_roots`, `thread_sections`, structural spawn/attachment data, and JSON assignment/projectless/migration/order keys with independent field validation
-- [ ] Retain optional project appearance, thread descriptions, applied workspace state, PR attachment references, turn bookmarks and read receipts for selected-conversation inspection/navigation, ignore transient process registries as proof of live status and keep account/credential fields out of viewer responses
-- [ ] Treat root `state_5.sqlite` as the current authoritative catalog for this home, keep older `.codex/sqlite/` databases as explicitly detected legacy alternatives rather than unioning every historical thread table
-- [ ] Separate metadata source discovery/watch registration from rollout tree discovery, include relevant metadata WAL/rename changes and read a fresh current snapshot before declaring library readiness
-- [ ] Run `pnpm test --project node tests/unit/metadata tests/integration/source-boundary/metadata.test.ts`, expect schema evolution, race and no-source-write assertions to pass
+- [x] Add schema fixtures for current root state, old/minimal state, absent optional project/section tables and unknown extra columns, assert optional absence does not reject otherwise valid threads
+- [x] Reuse the validated viewer-owned DB/WAL snapshot mechanism, introspect schema before selecting optional columns, reject moving/corrupt copies and retain a known good generation with visible freshness
+- [x] Select current millisecond timestamps/recency, `thread_source`, source/originator, history/ephemeral fields, project IDs, agent/creator identity, preview and relationships, preserve unsupported fields for diagnostics without exposing unrelated settings in API responses
+- [x] Read native `projects`, `project_roots`, `thread_sections`, structural spawn/attachment data, and JSON assignment/projectless/migration/order keys with independent field validation
+- [x] Retain optional project appearance, thread descriptions, applied workspace state, PR attachment references, turn bookmarks and read receipts for selected-conversation inspection/navigation, ignore transient process registries as proof of live status and keep account/credential fields out of viewer responses
+- [x] Treat root `state_5.sqlite` as the current authoritative catalog for this home, keep older `.codex/sqlite/` databases as explicitly detected legacy alternatives rather than unioning every historical thread table
+- [ ] Separate metadata source discovery/watch registration from rollout tree discovery, include relevant metadata WAL/rename changes and read a fresh current snapshot before declaring library readiness (Metadata discovery/watch adapters are implemented, full runtime readiness remains Task 5)
+- [x] Run `pnpm test --project node tests/unit/metadata tests/integration/source-boundary/metadata.test.ts`, expect schema evolution, race and no-source-write assertions to pass
 
 ## Task 2: Model physical rollouts, lineage and source generations
 
 **Files:** Add `server/ingestion/rolloutIdentity.ts`, `server/ingestion/rolloutLineage.ts`, `server/ingestion/sourceGeneration.ts`, modify `server/ingestion/selectSessionSources.ts`, `server/ingestion/sessionMetaPrefix.ts`, `server/cache/sourceManifest.ts`, `shared/types/conversation.ts` and `server/cache/schema.ts`/`migrations.ts`. Tests extend `tests/unit/normalization/metadataMerge.test.ts`, `tests/unit/ingestion/sessionMetaPrefix.test.ts` and new lineage/generation suites.  
 **Interfaces:** Produce `resolveRolloutLineage(ref: RolloutRef, sources: RolloutSourceResolver, signal?: AbortSignal): Promise<ResolvedRolloutLineage>` and `validateSourceGeneration(ref: RolloutRef, previous: SourceGeneration | null, signal?: AbortSignal): Promise<ValidatedSourceGeneration>`. The resolver returns ordered physical segments with exclusive cutoffs, never just one newest file.
 
-- [ ] Add fixtures with different stable/root/physical IDs, two-UUID revert filenames, compressed/archived history bases, exact exclusive ordinal/decoded-byte boundaries, missing/cyclic bases, differing child root session IDs and a child with `subagent_history_start_ordinal` after inherited parent context
-- [ ] Resolve each historical reference by physical rollout ID, apply segment cutoffs, `subagent_history_start_ordinal` display-start bounds and override semantics, keep inherited context available for evidence/context resolution while excluding it from the child's own conversation, keep fork lineage, descendant topology and attached-thread edges distinct
-- [ ] Replace newest-file-per-thread selection with explicit representation selection per physical segment and a logical history graph, preserve diagnostics for genuinely conflicting copies of the same segment
-- [ ] Qualify raw event IDs by physical rollout and source generation/range evidence, migrate the existing `raw-${byteStart}` convention and inspector references, test two lineage segments with identical offsets/ordinals and distinct events plus native/raw deduplication by explicit correlation keys
-- [ ] Implement the recompression generation/digest contract above, separate encoded/decoded fingerprint fields and revision all dependent data by the validated source generation
-- [ ] Add equal-size/equal-mtime changed-content tests, compressed-to-plain-to-compressed same-path tests, watcher rename races, truncate/rewrite and late-worker rejection tests
-- [ ] Migrate only viewer-owned cache state, preserve old complete cache data until a valid new generation is ready, invalidate old parser-specific identity/index data without touching Codex files
-- [ ] Run the lineage/generation suites plus `pnpm test --project node tests/unit/normalization/metadataMerge.test.ts tests/unit/ingestion/sessionMetaPrefix.test.ts tests/integration/cache/incremental.test.ts`, expect exact logical history and replacement behavior
+- [x] Add fixtures with different stable/root/physical IDs, two-UUID revert filenames, compressed/archived history bases, exact exclusive ordinal/decoded-byte boundaries, missing/cyclic bases, differing child root session IDs and a child with `subagent_history_start_ordinal` after inherited parent context
+- [x] Resolve each historical reference by physical rollout ID, apply segment cutoffs, `subagent_history_start_ordinal` display-start bounds and override semantics, keep inherited context available for evidence/context resolution while excluding it from the child's own conversation, keep fork lineage, descendant topology and attached-thread edges distinct
+- [x] Replace newest-file-per-thread selection with explicit representation selection per physical segment and a logical history graph, preserve diagnostics for genuinely conflicting copies of the same segment
+- [x] Qualify raw event IDs by physical rollout and source generation/range evidence, migrate the existing `raw-${byteStart}` convention and inspector references, test two lineage segments with identical offsets/ordinals and distinct events plus native/raw deduplication by explicit correlation keys
+- [ ] Implement the recompression generation/digest contract above, separate encoded/decoded fingerprint fields and revision all dependent data by the validated source generation (Generation/digest primitives are implemented and reviewed, production decode/cache integration remains Tasks 7/8)
+- [ ] Add equal-size/equal-mtime changed-content tests, compressed-to-plain-to-compressed same-path tests, watcher rename races, truncate/rewrite and late-worker rejection tests (Plain generation/race/incarnation tests pass, actual compressed-source lifecycle remains Task 7)
+- [x] Migrate only viewer-owned cache state, preserve old complete cache data until a valid new generation is ready, invalidate old parser-specific identity/index data without touching Codex files
+- [x] Run the lineage/generation suites plus `pnpm test --project node tests/unit/normalization/metadataMerge.test.ts tests/unit/ingestion/sessionMetaPrefix.test.ts tests/integration/cache/incremental.test.ts`, expect exact logical history and replacement behavior
 
 ## Task 3: Classify visible roots, delegated children and internal threads
 
 **Files:** Modify `server/normalization/subagentTopology.ts`, `server/live/catalogBuilder.ts`, `server/cache/catalogStore.ts`, `server/cache/searchStore.ts`, `server/normalization/guardianEvidence.ts`, `shared/types/library.ts`, add `server/metadata/threadClassification.ts`. Tests extend `subagentTopology.test.ts`, `guardianEvidence.test.ts`, `catalogBuilder.test.ts` and deep-search/subagent integration suites.  
 **Interfaces:** Produce `classifyCatalogThread(thread: CatalogThreadMetadata, evidence?: ThreadStructureEvidence): ThreadClassification`, and a shared visibility predicate used by list counts, project counts, ordinary search, child discovery and export selection.
 
-- [ ] Add table-driven fixtures for `thread_source=user`, `guardian_review`, `security_scan`, internal Guardian, legacy `subagent.other=guardian`, compact/review/other helpers, spawned descendants, ephemeral/attached threads, unknown custom sources and legacy absent markers
-- [ ] Classify transport source, thread source, internal/ephemeral state and explicit relationship type separately, support rollout snake-case and native camel-case source representations in their adapters
-- [ ] Keep Guardian/security/other internal helper records out of root lists, project/Recents counts and ordinary search, keep raw evidence available through diagnostics or a directly related action
-- [ ] Show only structurally delegated descendants in the parent child panel, do not promote Guardian `other` children, forks or orphan helpers into ordinary roots because a parent is absent
-- [ ] Preserve legitimate unnamed or untitled user chats, never use title text, missing `name` or `has_user_event` as a suppression rule, retain unknown classification with an explicit diagnostic path
-- [ ] Associate native approval review metadata by `reviewId`/`targetItemId` when available, constrain any legacy Guardian action-hash fallback to declared parent/session/turn plus tool identity and timing where available, preserve unmatched or ambiguous reviews unattached, test repeated identical input across tools/turns and multiple review attempts rather than treating unique input alone as proof
-- [ ] Run the affected unit/integration suites, assert root/project/Recents/search/export counts agree and user fixtures survive all negative filters
+- [x] Add table-driven fixtures for `thread_source=user`, `guardian_review`, `security_scan`, internal Guardian, legacy `subagent.other=guardian`, compact/review/other helpers, spawned descendants, ephemeral/attached threads, unknown custom sources and legacy absent markers
+- [x] Classify transport source, thread source, internal/ephemeral state and explicit relationship type separately, support rollout snake-case and native camel-case source representations in their adapters
+- [x] Keep Guardian/security/other internal helper records out of root lists, project/Recents counts and ordinary search, keep raw evidence available through diagnostics or a directly related action
+- [x] Show only structurally delegated descendants in the parent child panel, do not promote Guardian `other` children, forks or orphan helpers into ordinary roots because a parent is absent
+- [x] Preserve legitimate unnamed or untitled user chats, never use title text, missing `name` or `has_user_event` as a suppression rule, retain unknown classification with an explicit diagnostic path
+- [x] Associate native approval review metadata by `reviewId`/`targetItemId` when available, constrain any legacy Guardian action-hash fallback to declared parent/session/turn plus tool identity and timing where available, preserve unmatched or ambiguous reviews unattached, test repeated identical input across tools/turns and multiple review attempts rather than treating unique input alone as proof
+- [x] Run the affected unit/integration suites, assert root/project/Recents/search/export counts agree and user fixtures survive all negative filters
 
 ## Task 4: Restore actual project membership, order, pins and optional Sections
 
 **Files:** Modify `shared/library/projectIdentity.ts`, `shared/types/library.ts`, `server/metadata/globalState.ts`, `server/metadata/stateSnapshot.ts`, `server/cache/catalogStore.ts`, `app/components/library/LibraryProjectTree.vue`, `LibraryProjectFolder.vue` and `app/composables/useLibraryWorkspace.ts`, add a small sidebar grouping model in `shared/library/sidebarGroups.ts`.  
 **Interfaces:** Produce `resolveThreadMembership(threadId: string, metadata: CatalogMetadataSnapshot): ResolvedThreadMembership` and `buildSidebarGroups(catalog: CatalogLibrary, preferences: SidebarPreferences): SidebarGroup[]`, preserving project and section identities independently.
 
-- [ ] Add fixtures for explicit projectless overriding cwd, valid native FK, legacy assignment remapped to a native ID, dangling migration destination, duplicate roots across two projects, Windows case/UNC paths and ordered multi-root projects
-- [ ] Apply the metadata precedence table, remove Git/cwd synthesis from the default Desktop-like sidebar, permit legacy path fallback only when supported and unambiguous, keep ambiguous rows projectless with a diagnostic
-- [ ] Display named saved project groups first, with native/JSON order and independently paginated children, followed by a `Recents` group containing only projectless visible roots
-- [ ] Preserve empty saved projects when metadata says they belong in this sidebar, count visible roots only, use a stable ID tie-break after explicit manual order or selected recency sort
-- [ ] Keep archive scope and pinned order explicit, avoid duplicate root entries across projects/Recents, the Desktop's keep-projects-in-Recents default does not override the user's requested projectless-only Recents
-- [ ] Decode observed custom-section state and native section references, render only populated, meaningful custom sections, a default empty `Pinned` section must not create extra empty UI, no Section editor is required
-- [ ] Test custom-section account/host mapping with synthetic fixtures and recovered schema, do not claim a user-customized live Section sample exists, fall back to ordinary project/Recents groups when unsupported
-- [ ] Run `pnpm test --project node tests/unit/library/projectIdentity.test.ts` and the UI library sidebar/project tree suites, expect exact group order, no synthetic cwd groups and no duplicate rows
+- [x] Add fixtures for explicit projectless overriding cwd, valid native FK, legacy assignment remapped to a native ID, dangling migration destination, duplicate roots across two projects, Windows case/UNC paths and ordered multi-root projects
+- [x] Apply the metadata precedence table, remove Git/cwd synthesis from the default Desktop-like sidebar, permit legacy path fallback only when supported and unambiguous, keep ambiguous rows projectless with a diagnostic
+- [x] Display named saved project groups first, with native/JSON order and independently paginated children, followed by a `Recents` group containing only projectless visible roots
+- [x] Preserve empty saved projects when metadata says they belong in this sidebar, count visible roots only, use a stable ID tie-break after explicit manual order or selected recency sort
+- [x] Keep archive scope and pinned order explicit, avoid duplicate root entries across projects/Recents, the Desktop's keep-projects-in-Recents default does not override the user's requested projectless-only Recents
+- [x] Decode observed custom-section state and native section references, render only populated, meaningful custom sections, a default empty `Pinned` section must not create extra empty UI, no Section editor is required
+- [x] Test custom-section account/host mapping with synthetic fixtures and recovered schema, do not claim a user-customized live Section sample exists, fall back to ordinary project/Recents groups when unsupported
+- [x] Run `pnpm test --project node tests/unit/library/projectIdentity.test.ts` and the UI library sidebar/project tree suites, expect exact group order, no synthetic cwd groups and no duplicate rows
 
 ## Task 5: Publish a metadata-only catalog and lightweight sidebar
 
@@ -234,8 +241,8 @@ Prefer the valid plain sibling over compressed content for the same physical rol
 **Files:** Add `server/ingestion/rolloutStream.ts`, `server/ingestion/zstdRollout.ts`, `server/ingestion/reverseJsonl.ts`, `server/history/rolloutHistoryReader.ts`, modify `server/ingestion/jsonlStream.ts`, `stableRead.ts`, `discoverSources.ts`, `watchSources.ts`, `server/cache/sourceManifest.ts` and `server/normalization/turnAssembler.ts`. Tests extend source boundary, JSONL, stable race and normalization suites.  
 **Interfaces:** `openRollout(ref: RolloutRef, signal?: AbortSignal): Promise<SeekableRollout>` exposes decoded byte reads with generation evidence. `readRolloutHistoryPage(lineage: ResolvedRolloutLineage, query: HistoryPageQuery, signal?: AbortSignal): Promise<HistoryPage>` is the fallback for legacy/missing/stale native projections.
 
-- [ ] Recognize `.jsonl`, `.jsonl.zst` and `.json.zst` candidate names in active, archived, metadata-path resolution and watches, inspect decoded framing rather than treating the extension as a serialization guarantee
-- [ ] Support standard Zstd over JSONL using streaming Node decoding, validate frame completion and JSONL framing, unknown `.json.zst` JSON objects/arrays or schema bundles get an unsupported-format diagnostic instead of being parsed as a conversation by accident
+- [ ] Recognize `.jsonl` and `.jsonl.zst` candidate names in active, archived, metadata-path resolution and watches, inspect decoded framing rather than treating the extension as a serialization guarantee
+- [ ] Support standard Zstd over JSONL using streaming Node decoding, validate frame completion and JSONL framing, unknown schema bundles get an unsupported-format diagnostic instead of being parsed as a conversation by accident
 - [ ] For a compressed selected generation, decode to a viewer-owned staging file with backpressure, bounded buffers, cancellation and output/disk budgets, validate the source generation before atomic publication, then reverse-read the decoded file
 - [ ] For plain JSONL, reverse-scan decoded byte blocks to find recent complete turn boundaries, parse the selected bounded records forward, preserve UTF-8/CRLF boundaries and unfinished final records
 - [ ] Feed canonical JSONL `ItemCompleted(TurnItem)` and turn lifecycle records through the same `nativeItemAdapter` used by Task 6, a modern paginated rollout with no legacy `response_item` duplicates must render through the file fallback, mixed canonical/raw representations must not duplicate messages or tools
@@ -405,7 +412,7 @@ All 1,610 state rollout paths resolved when compressed siblings were considered 
 
 ### JSON/JSONL inventory, schemas and deliberate exclusions
 
-The filesystem observation around 08:36 UTC found 47 active plain JSONL files, 1,445 active `.jsonl.zst`, 2 archived plain JSONL and 129 archived `.jsonl.zst`: 1,623 files, of which 1,574 (approximately 97.0%) were compressed. No `.json.zst` rollout file was found. All 1,574 compressed files had standard Zstd magic. Thirty-nine bounded probes (28 compressed/11 plain) yielded 340 complete valid records, all sampled metadata declared paginated history. All 16 two-UUID filenames were probed, every one had a `history_base`, metadata identified the first UUID as stable thread identity, the suffix was a distinct physical rollout. This is format/identity evidence, not a full transcript-content audit.
+The filesystem observation around 08:36 UTC found 47 active plain JSONL files, 1,445 active `.jsonl.zst`, 2 archived plain JSONL and 129 archived `.jsonl.zst`: 1,623 files, of which 1,574 (approximately 97.0%) were compressed. All 1,574 compressed files had standard Zstd magic. Thirty-nine bounded probes (28 compressed/11 plain) yielded 340 complete valid records, all sampled metadata declared paginated history. All 16 two-UUID filenames were probed, every one had a `history_base`, metadata identified the first UUID as stable thread identity, the suffix was a distinct physical rollout. This is format/identity evidence, not a full transcript-content audit.
 
 | JSON/JSONL source | Observed schema/data | Use |
 | --- | --- | --- |
@@ -465,7 +472,6 @@ Public CLI research is pinned to [openai/codex `6fe77fc12346591b8037a8704640e401
 ### Remaining evidence limits
 
 - The native history copy was never stable across capture attempts, it is unsuitable as a ready runtime source, the plan explicitly requires a validated generation or file fallback
-- No local `.json.zst` rollout or populated custom-section example was observed, alternate suffix support needs positive format fixtures and custom sections need source-derived synthetic fixtures
 - Some native fields and Code Mode inventories are experimental/internal, absence is not proof that no tool executed, preserve raw evidence and version/capability diagnostics
 - Metadata/JSON/native history were captured at different instants, migration/assignment conflicts and counts must remain provenance-qualified
 - No redesign speedup is claimed by this research, the acceptance benchmarks measure the integrated runtime only after implementation

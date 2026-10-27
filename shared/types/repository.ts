@@ -139,6 +139,7 @@ export interface ViewerInvalidation {
   type: ViewerInvalidationType;
   ids: string[];
   revision: string;
+  groupsChanged?: boolean;
 }
 
 export interface ViewerRuntimeStatus {
@@ -295,4 +296,5 @@ export const viewerInvalidationSchema = z.strictObject({
   ]),
   ids: z.array(z.string()),
   revision: z.string().min(1),
+  groupsChanged: z.boolean().optional(),
 });

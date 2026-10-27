@@ -9,9 +9,11 @@ import {
   removeCatalogSource,
   setCatalogMaterialization,
   upsertCatalogSessions,
+  writeCatalogLibrary,
   type CatalogSessionInput,
 } from "../../../server/cache/catalogStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
+import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
 import type { ConversationSummary } from "../../../shared/types/conversation.ts";
 
 function summary(id: string, options: Partial<ConversationSummary> = {}): ConversationSummary {
@@ -73,6 +75,163 @@ function catalogInput(id: string, options: Partial<CatalogSessionInput> = {}): C
 }
 
 describe("session catalog store", () => {
+  it("carries disagreeing active and archived project recency order through the compatibility API", () => {
+    const database = openCacheDatabase(":memory:");
+    try {
+      const rows = [
+        catalogInput("aa"),
+        catalogInput("ba"),
+        catalogInput("ar", { summary: summary("ar", { scope: "archived" }) }),
+        catalogInput("br", { summary: summary("br", { scope: "archived" }) }),
+      ];
+      upsertCatalogSessions(database, rows);
+      writeCatalogLibrary(database, {
+        projects: ["a", "b"].map((id) => ({
+          id,
+          name: id,
+          rootPaths: [],
+          hostId: null,
+          source: "native",
+          position: null,
+          recencyAt: null,
+        })),
+        sections: [],
+        diagnostics: [],
+        preferences: {
+          scope: "active",
+          chatSortMode: "updated_at",
+          projectSortMode: "updated_at",
+          projectOrder: [],
+          pinnedOrder: [],
+          projectThreadOrders: {},
+        },
+        threads: rows.map((row, index) => ({
+          id: row.summary.id,
+          title: row.summary.id,
+          scope: row.summary.scope,
+          projectId: index % 2 ? "b" : "a",
+          hostId: null,
+          sectionId: null,
+          sectionPosition: null,
+          pinned: false,
+          recencyAt: [20, 10, 10, 20].at(index)!,
+          classification: classifyCatalogThread({ threadSource: "user" }),
+        })),
+      });
+      expect(
+        listCatalogProjects(database)
+          .filter((project) => project.id !== "none")
+          .map((project) => [project.id, project.sidebar?.order]),
+      ).toEqual([
+        ["a", { active: 0, archived: 1 }],
+        ["b", { active: 1, archived: 0 }],
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+  it("keeps catalog projectless, archive and pin metadata when later content normalization supplies cwd defaults", () => {
+    const database = openCacheDatabase(":memory:");
+    try {
+      upsertCatalogSessions(database, [
+        catalogInput("kept", {
+          project: { id: "none", name: "Recents", source: "none", hint: null },
+          summary: summary("kept", { scope: "archived", pinned: true, sectionName: "Review" }),
+        }),
+      ]);
+      expect(
+        markCatalogSessionReady(
+          database,
+          summary("kept", {
+            scope: "active",
+            pinned: false,
+            sectionName: null,
+            cwd: "C:/different",
+          }),
+        ),
+      ).toBe(true);
+      expect(catalogSession(database, "kept")).toMatchObject({
+        project: { id: "none" },
+        summary: { scope: "archived", pinned: true, sectionName: "Review" },
+      });
+    } finally {
+      database.close();
+    }
+  });
+  it("uses current validated structural visibility when a stored grouping projection is older", () => {
+    const database = openCacheDatabase(":memory:");
+    try {
+      upsertCatalogSessions(database, [
+        catalogInput("recovered", {
+          project: { id: "none", name: "Recents", source: "none", hint: null },
+        }),
+      ]);
+      writeCatalogLibrary(database, {
+        projects: [],
+        sections: [],
+        diagnostics: [],
+        preferences: {
+          scope: "active",
+          chatSortMode: "manual",
+          projectSortMode: "manual",
+          projectOrder: [],
+          pinnedOrder: [],
+          projectThreadOrders: {},
+        },
+        threads: [
+          {
+            id: "recovered",
+            title: "Recovered",
+            scope: "active",
+            projectId: null,
+            hostId: null,
+            sectionId: null,
+            sectionPosition: null,
+            pinned: false,
+            recencyAt: 1,
+            classification: classifyCatalogThread({ threadSource: "custom-role" }),
+          },
+        ],
+      });
+      expect(listCatalogProjects(database)).toEqual([
+        expect.objectContaining({ id: "none", activeCount: 1 }),
+      ]);
+      expect(
+        listCatalogSessions(database, { scope: "active", projectId: "none" }).items.map(
+          (item) => item.summary.id,
+        ),
+      ).toEqual(["recovered"]);
+    } finally {
+      database.close();
+    }
+  });
+  it("uses the same safe visibility fallback for missing and invalid persisted classification", () => {
+    const database = openCacheDatabase(":memory:");
+    try {
+      upsertCatalogSessions(database, [catalogInput("legacy"), catalogInput("invalid")]);
+      database
+        .prepare("UPDATE session_catalog SET structural_evidence_json = ? WHERE id = 'invalid'")
+        .run(
+          JSON.stringify({
+            version: 2,
+            origin: "rollout-prefix",
+            status: "found",
+            parentThreadIdHint: null,
+            meta: null,
+            classification: { visibility: "user-root" },
+          }),
+        );
+      expect(
+        listCatalogSessions(database, { scope: "active" }).items.map((row) => row.summary.id),
+      ).toEqual(["legacy"]);
+      expect(listCatalogProjects(database)[0]?.activeCount).toBe(1);
+      expect(catalogSession(database, "invalid")?.structuralEvidence?.classification).toMatchObject(
+        { visibility: "unresolved", reasons: ["invalid-classification-evidence"] },
+      );
+    } finally {
+      database.close();
+    }
+  });
   it("paginates root conversations by project and scope without counting children or auxiliaries", () => {
     const database = openCacheDatabase(":memory:");
     const roots = Array.from({ length: 21 }, (_, index) =>

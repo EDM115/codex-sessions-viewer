@@ -10,6 +10,7 @@ import {
   type SearchQuery,
 } from "../../shared/types/repository.ts";
 import type { RichTextDocument } from "../../shared/types/richText.ts";
+import { catalogVisibilitySql } from "../metadata/threadClassification.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 
 interface SearchColumns {
@@ -191,7 +192,11 @@ function buildFilters(
   query: SearchQuery,
   expression: string,
 ): { sql: string; values: SQLInputValue[] } {
-  const clauses = ["session_fts MATCH ?", "s.scope = ?"];
+  const clauses = [
+    "session_fts MATCH ?",
+    "s.scope = ?",
+    `NOT EXISTS (SELECT 1 FROM session_catalog c WHERE c.id = s.id AND NOT (${catalogVisibilitySql("ordinary", "c")}))`,
+  ];
   const values: SQLInputValue[] = [expression, query.scope];
   if (query.projectId !== undefined) {
     clauses.push(

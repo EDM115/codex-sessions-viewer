@@ -5,24 +5,36 @@ import {
   resolveConversationProject,
   type ResolvedConversationProject,
 } from "../../shared/library/projectIdentity.ts";
+import { buildSidebarGroups } from "../../shared/library/sidebarGroups.ts";
 import {
   conversationSummarySchema,
   type ConversationSummary,
 } from "../../shared/types/conversation.ts";
 import {
   conversationListItemSchema,
+  catalogLibrarySchema,
   conversationProjectSchema,
   materializationStateSchema,
   type ConversationListItem,
+  type CatalogLibrary,
   type ConversationProject,
   type MaterializationState,
 } from "../../shared/types/library.ts";
 import type { CursorPage, SessionListQuery } from "../../shared/types/repository.ts";
 import {
   CATALOG_EVIDENCE_VERSION,
+  parseSessionMetaBytes,
   sessionMetaEvidenceSchema,
   type SessionMetaEvidence,
 } from "../ingestion/sessionMetaPrefix.ts";
+import {
+  catalogVisibilitySql,
+  cachedThreadClassification,
+  classifyNormalizedSession,
+  classificationKind,
+  normalizedSessionMeta,
+} from "../metadata/threadClassification.ts";
+import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 import { withCacheTransaction } from "./database.ts";
 import { SEED_CATALOG_FROM_SESSIONS_SQL } from "./schema.ts";
 
@@ -108,6 +120,27 @@ function catalogRecord(row: Record<string, SQLOutputValue>): CatalogSessionRecor
   if (kind !== "root" && kind !== "subagent" && kind !== "auxiliary") {
     throw new Error("The viewer catalog contains an invalid session kind.");
   }
+  let rawEvidence: unknown = null;
+  try {
+    rawEvidence =
+      row["structural_evidence_json"] === null ? null : parsedJson(row["structural_evidence_json"]);
+  } catch {
+    rawEvidence = "invalid";
+  }
+  const evidence = sessionMetaEvidenceSchema.safeParse(rawEvidence);
+  const structuralEvidence: SessionMetaEvidence | null =
+    rawEvidence === null
+      ? null
+      : evidence.success
+        ? evidence.data
+        : {
+            version: CATALOG_EVIDENCE_VERSION,
+            origin: "rollout-prefix" as const,
+            status: "invalid" as const,
+            parentThreadIdHint: null,
+            meta: null,
+            classification: cachedThreadClassification(rawEvidence, kind),
+          };
   return {
     summary: conversationSummarySchema.parse(parsedJson(row["summary_json"])),
     kind,
@@ -129,10 +162,7 @@ function catalogRecord(row: Record<string, SQLOutputValue>): CatalogSessionRecor
     sourceInode: nullableText(row, "source_inode"),
     sourceRevision: requiredText(row, "source_revision"),
     error: nullableText(row, "error"),
-    structuralEvidence:
-      row["structural_evidence_json"] === null
-        ? null
-        : sessionMetaEvidenceSchema.parse(parsedJson(row["structural_evidence_json"])),
+    structuralEvidence,
   };
 }
 
@@ -277,6 +307,56 @@ export function listAllCatalogSessions(database: DatabaseSync): CatalogSessionRe
   return database.prepare("SELECT * FROM session_catalog ORDER BY id").all().map(catalogRecord);
 }
 
+export function writeCatalogLibrary(database: DatabaseSync, library: CatalogLibrary): boolean {
+  const validated = catalogLibrarySchema.parse(library);
+  database.exec(
+    "CREATE TABLE IF NOT EXISTS catalog_sidebar (id INTEGER PRIMARY KEY CHECK (id = 1), payload_json TEXT NOT NULL) STRICT",
+  );
+  return (
+    database
+      .prepare(
+        "INSERT INTO catalog_sidebar (id, payload_json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json WHERE catalog_sidebar.payload_json <> excluded.payload_json",
+      )
+      .run(json(validated)).changes === 1
+  );
+}
+
+function readCatalogLibrary(database: DatabaseSync): CatalogLibrary | null {
+  if (
+    !database
+      .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'catalog_sidebar'")
+      .get()
+  ) {
+    return null;
+  }
+  const row = database.prepare("SELECT payload_json FROM catalog_sidebar WHERE id = 1").get();
+  if (!row) {
+    return null;
+  }
+  const library = catalogLibrarySchema.parse(parsedJson(row["payload_json"]));
+  const current = new Map(
+    database
+      .prepare("SELECT id, structural_evidence_json, session_kind FROM session_catalog")
+      .all()
+      .map((currentRow) => [
+        requiredText(currentRow, "id"),
+        cachedThreadClassification(
+          currentRow["structural_evidence_json"] === null
+            ? null
+            : parsedJson(currentRow["structural_evidence_json"]),
+          requiredText(currentRow, "session_kind"),
+        ),
+      ]),
+  );
+  return {
+    ...library,
+    threads: library.threads.flatMap((thread) => {
+      const classification = current.get(thread.id);
+      return classification ? [{ ...thread, classification }] : [];
+    }),
+  };
+}
+
 export function seedCatalogFromNormalizedSessions(database: DatabaseSync): void {
   withCacheTransaction(database, () => database.exec(SEED_CATALOG_FROM_SESSIONS_SQL));
 }
@@ -304,18 +384,18 @@ function listConditions(query: SessionListQuery): { sql: string; values: Array<s
   // including children whose actual project, archive scope, model or tools differ.
   if (query.parentThreadId !== undefined && query.parentThreadId !== ROOT_PARENT_SENTINEL) {
     return {
-      sql: "c.session_kind = 'subagent' AND c.parent_thread_id = ?",
+      sql: `${catalogVisibilitySql("child", "c")} AND c.parent_thread_id = ?`,
       values: [query.parentThreadId],
     };
   }
-  const conditions = ["c.scope = ?", "c.session_kind <> 'auxiliary'"];
+  const conditions = ["c.scope = ?", catalogVisibilitySql("ordinary", "c")];
   const values: Array<string | number> = [query.scope];
   if (query.projectId !== undefined) {
     conditions.push("c.project_id = ?");
     values.push(query.projectId);
   }
   if (query.parentThreadId === ROOT_PARENT_SENTINEL || query.parentThreadId === undefined) {
-    conditions.push("c.session_kind = 'root'", "c.parent_thread_id IS NULL");
+    conditions.push(catalogVisibilitySql("root", "c"), "c.parent_thread_id IS NULL");
   } else {
     conditions.push("c.session_kind = 'subagent'", "c.parent_thread_id = ?");
     values.push(query.parentThreadId);
@@ -356,7 +436,22 @@ export function listCatalogSessions(
 ): CursorPage<ConversationListItem> {
   const offset = queryOffset(query.cursor);
   const limit = Math.min(Math.max(query.limit ?? 20, 1), 200);
-  const conditions = listConditions(query);
+  const library =
+    query.projectId === undefined ||
+    (query.parentThreadId !== undefined && query.parentThreadId !== ROOT_PARENT_SENTINEL)
+      ? null
+      : readCatalogLibrary(database);
+  const group = library
+    ? buildSidebarGroups(library, { ...library.preferences, scope: query.scope }).find(
+        (candidate) => candidate.id === query.projectId,
+      )
+    : null;
+  const { projectId: _projectId, ...groupQuery } = query;
+  const conditions = listConditions(library ? groupQuery : query);
+  if (library) {
+    conditions.sql += " AND c.id IN (SELECT value FROM json_each(?))";
+    conditions.values.push(json(group?.threadIds ?? []));
+  }
   const totalRow = database
     .prepare(`SELECT count(*) AS count FROM session_catalog c WHERE ${conditions.sql}`)
     .get(...conditions.values);
@@ -366,10 +461,10 @@ export function listCatalogSessions(
       SELECT c.*
       FROM session_catalog c
       WHERE ${conditions.sql}
-      ORDER BY c.updated_at DESC, c.id
+      ORDER BY ${library ? "(SELECT key FROM json_each(?) WHERE value = c.id)," : ""} c.updated_at DESC, c.id
       LIMIT ? OFFSET ?
     `)
-    .all(...conditions.values, limit, offset);
+    .all(...conditions.values, ...(library ? [json(group?.threadIds ?? [])] : []), limit, offset);
   const items = rows.map((row) => {
     const record = catalogRecord(row);
     if (record.kind === "auxiliary") {
@@ -392,6 +487,54 @@ export function listCatalogSessions(
 }
 
 export function listCatalogProjects(database: DatabaseSync): ConversationProject[] {
+  const library = readCatalogLibrary(database);
+  if (library) {
+    const active = buildSidebarGroups(library, { ...library.preferences, scope: "active" });
+    const archived = buildSidebarGroups(library, { ...library.preferences, scope: "archived" });
+    const groups = [
+      ...active.filter((group) => group.kind !== "recents"),
+      ...archived.filter(
+        (group) => group.kind !== "recents" && !active.some((other) => other.id === group.id),
+      ),
+      ...active.filter((group) => group.kind === "recents"),
+    ];
+    return groups.map((group) => {
+      const project = library.projects.find((candidate) => candidate.id === group.projectId);
+      const count = (scope: "active" | "archived", ids: string[]) => {
+        const result = database
+          .prepare(
+            `SELECT count(*) AS count FROM session_catalog WHERE scope = ? AND ${catalogVisibilitySql("root")} AND id IN (SELECT value FROM json_each(?))`,
+          )
+          .get(scope, json(ids));
+        return requiredNumber(result ?? {}, "count");
+      };
+      return conversationProjectSchema.parse({
+        id: group.id,
+        name: group.name,
+        source: group.kind === "project" ? "codex" : "none",
+        hint: project?.rootPaths[0] ?? null,
+        activeCount: count(
+          "active",
+          active.find((other) => other.id === group.id)?.threadIds ?? [],
+        ),
+        archivedCount: count(
+          "archived",
+          archived.find((other) => other.id === group.id)?.threadIds ?? [],
+        ),
+        sidebar: {
+          order: {
+            active: active.findIndex((candidate) => candidate.id === group.id),
+            archived: archived.findIndex((candidate) => candidate.id === group.id),
+          },
+          kind: group.kind,
+          sectionId: group.sectionId,
+          sectionName: group.sectionId
+            ? (library.sections.find((section) => section.id === group.sectionId)?.name ?? null)
+            : null,
+        },
+      });
+    });
+  }
   return database
     .prepare(`
       SELECT
@@ -402,7 +545,7 @@ export function listCatalogProjects(database: DatabaseSync): ConversationProject
         sum(CASE WHEN scope = 'active' THEN 1 ELSE 0 END) AS active_count,
         sum(CASE WHEN scope = 'archived' THEN 1 ELSE 0 END) AS archived_count
       FROM session_catalog
-      WHERE session_kind = 'root'
+      WHERE ${catalogVisibilitySql("root")}
       GROUP BY project_id, project_name, project_source, project_hint
       ORDER BY project_name COLLATE NOCASE, project_id
     `)
@@ -437,7 +580,7 @@ export function listCatalogChildren(
 ): CatalogSessionRecord[] {
   return database
     .prepare(
-      "SELECT * FROM session_catalog WHERE session_kind = 'subagent' AND parent_thread_id = ? ORDER BY updated_at DESC, id",
+      `SELECT * FROM session_catalog WHERE ${catalogVisibilitySql("child")} AND parent_thread_id = ? ORDER BY updated_at DESC, id`,
     )
     .all(parentThreadId)
     .map(catalogRecord);
@@ -446,6 +589,47 @@ export function listCatalogChildren(
 export function catalogSession(database: DatabaseSync, id: string): CatalogSessionRecord | null {
   const row = database.prepare("SELECT * FROM session_catalog WHERE id = ?").get(id);
   return row === undefined ? null : catalogRecord(row);
+}
+
+export function storeMaterializedClassification(
+  database: DatabaseSync,
+  session: NormalizedSession,
+): void {
+  const existing = catalogSession(database, session.summary.id);
+  if (existing === null || existing.structuralEvidence?.classification !== undefined) {
+    return;
+  }
+  const classification = classifyNormalizedSession(session);
+  const meta = parseSessionMetaBytes(
+    session.summary.sourcePath,
+    Buffer.from(
+      `${JSON.stringify({ type: "session_meta", payload: normalizedSessionMeta(session) })}\n`,
+    ),
+  ).meta;
+  const parentThreadId =
+    classification.relationship === "spawn" || classification.visibility === "internal"
+      ? classification.parentThreadId
+      : null;
+  const evidence: SessionMetaEvidence = {
+    version: CATALOG_EVIDENCE_VERSION,
+    origin: "materialized",
+    status: meta === null ? "missing" : "found",
+    parentThreadIdHint: classification.parentThreadId,
+    meta,
+    classification,
+  };
+  const summary = { ...existing.summary, parentThreadId };
+  database
+    .prepare(
+      "UPDATE session_catalog SET session_kind = ?, parent_thread_id = ?, structural_evidence_json = ?, summary_json = ? WHERE id = ?",
+    )
+    .run(
+      classificationKind(classification),
+      parentThreadId,
+      json(evidence),
+      json(summary),
+      summary.id,
+    );
 }
 
 export function setCatalogMaterialization(
@@ -482,7 +666,7 @@ export function catalogMaterializedSessionIds(database: DatabaseSync): string[] 
     .prepare(`
       SELECT id
       FROM session_catalog
-      WHERE materialization_state = 'ready' AND session_kind <> 'auxiliary'
+      WHERE materialization_state = 'ready' AND ${catalogVisibilitySql("ordinary")}
       ORDER BY id
     `)
     .all()
@@ -501,7 +685,10 @@ export function markCatalogSessionReady(
 ): boolean {
   let summary = conversationSummarySchema.parse(summaryInput);
   const existing = catalogSession(database, summary.id);
-  if (existing?.kind === "auxiliary") {
+  if (
+    existing?.kind === "auxiliary" &&
+    existing.structuralEvidence?.classification?.visibility !== "unresolved"
+  ) {
     return false;
   }
   if (existing !== null) {
@@ -562,6 +749,9 @@ export function markCatalogSessionReady(
     }
     summary = {
       ...summary,
+      scope: existing.summary.scope,
+      pinned: existing.summary.pinned,
+      sectionName: existing.summary.sectionName,
       parentThreadId: existing.parentThreadId,
       childThreadIds: existing.summary.childThreadIds,
     };
@@ -594,7 +784,7 @@ export function markCatalogSessionReady(
                 updated_at = ?, cwd = ?, git_origin_url = ?, parent_thread_id = ?,
                 child_count = ?, summary_json = ?
               WHERE id = ? AND source_revision = ? AND source_path = ?
-                AND session_kind <> 'auxiliary'
+                AND (session_kind <> 'auxiliary' OR json_extract(structural_evidence_json, '$.classification.visibility') = 'unresolved')
             `)
             .run(...values, expected.sourceRevision, expected.sourcePath);
     if (result.changes === 1 && existing.structuralEvidence?.origin === "materialized") {
@@ -618,12 +808,10 @@ export function markCatalogSessionReady(
   if (expected !== undefined) {
     return false;
   }
-  if (summary.models.length > 0 && summary.models.every((model) => model === "codex-auto-review")) {
-    return false;
-  }
+
   const parent =
     summary.parentThreadId === null ? null : catalogSession(database, summary.parentThreadId);
-  const effectiveParent = parent?.kind === "auxiliary" ? null : (parent?.summary.id ?? null);
+  const effectiveParent = summary.parentThreadId;
   const children = listCatalogChildren(database, summary.id).map(({ summary: child }) => child.id);
   summary = {
     ...summary,

@@ -6,10 +6,12 @@ import {
   conversationSummarySchema,
   conversationTurnSchema,
   jsonValueSchema,
+  rawEventIdentitySchema,
   type ConversationMessage,
   type ConversationScope,
   type ConversationTurn,
   type SourceFingerprint,
+  type SourceGeneration,
 } from "../../shared/types/conversation.ts";
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import { guardianActionHash } from "../normalization/guardianEvidence.ts";
@@ -17,11 +19,16 @@ import {
   type NormalizedRawEvent,
   type NormalizedSession,
 } from "../normalization/normalizeSession.ts";
-import { catalogSession, markCatalogSessionReady } from "./catalogStore.ts";
+import {
+  catalogSession,
+  markCatalogSessionReady,
+  storeMaterializedClassification,
+} from "./catalogStore.ts";
 import { withCacheTransaction } from "./database.ts";
 import { replaceSessionSearchRows } from "./searchStore.ts";
 
 export interface CachedSourceWrite {
+  generation?: SourceGeneration;
   fingerprint: SourceFingerprint;
   scope: ConversationScope;
   identity: { device: bigint; inode: bigint };
@@ -42,6 +49,7 @@ export type ReplaceCachedSessionResult =
 class StaleCatalogCommitError extends Error {}
 
 const rawEventSchema = z.strictObject({
+  identity: rawEventIdentitySchema.optional(),
   id: z.string().min(1),
   turnId: z.string().nullable(),
   type: z.string().min(1),
@@ -66,8 +74,8 @@ function writeSource(database: DatabaseSync, sessionId: string, source: CachedSo
     .prepare(`
       INSERT INTO source_files (
         path, session_id, scope, size, mtime_ms, device, inode, sha256, parsed_bytes,
-        parser_version, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        parser_version, updated_at, generation_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(path) DO UPDATE SET
         session_id = excluded.session_id,
         scope = excluded.scope,
@@ -78,7 +86,8 @@ function writeSource(database: DatabaseSync, sessionId: string, source: CachedSo
         sha256 = excluded.sha256,
         parsed_bytes = excluded.parsed_bytes,
         parser_version = excluded.parser_version,
-        updated_at = excluded.updated_at
+        updated_at = excluded.updated_at,
+        generation_json = excluded.generation_json
     `)
     .run(
       fingerprint.path,
@@ -92,6 +101,7 @@ function writeSource(database: DatabaseSync, sessionId: string, source: CachedSo
       fingerprint.parsedBytes,
       fingerprint.parserVersion,
       new Date().toISOString(),
+      source.generation === undefined ? null : JSON.stringify(source.generation),
     );
 }
 
@@ -328,9 +338,9 @@ function replaceChildren(
 
   const insertRawEvent = database.prepare(`
     INSERT INTO raw_events (
-      id, session_id, source_order, turn_id, type, timestamp, payload_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(session_id, id) DO UPDATE SET source_order = excluded.source_order, turn_id = excluded.turn_id, type = excluded.type, timestamp = excluded.timestamp, payload_json = excluded.payload_json
+      id, session_id, source_order, turn_id, type, timestamp, payload_json, identity_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id, id) DO UPDATE SET source_order = excluded.source_order, turn_id = excluded.turn_id, type = excluded.type, timestamp = excluded.timestamp, payload_json = excluded.payload_json, identity_json = excluded.identity_json
   `);
   const priorEvents = new Map(previous?.rawEvents.map((event) => [event.id, event]));
   session.rawEvents.forEach((event, index) => {
@@ -353,6 +363,7 @@ function replaceChildren(
       event.type,
       event.timestamp,
       json(event.payload),
+      event.identity === undefined ? null : json(event.identity),
     );
   });
   return [...changed];
@@ -395,7 +406,8 @@ export function replaceCachedSession(
         const catalog = catalogSession(database, input.session.summary.id);
         if (
           catalog === null ||
-          catalog.kind === "auxiliary" ||
+          (catalog.kind === "auxiliary" &&
+            catalog.structuralEvidence?.classification?.visibility !== "unresolved") ||
           catalog.sourceRevision !== expectedRevision ||
           catalog.summary.sourcePath !== input.source.fingerprint.path ||
           input.session.summary.sourcePath !== input.source.fingerprint.path
@@ -423,6 +435,7 @@ export function replaceCachedSession(
       if (expectedRevision !== undefined && !markedReady) {
         throw new StaleCatalogCommitError();
       }
+      storeMaterializedClassification(database, input.session);
       const changedTurnIds = replaceChildren(database, input.session, reusablePrevious);
       writeDiagnostics(database, input.session.summary.id, input.diagnostics);
       replaceSessionSearchRows(
@@ -521,7 +534,7 @@ export function getCachedSession(
       ? []
       : database
           .prepare(`
-            SELECT id, turn_id, type, timestamp, payload_json
+            SELECT id, turn_id, type, timestamp, payload_json, identity_json
             FROM raw_events
             WHERE session_id = ?
             ORDER BY source_order
@@ -534,6 +547,9 @@ export function getCachedSession(
               type: requiredText(row, "type"),
               timestamp: row["timestamp"],
               payload: parsedJson(row["payload_json"]),
+              ...(row["identity_json"] == null
+                ? {}
+                : { identity: parsedJson(row["identity_json"]) }),
             }),
           );
   return { summary, turns, rawEvents };

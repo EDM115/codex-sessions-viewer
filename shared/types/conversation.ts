@@ -25,6 +25,92 @@ export interface SourceFingerprint {
   parserVersion: number;
 }
 
+export const rolloutHistoryBaseSchema = z.strictObject({
+  physicalRolloutId: z.string().min(1),
+  endOrdinalExclusive: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER - 1),
+  endByteOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+});
+export type RolloutHistoryBase = z.infer<typeof rolloutHistoryBaseSchema>;
+export const rolloutRefSchema = z.strictObject({
+  codexHomeId: z.string().min(1),
+  stableThreadId: z.string().min(1),
+  physicalRolloutId: z.string().nullable(),
+  rootSessionId: z.string().nullable(),
+  sourcePath: z.string().min(1),
+  representation: z.enum(["plain-jsonl", "zstd-jsonl", "unsupported"]),
+  historyBase: rolloutHistoryBaseSchema.nullable(),
+  subagentHistoryStartOrdinal: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER)
+    .nullable(),
+  forkedFromId: z.string().nullable().optional(),
+  forkedFromOrdinalExclusive: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(Number.MAX_SAFE_INTEGER)
+    .nullable()
+    .optional(),
+  parentThreadId: z.string().nullable().optional(),
+  attachedThread: z
+    .lazy(() => jsonValueSchema)
+    .nullable()
+    .optional(),
+  historyMode: z.string().nullable().optional(),
+});
+export type RolloutRef = z.infer<typeof rolloutRefSchema>;
+
+const generationSha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
+export const verifiedDecodedRangeSchema = z
+  .strictObject({
+    start: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    endExclusive: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    sha256: generationSha256Schema,
+  })
+  .refine((range) => range.endExclusive >= range.start);
+export const sourceGenerationSchema = z.strictObject({
+  codexHomeId: z.string().min(1),
+  physicalRolloutId: z.string().min(1),
+  sourcePath: z.string().min(1),
+  representation: z.enum(["plain-jsonl", "zstd-jsonl", "unsupported"]),
+  observation: z.strictObject({
+    device: z.string(),
+    inode: z.string(),
+    encodedSize: z.number().int().nonnegative(),
+    mtimeNs: z.string(),
+    ctimeNs: z.string(),
+  }),
+  encodedSha256: generationSha256Schema.nullable(),
+  decodedSha256: generationSha256Schema.nullable(),
+  decodedSize: z.number().int().nonnegative().nullable(),
+  validationScope: z.enum(["selected-range", "full-stream"]),
+  verifiedDecodedRanges: z.array(verifiedDecodedRangeSchema),
+  parserVersion: z.number().int().positive(),
+  decoderVersion: z.string().min(1),
+  token: z.string().min(1),
+  semanticEpoch: z.string().nullable().optional(),
+  dependencies: z
+    .array(z.strictObject({ ref: rolloutRefSchema, encodedSha256: generationSha256Schema }))
+    .optional(),
+});
+export type SourceGeneration = z.infer<typeof sourceGenerationSchema>;
+export const rawEventIdentitySchema = z.strictObject({
+  codexHomeId: z.string().min(1),
+  physicalRolloutId: z.string().min(1),
+  ordinal: z.number().int().nonnegative().nullable(),
+  decodedByteStart: z.number().int().nonnegative(),
+  decodedByteEnd: z.number().int().nonnegative(),
+  rangeSha256: generationSha256Schema,
+  correlationKeys: z.array(z.string()),
+});
+export type RawEventIdentity = z.infer<typeof rawEventIdentitySchema>;
+
 export interface ConversationSummary {
   id: string;
   title: string;
@@ -96,11 +182,16 @@ export interface ReasoningActivity extends ConversationActivityBase {
 
 export interface GuardianApprovalEvidence {
   reviewedAction: JsonValue;
-  outcome: "allow" | "deny";
+  outcome: "allow" | "deny" | null;
   riskLevel: string;
   userAuthorization: string | null;
   rationale: string;
   reviewedAt: string | null;
+  reviewId?: string | null;
+  targetItemId?: string | null;
+  targetTurnId?: string | null;
+  status?: string | null;
+  rawEventIds?: string[];
 }
 
 export interface ToolActivity extends ConversationActivityBase {
@@ -116,6 +207,9 @@ export interface ToolActivity extends ConversationActivityBase {
   output: JsonValue;
   error: string | null;
   approval?: GuardianApprovalEvidence | null;
+  approvalAttempts?: GuardianApprovalEvidence[];
+  nativeItemId?: string | null;
+  approvalReviewId?: string | null;
 }
 
 export interface WebSearchActivity extends ConversationActivityBase {
@@ -423,11 +517,16 @@ const activityBaseShape = {
 
 export const guardianApprovalEvidenceSchema = z.strictObject({
   reviewedAction: jsonValueSchema,
-  outcome: z.enum(["allow", "deny"]),
+  outcome: z.enum(["allow", "deny"]).nullable(),
   riskLevel: z.string().min(1),
   userAuthorization: z.string().min(1).nullable(),
   rationale: z.string().min(1),
   reviewedAt: nullableTimestampSchema,
+  reviewId: z.string().nullable().optional(),
+  targetItemId: z.string().nullable().optional(),
+  targetTurnId: z.string().nullable().optional(),
+  status: z.string().nullable().optional(),
+  rawEventIds: z.array(z.string()).optional(),
 });
 
 export const conversationActivitySchema = z.discriminatedUnion("kind", [
@@ -452,6 +551,9 @@ export const conversationActivitySchema = z.discriminatedUnion("kind", [
     output: jsonValueSchema,
     error: z.string().nullable(),
     approval: guardianApprovalEvidenceSchema.nullable().optional(),
+    approvalAttempts: z.array(guardianApprovalEvidenceSchema).optional(),
+    nativeItemId: z.string().nullable().optional(),
+    approvalReviewId: z.string().nullable().optional(),
   }),
   z.strictObject({
     ...activityBaseShape,

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import * as z from "zod";
 
 import { isoTimestampSchema } from "../../shared/types/conversation.ts";
@@ -20,6 +22,7 @@ export interface SessionIndexResult {
   entries: SessionIndexEntry[];
   pending: Buffer;
   diagnostics: ViewerDiagnostic[];
+  generation?: string;
 }
 
 function invalidRecord(path: string, line: number): ViewerDiagnostic {
@@ -93,5 +96,6 @@ export async function readSessionIndex(path: string): Promise<SessionIndexResult
     entries: [...latest.values()].toSorted((left, right) => left.id.localeCompare(right.id)),
     pending,
     diagnostics,
+    generation: createHash("sha256").update(stable.bytes).digest("hex"),
   };
 }

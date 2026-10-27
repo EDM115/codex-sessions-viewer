@@ -24,7 +24,7 @@ function activity(overrides: Partial<SubagentActivity> = {}): SubagentActivity {
 }
 
 describe("subagent topology", () => {
-  it("keeps rollout parent authority, treats SQLite source as optional fallback and does not guess from bare hints", () => {
+  it("retains independent current source declarations, rejects parent conflicts and does not guess from bare hints", () => {
     const fallbackSource = JSON.stringify({
       subagent: { thread_spawn: { parent_thread_id: "stale-parent", agent_path: "/root/stale" } },
     });
@@ -38,10 +38,14 @@ describe("subagent topology", () => {
         parentThreadId: "rollout-parent",
         fallbackSource,
       }),
-    ).toMatchObject({ kind: "subagent", parentThreadId: "rollout-parent" });
-    expect(classifySessionStructure({ source: "cli", fallbackSource })).toMatchObject({
-      kind: "root",
+    ).toMatchObject({
+      kind: "auxiliary",
       parentThreadId: null,
+      reasons: ["conflicting-parent-evidence"],
+    });
+    expect(classifySessionStructure({ source: "cli", fallbackSource })).toMatchObject({
+      kind: "subagent",
+      parentThreadId: "stale-parent",
     });
     expect(
       classifySessionStructure({ source: null, parentThreadIdHint: "hint-only" }),
@@ -52,13 +56,26 @@ describe("subagent topology", () => {
         parentThreadIdHint: "hint-only",
         threadModel: "codex-auto-review",
       }),
-    ).toMatchObject({ kind: "auxiliary", parentThreadId: "hint-only" });
+    ).toMatchObject({ kind: "root", parentThreadId: null });
     expect(
       classifySessionStructure({
         source: null,
         fallbackSource: JSON.stringify({ subagent: { other: "guardian" } }),
       }),
     ).toMatchObject({ kind: "auxiliary" });
+  });
+
+  it.each([
+    [{ source: "cli", threadSource: "user" }, "root"],
+    [{ source: "appServer", threadSource: "security_scan" }, "auxiliary"],
+    [{ source: "cli", threadSource: "guardian_review" }, "auxiliary"],
+    [{ source: { subAgent: { threadSpawn: { parentThreadId: "missing" } } } }, "subagent"],
+    [{ source: { subagent: "compact" } }, "auxiliary"],
+    [{ source: { subagent: "review" } }, "auxiliary"],
+    [{ source: { subagent: { other: "custom-helper" } } }, "auxiliary"],
+    [{ source: "cli", ephemeral: true }, "auxiliary"],
+  ] as const)("classifies structural markers %j", (input, kind) => {
+    expect(classifySessionStructure(input)).toMatchObject({ kind });
   });
 
   it("resolves nested ancestry and rejects cyclic breadcrumb chains", () => {

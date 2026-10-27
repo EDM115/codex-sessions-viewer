@@ -1,4 +1,11 @@
-export const CACHE_SCHEMA_VERSION = 3;
+export const CACHE_SCHEMA_VERSION = 4;
+export const SOURCE_GENERATION_SCHEMA_SQL = `
+  ALTER TABLE source_files ADD COLUMN generation_json TEXT;
+  ALTER TABLE raw_events ADD COLUMN identity_json TEXT;
+  DELETE FROM session_fts;
+  UPDATE turns SET rich_revision = NULL;
+  UPDATE session_catalog SET materialization_state = 'cold' WHERE materialization_state = 'ready';
+`;
 
 export const STRUCTURAL_EVIDENCE_SCHEMA_SQL = `
   ALTER TABLE session_catalog ADD COLUMN structural_evidence_json TEXT;

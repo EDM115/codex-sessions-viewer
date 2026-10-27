@@ -6,7 +6,7 @@ import {
   type JsonValue,
   type ToolActivity,
 } from "../../shared/types/conversation.ts";
-import { payloadObject, type CodexEvent, type TurnScopedEvent } from "./eventSchema.ts";
+import { payloadObject, eventOrder, type CodexEvent, type TurnScopedEvent } from "./eventSchema.ts";
 import { deriveNestedExecActivities } from "./nestedExec.ts";
 
 interface ToolPairingResult {
@@ -157,7 +157,7 @@ function createPair(key: string, scoped: TurnScopedEvent, callId: string | null)
     outputEvent: null,
     explicitDurationMs: null,
     rawEventIds: [],
-    sortOffset: scoped.event.byteStart,
+    sortOffset: eventOrder(scoped.event),
   };
 }
 
@@ -209,7 +209,7 @@ export function pairToolCalls(
     const pair = pairs.get(key) ?? createPair(key, scoped, callId);
     pairs.set(key, pair);
     pair.rawEventIds.push(event.id);
-    pair.sortOffset = Math.min(pair.sortOffset, event.byteStart);
+    pair.sortOffset = Math.min(pair.sortOffset, eventOrder(event));
     consumedEventIds.push(event.id);
 
     if (isCall) {

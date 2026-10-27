@@ -8,11 +8,15 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import {
+  catalogSession,
+  listCatalogProjects,
+  listCatalogSessions,
+} from "../../../server/cache/catalogStore.ts";
 import { getCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import { discoverSources } from "../../../server/ingestion/discoverSources.ts";
@@ -35,7 +39,9 @@ async function createCodexHome(): Promise<{
   rollout: string;
   cacheDir: string;
 }> {
-  const root = await mkdtemp(join(tmpdir(), "codex-viewer-live-"));
+  const directory = join(process.cwd(), ".tmp", "task2-tests");
+  await mkdir(directory, { recursive: true });
+  const root = await mkdtemp(join(directory, "codex-viewer-live-"));
   temporaryRoots.push(root);
   const codexHome = join(root, "codex-home");
   const rollout = join(codexHome, "sessions", "2026", "08", "14", "modern.jsonl");
@@ -54,6 +60,173 @@ afterEach(async () => {
 });
 
 describe("live reconciliation", () => {
+  it("publishes grouping changes alongside a renamed row and another folder's same-count manual order", async () => {
+    const { codexHome, cacheDir } = await createCodexHome();
+    const database = openCacheDatabase(":memory:");
+    const bus = new InvalidationBus();
+    const events: ViewerInvalidation[] = [];
+    const globalPath = join(codexHome, ".codex-global-state.json");
+    const indexPath = join(codexHome, "session_index.jsonl");
+    const state = {
+      "local-projects": { b: { id: "b", name: "B", rootPaths: [] } },
+      "thread-project-assignments": {
+        "row-b": { projectKind: "local", projectId: "b" },
+        "row-c": { projectKind: "local", projectId: "b" },
+      },
+      "sidebar-project-thread-orders": { b: { threadIds: ["row-b", "row-c"] } },
+      "electron-persisted-atom-state": {
+        "flat-project-sidebar-preferences-v1": { chatSortMode: "manual" },
+      },
+    };
+    await Promise.all(
+      ["row-b", "row-c"].map((id) =>
+        writeFile(
+          join(codexHome, "sessions", `${id}.jsonl`),
+          JSON.stringify({
+            type: "session_meta",
+            payload: { id, thread_source: "user", source: "cli" },
+          }) + "\n",
+        ),
+      ),
+    );
+    await writeFile(globalPath, JSON.stringify(state));
+    let watcherOptions!: WatchSourcesOptions;
+    const reconciler = new LiveReconciler({
+      codexHome,
+      cacheDir,
+      database,
+      bus,
+      watch(options) {
+        watcherOptions = options;
+        return { ready: new Promise<void>(() => undefined), close: async () => undefined };
+      },
+    });
+    try {
+      await reconciler.start();
+      bus.subscribe((event) => events.push(event));
+      const id = "11111111-1111-4111-8111-111111111111";
+      expect(
+        listCatalogSessions(database, { scope: "active", projectId: "b" }).items.map(
+          (item) => item.summary.id,
+        ),
+      ).toEqual(["row-b", "row-c"]);
+      state["sidebar-project-thread-orders"].b.threadIds = ["row-c", "row-b"];
+      await writeFile(globalPath, JSON.stringify(state));
+      await writeFile(
+        indexPath,
+        JSON.stringify({ id, thread_name: "Renamed A", updated_at: "2026-10-27T00:00:00.000Z" }) +
+          "\n",
+      );
+      await watcherOptions.onBatch({
+        observedAt: "2026-10-27T00:00:00.000Z",
+        changes: [
+          { source: "global-state", path: globalPath, kind: "changed" },
+          { source: "session-index", path: indexPath, kind: "added" },
+        ],
+      });
+      await vi.waitFor(() =>
+        expect(events).toContainEqual({
+          type: "library.updated",
+          ids: [id],
+          groupsChanged: true,
+          revision: expect.any(String),
+        }),
+      );
+      expect(catalogSession(database, id)?.summary.title).toBe("Renamed A");
+      expect(
+        listCatalogSessions(database, { scope: "active", projectId: "b" }).items.map(
+          (item) => item.summary.id,
+        ),
+      ).toEqual(["row-c", "row-b"]);
+    } finally {
+      await reconciler.close();
+      database.close();
+    }
+  });
+  it("announces saved-project-only changes and stays quiet when grouping metadata is unchanged", async () => {
+    const { codexHome, cacheDir } = await createCodexHome();
+    const database = openCacheDatabase(":memory:");
+    const bus = new InvalidationBus();
+    const events: ViewerInvalidation[] = [];
+    let watcherOptions!: WatchSourcesOptions;
+    const reconciler = new LiveReconciler({
+      codexHome,
+      cacheDir,
+      database,
+      bus,
+      watch(options) {
+        watcherOptions = options;
+        return { ready: new Promise<void>(() => undefined), close: async () => undefined };
+      },
+    });
+    try {
+      await reconciler.start();
+      bus.subscribe((event) => events.push(event));
+      const path = join(codexHome, ".codex-global-state.json");
+      await writeFile(
+        path,
+        JSON.stringify({
+          "local-projects": { saved: { id: "saved", name: "Empty saved", rootPaths: [] } },
+        }),
+      );
+      await watcherOptions.onBatch({
+        observedAt: "2026-10-27T00:00:00.000Z",
+        changes: [{ source: "global-state", path, kind: "added" }],
+      });
+      await vi.waitFor(() =>
+        expect(events).toContainEqual({
+          type: "library.updated",
+          ids: [],
+          groupsChanged: true,
+          revision: expect.any(String),
+        }),
+      );
+      expect(listCatalogProjects(database)).toContainEqual(
+        expect.objectContaining({
+          id: "saved",
+          name: "Empty saved",
+          activeCount: 0,
+          archivedCount: 0,
+        }),
+      );
+      events.splice(0);
+      const before = database.prepare("SELECT total_changes() AS count").get()?.["count"];
+      await watcherOptions.onBatch({
+        observedAt: "2026-10-27T00:00:01.000Z",
+        changes: [{ source: "global-state", path, kind: "changed" }],
+      });
+      await reconciler.reconcileNow("unchanged-grouping");
+      expect(database.prepare("SELECT total_changes() AS count").get()?.["count"]).toBe(before);
+      expect(events.filter((event) => event.type === "library.updated")).toEqual([]);
+    } finally {
+      await reconciler.close();
+      database.close();
+    }
+  });
+  it("revalidates a persisted ready conversation on open after a preserved-stat rewrite", async () => {
+    const { codexHome, rollout, cacheDir } = await createCodexHome();
+    const database = openCacheDatabase(":memory:");
+    const reconciler = new LiveReconciler({
+      codexHome,
+      cacheDir,
+      database,
+      bus: new InvalidationBus(),
+      watch: () => ({ ready: Promise.resolve(), close: async () => undefined }),
+    });
+    try {
+      await reconciler.start();
+      const id = "11111111-1111-4111-8111-111111111111";
+      await reconciler.ensureMaterialized(id);
+      const before = await stat(rollout);
+      await writeFile(rollout, (await fixture()).replace("Build the parser", "Build NEW parser"));
+      await utimes(rollout, before.atime, before.mtime);
+      await reconciler.ensureMaterialized(id);
+      expect(getCachedSession(database, id)?.summary.preview).toBe("Build NEW parser");
+    } finally {
+      await reconciler.close();
+      database.close();
+    }
+  });
   it("coalesces repeated pending source changes to their latest observation", () => {
     expect(
       coalesceSourceWatchBatches([
@@ -274,8 +447,17 @@ describe("live reconciliation", () => {
       expect(readPrefix).toHaveBeenCalledTimes(2);
       expect(readIndex).toHaveBeenCalledOnce();
       expect(events).toEqual([
-        { type: "library.updated", ids: [id], revision: expect.any(String) },
+        { type: "library.updated", ids: [id], groupsChanged: true, revision: expect.any(String) },
+        {
+          type: "diagnostic.updated",
+          ids: ["metadata.snapshot_invalid:viewer"],
+          revision: expect.any(String),
+        },
       ]);
+      expect(catalogSession(database, id)?.structuralEvidence?.classification).toMatchObject({
+        visibility: "delegated-child",
+        parentThreadId: "00000000-0000-4000-8000-000000000001",
+      });
 
       events.splice(0);
       await rm(rollout);
@@ -285,14 +467,26 @@ describe("live reconciliation", () => {
       });
       await vi.waitFor(() => {
         expect(database.prepare("SELECT count(*) AS count FROM session_catalog").get()).toEqual({
-          count: 0,
+          count: 1,
+        });
+        expect(database.prepare("SELECT error FROM session_catalog WHERE id = ?").get(id)).toEqual({
+          error: "Rollout source is temporarily unavailable, awaiting a stable representation.",
         });
       });
       expect(discover).toHaveBeenCalledTimes(discoveryCallsBeforeBatches);
       expect(readPrefix).toHaveBeenCalledTimes(2);
       expect(events).toEqual([
         { type: "library.updated", ids: [id], revision: expect.any(String) },
+        {
+          type: "diagnostic.updated",
+          ids: ["metadata.snapshot_invalid:viewer"],
+          revision: expect.any(String),
+        },
       ]);
+      expect(catalogSession(database, id)?.structuralEvidence?.classification).toMatchObject({
+        visibility: "delegated-child",
+        parentThreadId: "00000000-0000-4000-8000-000000000001",
+      });
     } finally {
       await reconciler.close();
       database.close();

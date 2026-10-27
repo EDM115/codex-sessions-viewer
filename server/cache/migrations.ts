@@ -5,6 +5,7 @@ import {
   CATALOG_CACHE_SCHEMA_SQL,
   INITIAL_CACHE_SCHEMA_SQL,
   STRUCTURAL_EVIDENCE_SCHEMA_SQL,
+  SOURCE_GENERATION_SCHEMA_SQL,
 } from "./schema.ts";
 
 interface CacheMigration {
@@ -16,6 +17,7 @@ const migrations: readonly CacheMigration[] = [
   { version: 1, sql: INITIAL_CACHE_SCHEMA_SQL },
   { version: 2, sql: CATALOG_CACHE_SCHEMA_SQL },
   { version: 3, sql: STRUCTURAL_EVIDENCE_SCHEMA_SQL },
+  { version: 4, sql: SOURCE_GENERATION_SCHEMA_SQL },
 ];
 
 function userVersion(database: DatabaseSync): number {

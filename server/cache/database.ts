@@ -2,6 +2,7 @@ import { lstatSync, mkdirSync, rmSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { cachedThreadClassification } from "../metadata/threadClassification.ts";
 import { migrateCacheDatabase } from "./migrations.ts";
 
 export interface OpenCacheDatabaseOptions {
@@ -51,6 +52,17 @@ export function openCacheDatabase(
     enableDoubleQuotedStringLiterals: false,
     enableForeignKeyConstraints: true,
     timeout: 5_000,
+  });
+  database.function("viewer_thread_visibility", { deterministic: true }, (evidence, kind) => {
+    let parsed: unknown = null;
+    if (typeof evidence === "string") {
+      try {
+        parsed = JSON.parse(evidence);
+      } catch {
+        parsed = "invalid";
+      }
+    }
+    return cachedThreadClassification(parsed, String(kind)).visibility;
   });
   database.exec("PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;");
   if (path !== ":memory:") {
