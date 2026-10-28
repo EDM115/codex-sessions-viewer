@@ -84,9 +84,10 @@ describe("deep search child discovery", () => {
     };
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       expect(
         (await repository.listSessions({ scope: "active", parentThreadId: "__root__" })).items.map(
-          ({ summary }) => summary.id,
+          (item) => item.id,
         ),
       ).toEqual([rootId]);
       expect((await repository.search(query)).total).toBe(0);

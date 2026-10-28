@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { getCachedSession, replaceCachedSession } from "../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../server/cache/database.ts";
+import { SessionCacheUpdater } from "../../server/cache/sourceManifest.ts";
 import { createPagefindTurnRecords } from "../../server/export/buildPagefind.ts";
 import { writeStaticPayloads } from "../../server/export/writeStaticPayloads.ts";
 import { InvalidationBus } from "../../server/live/invalidationBus.ts";
@@ -89,17 +90,48 @@ describe("representative repository scale", () => {
   }, 35_000);
 
   it("keeps the real warm live repository materially faster than full-session reconstruction", async () => {
-    const source = await normalizedRolloutFixture({
-      name: "modern.jsonl",
-      sourcePath: "C:/fixtures/performance-bounded.jsonl",
-      scope: "active",
-      revision: "sha256:performance-bounded",
-    });
-    const session = representativeLargeSession(source);
-    const database = openCacheDatabase(":memory:");
-    const bus = new InvalidationBus();
     const cacheDir = await mkdtemp(join(tmpdir(), "viewer-warm-benchmark-"));
     temporaryDirectories.push(cacheDir);
+    const sourcePath = join(cacheDir, "sessions", "warm.jsonl");
+    await mkdir(join(cacheDir, "sessions"));
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const records: unknown[] = [
+      {
+        timestamp: "2026-01-01T00:00:00.000Z",
+        type: "session_meta",
+        payload: { id: sessionId, source: "cli", timestamp: "2026-01-01T00:00:00.000Z" },
+      },
+    ];
+    for (let index = 0; index < 500; index += 1) {
+      const timestamp = new Date(Date.UTC(2026, 0, 1) + index * 1000).toISOString();
+      const turnId = `warm-${index}`;
+      records.push(
+        { timestamp, type: "event_msg", payload: { type: "task_started", turn_id: turnId } },
+        {
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "user_message",
+            message: `Question ${index}: ${"Explain the selected metadata and source range. ".repeat(12)}`,
+            images: [],
+            local_images: [],
+          },
+        },
+        {
+          timestamp,
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: `Answer ${index}: ${"The observed source supports this independently checked conclusion. ".repeat(24)}`,
+          },
+        },
+        { timestamp, type: "event_msg", payload: { type: "task_complete", turn_id: turnId } },
+      );
+    }
+    await writeFile(sourcePath, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const database = openCacheDatabase(":memory:");
+    const bus = new InvalidationBus();
+    const updater = new SessionCacheUpdater(database);
     const reconciler = new LiveReconciler({
       database,
       bus,
@@ -109,15 +141,17 @@ describe("representative repository scale", () => {
     });
     const repository = new LiveConversationRepository(database, bus, reconciler);
     try {
-      replaceCachedSession(database, {
-        session,
-        diagnostics: [],
-        source: cachedSource(session, { size: 8_000_000 }),
+      expect(await updater.update({ path: sourcePath, scope: "active" })).toMatchObject({
+        status: "updated",
+        sessionId,
       });
+      const session = getCachedSession(database, sessionId)!;
+      expect(session.turns).toHaveLength(500);
+      const targetTurnId = session.turns[487]!.id;
       for (let index = 0; index < 3; index += 1) {
         // oxlint-disable-next-line no-await-in-loop -- Warm each serial repository read before measuring latency.
         await repository.getTurns(session.summary.id, {
-          targetTurnId: "scale-turn-487",
+          targetTurnId,
           limit: 20,
         });
         getCachedSession(database, session.summary.id);
@@ -127,7 +161,7 @@ describe("representative repository scale", () => {
         const started = performance.now();
         // oxlint-disable-next-line no-await-in-loop -- Sequential timing samples measure per-request latency.
         const chunk = await repository.getTurns(session.summary.id, {
-          targetTurnId: "scale-turn-487",
+          targetTurnId,
           limit: 20,
         });
         if (chunk?.turns.length !== 20) {
@@ -148,6 +182,7 @@ describe("representative repository scale", () => {
         `bounded ${boundedMedianMs.toFixed(3)} ms vs full ${fullMedianMs.toFixed(3)} ms`,
       ).toBeLessThan(fullMedianMs * 0.5);
     } finally {
+      updater.clear();
       await reconciler.close();
       database.close();
     }

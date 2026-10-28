@@ -20,6 +20,7 @@ const apiSessionListQuerySchema = sessionListQuerySchema
   .extend({
     hasMedia: booleanQuerySchema.optional(),
     limit: pageLimitQuerySchema.optional(),
+    projectId: z.union([z.literal("").transform(() => null), z.string().min(1)]).optional(),
   });
 const apiSearchQuerySchema = apiSessionListQuerySchema.extend({
   query: searchQuerySchema.shape.query,

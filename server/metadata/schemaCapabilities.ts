@@ -105,6 +105,7 @@ export interface StateReadReceiptMetadata {
   lastPublishedTurn: string | null;
 }
 export interface StateMetadataSnapshot {
+  threadsComplete?: boolean;
   threads: StateThreadMetadata[];
   sections: StateSectionMetadata[];
   spawnEdges: StateSpawnEdgeMetadata[];
@@ -284,8 +285,21 @@ export function readStateMetadata(database: DatabaseSync): StateMetadataSnapshot
   if (!capabilities.tables["threads"]?.includes("id")) {
     throw new Error("State snapshot has no supported threads table");
   }
+  let threadsComplete = [
+    "id",
+    "rollout_path",
+    "created_at",
+    "updated_at",
+    "source",
+    "model_provider",
+    "cwd",
+    "title",
+    "tokens_used",
+    "archived",
+    "first_user_message",
+  ].every((column) => capabilities.tables["threads"]!.includes(column));
   const threads = selectedRows("threads", { ...baseFields, ...optionalFields })
-    .map((row) => {
+    .flatMap((row) => {
       const defaults = [
         ["archivedAt", null],
         ["gitSha", null],
@@ -306,9 +320,11 @@ export function readStateMetadata(database: DatabaseSync): StateMetadataSnapshot
       }
       const parsed = baseThread.safeParse(candidate);
       if (!parsed.success) {
-        throw new Error("Invalid required thread metadata");
+        threadsComplete = false;
+        capabilities.diagnostics.push({ table: "threads", reason: "invalid-field" });
+        return [];
       }
-      return Object.assign(parsed.data, optionalValues(row, optionalThread.shape, "threads"));
+      return [Object.assign(parsed.data, optionalValues(row, optionalThread.shape, "threads"))];
     })
     .toSorted((a, b) => a.id.localeCompare(b.id));
   const sections = selectedRows(
@@ -472,5 +488,14 @@ export function readStateMetadata(database: DatabaseSync): StateMetadataSnapshot
     }
     return [parsed.data];
   });
-  return { threads, sections, spawnEdges, projects, attachments, readReceipts, capabilities };
+  return {
+    threads,
+    threadsComplete,
+    sections,
+    spawnEdges,
+    projects,
+    attachments,
+    readReceipts,
+    capabilities,
+  };
 }

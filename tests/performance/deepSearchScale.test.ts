@@ -70,6 +70,7 @@ describe("deep-search scale", () => {
 
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       bus.subscribe((event) => events.push(event));
       const job = reconciler.startDeepSearch({ scope: "active", query: "parser" });
       await vi.waitFor(
@@ -129,6 +130,7 @@ describe("deep-search scale", () => {
 
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       const job = reconciler.startDeepSearch({ scope: "active", query: "parser" });
       await firstRead;
       expect(reconciler.cancelDeepSearch(job.id)).toBe(true);
@@ -159,6 +161,7 @@ describe("deep-search scale", () => {
     });
     try {
       await initial.start();
+      await initial.whenRecoverySettled();
       expect(initial.startDeepSearch({ scope: "active", query: "parser" })).toMatchObject({
         state: "failed",
         resultCount: 0,
@@ -188,6 +191,7 @@ describe("deep-search scale", () => {
     });
     try {
       await terminal.start();
+      await terminal.whenRecoverySettled();
       const job = terminal.startDeepSearch({ scope: "active", query: "parser" });
       await vi.waitFor(() => {
         expect(terminal.getDeepSearch(job.id)).toMatchObject({

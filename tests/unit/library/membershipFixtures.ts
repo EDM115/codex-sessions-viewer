@@ -9,6 +9,7 @@ export function metadata(
     sources: { stateDatabase: null, stateWal: null, sessionIndex: null, globalState: null },
     stateAuthority: "root",
     threads: [],
+    threadsComplete: true,
     projects: [],
     sections: [],
     spawnEdges: [],

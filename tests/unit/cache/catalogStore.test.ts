@@ -48,7 +48,7 @@ function summary(id: string, options: Partial<ConversationSummary> = {}): Conver
 
 function catalogInput(id: string, options: Partial<CatalogSessionInput> = {}): CatalogSessionInput {
   const { summary: summaryOverride, ...inputOverrides } = options;
-  const value = summary(id, summaryOverride);
+  const value = { ...summary(id), ...summaryOverride };
   return {
     kind: "root",
     materialization: "cold",
@@ -197,8 +197,8 @@ describe("session catalog store", () => {
         expect.objectContaining({ id: "none", activeCount: 1 }),
       ]);
       expect(
-        listCatalogSessions(database, { scope: "active", projectId: "none" }).items.map(
-          (item) => item.summary.id,
+        listCatalogSessions(database, { scope: "active", projectId: null }).items.map(
+          (item) => item.id,
         ),
       ).toEqual(["recovered"]);
     } finally {
@@ -221,9 +221,9 @@ describe("session catalog store", () => {
             classification: { visibility: "user-root" },
           }),
         );
-      expect(
-        listCatalogSessions(database, { scope: "active" }).items.map((row) => row.summary.id),
-      ).toEqual(["legacy"]);
+      expect(listCatalogSessions(database, { scope: "active" }).items.map((row) => row.id)).toEqual(
+        ["legacy"],
+      );
       expect(listCatalogProjects(database)[0]?.activeCount).toBe(1);
       expect(catalogSession(database, "invalid")?.structuralEvidence?.classification).toMatchObject(
         { visibility: "unresolved", reasons: ["invalid-classification-evidence"] },
@@ -281,7 +281,7 @@ describe("session catalog store", () => {
       expect(page.total).toBe(21);
       expect(page.nextCursor).toBe("20");
       expect(page.items.every(({ kind }) => kind === "root")).toBe(true);
-      expect(page.items.map(({ summary: item }) => item.id).slice(0, 3)).toEqual([
+      expect(page.items.map((item) => item.id).slice(0, 3)).toEqual([
         "root-20",
         "root-00",
         "root-01",
@@ -295,11 +295,11 @@ describe("session catalog store", () => {
           limit: 20,
         }),
       ).toMatchObject({
-        items: [{ summary: { id: "root-19" } }],
+        items: [{ id: "root-19" }],
         total: 21,
         nextCursor: null,
       });
-      expect(children.items.map(({ summary: item }) => item.id)).toEqual(["child"]);
+      expect(children.items.map((item) => item.id)).toEqual(["child"]);
       expect(children.total).toBe(1);
       expect(listCatalogProjects(database)).toEqual([
         expect.objectContaining({
@@ -351,7 +351,7 @@ describe("session catalog store", () => {
     }
   });
 
-  it("preserves materialized summary metrics across unchanged catalog refreshes", () => {
+  it("retains selected materialization state while keeping content metrics out of catalog metadata", () => {
     const database = openCacheDatabase(":memory:");
 
     try {
@@ -382,12 +382,10 @@ describe("session catalog store", () => {
           title: "Renamed session",
           pinned: true,
           sectionName: "Current work",
-          turnCount: 7,
-          assistantMessageCount: 5,
-          toolCallCount: 3,
-          models: ["gpt-5.6-sol"],
         },
       });
+      expect(catalogSession(database, "ready")?.summary).not.toHaveProperty("turnCount");
+      expect(catalogSession(database, "ready")?.summary).not.toHaveProperty("models");
     } finally {
       database.close();
     }
@@ -407,7 +405,7 @@ describe("session catalog store", () => {
       expect(
         markCatalogSessionReady(database, hydrated, {
           sourceRevision: "catalog:stale",
-          sourcePath: current.summary.sourcePath,
+          sourcePath: current.summary.sourcePath!,
         }),
       ).toBe(false);
       expect(
@@ -418,19 +416,19 @@ describe("session catalog store", () => {
       ).toBe(false);
       expect(catalogSession(database, "fenced")).toMatchObject({
         materialization: "cold",
-        summary: { title: "Session fenced", turnCount: 0 },
+        summary: { title: "Session fenced" },
       });
 
       expect(
         markCatalogSessionReady(database, hydrated, {
           sourceRevision: "catalog:expected",
-          sourcePath: current.summary.sourcePath,
+          sourcePath: current.summary.sourcePath!,
         }),
       ).toBe(true);
       expect(catalogSession(database, "fenced")).toMatchObject({
         materialization: "ready",
         sourceRevision: "catalog:expected",
-        summary: { title: "Hydrated conversation", turnCount: 4 },
+        summary: { title: "Session fenced" },
       });
 
       upsertCatalogSessions(database, [catalogInput("auxiliary", { kind: "auxiliary" })]);
@@ -453,7 +451,7 @@ describe("session catalog store", () => {
 
     try {
       upsertCatalogSessions(database, [visible, auxiliary]);
-      expect(removeCatalogSource(database, visible.summary.sourcePath)).toBe("visible");
+      expect(removeCatalogSource(database, visible.summary.sourcePath!)).toBe("visible");
       expect(catalogSession(database, "visible")).toBeNull();
       expect(
         listCatalogSessions(database, {

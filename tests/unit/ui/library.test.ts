@@ -7,48 +7,18 @@ import LibraryPreparationState from "../../../app/components/library/LibraryPrep
 import LibrarySearchResults from "../../../app/components/library/LibrarySearchResults.vue";
 import LibrarySessionList from "../../../app/components/library/LibrarySessionList.vue";
 import { createLibraryWorkspace } from "../../../app/composables/useLibraryWorkspace.ts";
-import type { ConversationSummary } from "../../../shared/types/conversation.ts";
-import type { ConversationListItem } from "../../../shared/types/library.ts";
+import { catalogProjectGroupFromLegacy } from "../../../shared/types/library.ts";
+import type { LibraryEntry } from "../../../shared/types/library.ts";
 
-function session(id: string, title: string): ConversationSummary {
+function item(id: string, title: string): LibraryEntry {
   return {
     id,
     title,
     scope: "active",
-    sourcePath: `C:/codex/sessions/${id}.jsonl`,
-    createdAt: "2026-08-15T08:00:00.000Z",
-    updatedAt: "2026-08-15T09:00:00.000Z",
-    cwd: "C:/repo/viewer",
-    gitBranch: "main",
-    gitSha: null,
-    gitOriginUrl: null,
-    models: ["gpt-5"],
-    reasoningEfforts: ["high"],
-    turnCount: 4,
-    assistantMessageCount: 4,
-    toolCallCount: 2,
-    toolCounts: { exec_command: 2 },
-    preview: "Implement the local viewer shell",
-    pinned: false,
-    sectionName: "Today",
-    parentThreadId: null,
-    childThreadIds: [],
-    hasMedia: false,
-    diagnosticCount: 0,
-    revision: "revision-1",
-  };
-}
-
-function item(id: string, title: string): ConversationListItem {
-  return {
-    summary: session(id, title),
+    orderKey: "2026-08-15T09:00:00.000Z",
     kind: "root",
-    materialization: "ready",
     projectId: "project-1",
     parentThreadId: null,
-    agentPath: null,
-    agentNickname: null,
-    agentDepth: null,
     childCount: 0,
   };
 }
@@ -94,14 +64,14 @@ describe("library presentation components", () => {
     const requester = vi.fn(async (path: string) => {
       if (path === "/api/projects") {
         return [
-          {
+          catalogProjectGroupFromLegacy({
             id: "project-1",
             name: "Viewer",
             source: "codex",
             hint: null,
             activeCount,
             archivedCount: 0,
-          },
+          }),
         ];
       }
       if (path === "/api/status") {
@@ -125,8 +95,8 @@ describe("library presentation components", () => {
       workspace.start();
       await vi.waitFor(() => expect(workspace.runtimeStatus.value.state).toBe("ready"));
       await new Promise((resolve) => setTimeout(resolve, 20));
-      await workspace.toggleProject("project-1");
-      expect(workspace.projectPages.get("project-1")?.items[0]?.summary.title).toBe(
+      await workspace.toggleProject("project:project-1");
+      expect(workspace.projectPages.get("project:project-1")?.items[0]?.title).toBe(
         "Initial title",
       );
       requester.mockClear();
@@ -153,7 +123,7 @@ describe("library presentation components", () => {
       });
       await vi.waitFor(() => {
         expect(workspace.counts.active).toBe(2);
-        expect(workspace.projectPages.get("project-1")?.items[0]?.summary.title).toBe(
+        expect(workspace.projectPages.get("project:project-1")?.items[0]?.title).toBe(
           "Updated title",
         );
       });
@@ -169,7 +139,7 @@ describe("library presentation components", () => {
       });
       await vi.waitFor(() => {
         expect(workspace.counts.active).toBe(0);
-        expect(workspace.projectPages.get("project-1")?.items).toEqual([]);
+        expect(workspace.projectPages.get("project:project-1")?.items).toEqual([]);
       });
       expect(requester).toHaveBeenCalledTimes(3);
     } finally {
@@ -249,25 +219,19 @@ describe("library presentation components", () => {
     wrapper.unmount();
   });
 
-  it("groups dated sessions, clamps focus movement, ignores unrelated keys, and virtualizes large archives", async () => {
+  it("renders metadata-only sessions, clamps focus movement, ignores unrelated keys, and virtualizes large archives", async () => {
     const dated = [
       item("session-1", "First"),
       item("session-2", "Second"),
       item("session-3", "Third"),
     ];
-    dated[0].summary.sectionName = null;
-    dated[1].summary.sectionName = null;
-    dated[2].summary.sectionName = null;
-    dated[2].summary.updatedAt = "2026-08-14T09:00:00.000Z";
+    dated[2].orderKey = "2026-08-14T09:00:00.000Z";
     const wrapper = mount(LibrarySessionList, {
       attachTo: document.body,
       props: { items: dated },
     });
     const links = wrapper.findAll("a");
-    expect(wrapper.findAll(".library-session-group").map((group) => group.text())).toEqual([
-      "2026-08-15",
-      "2026-08-14",
-    ]);
+    expect(wrapper.findAll(".library-session-group")).toHaveLength(0);
     await links[0].trigger("keydown", { key: "Escape" });
     expect(document.activeElement).not.toBe(links[1].element);
     await links[0].trigger("keydown", { key: "ArrowUp" });

@@ -2,12 +2,15 @@ import type { ConversationScope } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import type { StateMetadataSnapshot, StateThreadMetadata } from "../metadata/stateSnapshot.ts";
+import { resolveThreadFields } from "../metadata/threadFields.ts";
 
 export interface SessionMetadataMergeInput {
   sessionId: string;
   sourcePath: string;
   scope: ConversationScope;
   firstUserPreview: string;
+  knownTitle?: string | undefined;
+  historyMode?: string | null | undefined;
   rolloutModels: string[];
   rolloutReasoningEfforts: string[];
   rolloutCwd?: string | null | undefined;
@@ -21,6 +24,8 @@ export interface SessionMetadataMergeInput {
 
 export interface MergedSessionMetadata {
   title: string;
+  createdAt: string | null;
+  updatedAt: string | null;
   scope: ConversationScope;
   sourcePath: string;
   cwd: string | null;
@@ -87,12 +92,13 @@ export function mergeSessionMetadata(input: SessionMetadataMergeInput): MergedSe
   const rolloutReasoningEfforts = uniqueNonEmpty(input.rolloutReasoningEfforts);
 
   return {
-    title:
-      nonEmpty(thread?.name) ??
-      nonEmpty(index?.threadName) ??
-      nonEmpty(thread?.title) ??
-      nonEmpty(input.firstUserPreview) ??
-      input.sessionId,
+    ...resolveThreadFields({
+      id: input.sessionId,
+      thread,
+      index,
+      knownTitle: input.knownTitle,
+      historyMode: input.historyMode,
+    }),
     scope: input.scope,
     sourcePath: input.sourcePath,
     cwd: nonEmpty(input.rolloutCwd) ?? nonEmpty(thread?.cwd),

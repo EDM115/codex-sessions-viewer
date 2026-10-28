@@ -195,6 +195,7 @@ function buildFilters(
   const clauses = [
     "session_fts MATCH ?",
     "s.scope = ?",
+    "NOT EXISTS (SELECT 1 FROM catalog_native_ownership n WHERE n.id = s.id AND NOT EXISTS (SELECT 1 FROM session_catalog present WHERE present.id = n.id))",
     `NOT EXISTS (SELECT 1 FROM session_catalog c WHERE c.id = s.id AND NOT (${catalogVisibilitySql("ordinary", "c")}))`,
   ];
   const values: SQLInputValue[] = [expression, query.scope];
@@ -202,7 +203,7 @@ function buildFilters(
     clauses.push(
       "EXISTS (SELECT 1 FROM session_catalog AS c WHERE c.id = s.id AND c.project_id = ?)",
     );
-    values.push(query.projectId);
+    values.push(query.projectId ?? "none");
   }
   if (query.model !== undefined) {
     clauses.push("EXISTS (SELECT 1 FROM json_each(s.models_json) WHERE value = ?)");

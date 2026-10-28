@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import LibrarySubagentPanel from "../../../app/components/library/LibrarySubagentPanel.vue";
 import type { ConversationSummary } from "../../../shared/types/conversation.ts";
-import type { ConversationListItem } from "../../../shared/types/library.ts";
+import type { LibraryEntry } from "../../../shared/types/library.ts";
 import type { ConversationRepository, CursorPage } from "../../../shared/types/repository.ts";
 
 const repository = vi.hoisted(() => ({
@@ -54,16 +54,15 @@ function summary(id: string): ConversationSummary {
     revision: "r1",
   };
 }
-function item(id: string, nickname: string | null = null): ConversationListItem {
+function item(id: string, title: string | null = null): LibraryEntry {
   return {
-    summary: summary(id),
+    id,
+    title: title ?? `Task ${id}`,
+    scope: "active",
+    orderKey: "2026-09-14T10:00:00.000Z",
     kind: "subagent",
-    materialization: "ready",
     projectId: "project",
     parentThreadId: "parent",
-    agentPath: id,
-    agentNickname: nickname,
-    agentDepth: 1,
     childCount: 0,
   };
 }
@@ -190,7 +189,7 @@ describe("LibrarySubagentPanel", () => {
     expect(repository.getTurns).toHaveBeenCalledWith("child", { cursor: "0", limit: 20 });
     expect(conversation.props("embedded")).toBe("");
     expect(conversation.props("initialTargetTurnId")).toBe(null);
-    expect(wrapper.get("h2").text()).toBe("Ada");
+    expect(wrapper.get("h2").text()).toBe("Task child");
     expect(wrapper.get("a").attributes("href")).toBe("/session/child");
     await conversation.get("button").trigger("click");
     expect(wrapper.emitted("select")?.at(-1)).toEqual(["grandchild"]);
@@ -226,11 +225,11 @@ describe("LibrarySubagentPanel", () => {
   });
 
   it("ignores a previous parent's late list response", async () => {
-    let resolveFirst!: (value: CursorPage<ConversationListItem>) => void;
+    let resolveFirst!: (value: CursorPage<LibraryEntry>) => void;
     repository.listSessions
       .mockImplementationOnce(
         () =>
-          new Promise<CursorPage<ConversationListItem>>((resolve) => {
+          new Promise<CursorPage<LibraryEntry>>((resolve) => {
             resolveFirst = resolve;
           }),
       )

@@ -61,6 +61,7 @@ const epochTimestamp = "1970-01-01T00:00:00.000Z";
 export const NORMALIZATION_PARSER_VERSION = SOURCE_GENERATION_PARSER_VERSION;
 
 export interface NormalizeSessionInput {
+  knownTitle?: { id: string; title: string; historyMode?: string | null | undefined } | undefined;
   rolloutRef?: RolloutRef;
   records: readonly JsonlRecord[];
   sourcePath: string;
@@ -1405,6 +1406,10 @@ export function normalizeSession(
   const rolloutReasoningEfforts = unique(turns.flatMap(({ reasoningEfforts }) => reasoningEfforts));
   const metadata = mergeSessionMetadata({
     sessionId,
+    knownTitle: input.knownTitle?.id === sessionId ? input.knownTitle.title : undefined,
+    historyMode:
+      input.rolloutRef?.historyMode ??
+      (input.knownTitle?.id === sessionId ? input.knownTitle.historyMode : undefined),
     sourcePath: input.sourcePath,
     scope: input.scope,
     firstUserPreview: preview,
@@ -1429,8 +1434,8 @@ export function normalizeSession(
     title: metadata.title,
     scope: metadata.scope,
     sourcePath: metadata.sourcePath,
-    createdAt: timestamps.createdAt,
-    updatedAt: timestamps.updatedAt,
+    createdAt: metadata.createdAt ?? timestamps.createdAt,
+    updatedAt: metadata.updatedAt ?? timestamps.updatedAt,
     cwd: metadata.cwd,
     gitBranch: metadata.gitBranch,
     gitSha: metadata.gitSha,

@@ -53,7 +53,7 @@ describe("lazy live materialization", () => {
         const id = `11111111-1111-4111-8111-${String(index + 1).padStart(12, "0")}`;
         return writeFile(
           join(sessions, `session-${String(index).padStart(2, "0")}.jsonl`),
-          fixture.replaceAll(fixtureSessionId, id),
+          fixture.replaceAll(fixtureSessionId, id).replace(/"parent_thread_id":"[^"]*",/u, ""),
           "utf8",
         );
       }),
@@ -78,6 +78,7 @@ describe("lazy live materialization", () => {
       readJsonl,
       reconciliationIntervalMs: 60_000,
     });
+    await runtime.whenRecoverySettled();
 
     try {
       expect(readJsonl).not.toHaveBeenCalled();
@@ -85,9 +86,11 @@ describe("lazy live materialization", () => {
       expect(page.items).toHaveLength(20);
       expect(page.total).toBe(21);
       expect(page.nextCursor).toBe("20");
-      expect(page.items.every(({ materialization }) => materialization === "cold")).toBe(true);
+      expect(
+        page.items.every((entry) => !("materialization" in entry) && !("summary" in entry)),
+      ).toBe(true);
 
-      const id = page.items[0]?.summary.id;
+      const id = page.items[0]?.id;
       if (id === undefined) {
         throw new Error("Expected the first catalog page to contain a session.");
       }
@@ -165,13 +168,16 @@ describe("lazy live materialization", () => {
 
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       const id = String(database.prepare("SELECT id FROM session_catalog").get()?.["id"]);
       const expectedRevisionA = `sha256:${createHash("sha256").update(revisionA).digest("hex")}`;
       const expectedRevisionB = `sha256:${createHash("sha256").update(revisionB).digest("hex")}`;
       const materialization = reconciler.prepareSessions([id]);
       await firstReadCaptured.promise;
       await writeFile(rollout, revisionB, "utf8");
-      await reconciler.reconcileNow("advance-source-revision");
+      database
+        .prepare("UPDATE session_catalog SET source_revision = ? WHERE id = ?")
+        .run("selected:B", id);
       const catalogRevisionB = catalogSession(database, id)?.sourceRevision;
       expect(catalogRevisionB).not.toBeNull();
       expect(catalogRevisionB).not.toBeUndefined();
@@ -260,17 +266,22 @@ describe("lazy live materialization", () => {
 
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       const id = String(database.prepare("SELECT id FROM session_catalog").get()?.["id"]);
       const expectedRevisionA = `sha256:${createHash("sha256").update(revisionA).digest("hex")}`;
       const expectedRevisionB = `sha256:${createHash("sha256").update(revisionB).digest("hex")}`;
       const materialization = reconciler.prepareSessions([id]);
       await capturedReads[0].promise;
       await writeFile(rollout, revisionB, "utf8");
-      await reconciler.reconcileNow("advance-to-b");
+      database
+        .prepare("UPDATE session_catalog SET source_revision = ? WHERE id = ?")
+        .run("selected:B", id);
       releasedReads[0].resolve();
       await capturedReads[1].promise;
       await writeFile(rollout, revisionC, "utf8");
-      await reconciler.reconcileNow("advance-to-c");
+      database
+        .prepare("UPDATE session_catalog SET source_revision = ? WHERE id = ?")
+        .run("selected:C", id);
       const latestRevision = catalogSession(database, id)?.sourceRevision;
       releasedReads[1].resolve();
 

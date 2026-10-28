@@ -1,4 +1,13 @@
-export const CACHE_SCHEMA_VERSION = 4;
+export const CACHE_SCHEMA_VERSION = 6;
+export const VERIFIED_PROJECTION_SCHEMA_SQL = `
+  CREATE TABLE verified_history_projections (
+    association_key TEXT PRIMARY KEY,
+    lineage_key TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    verified_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX verified_history_lineage ON verified_history_projections(lineage_key, verified_at DESC);
+`;
 export const SOURCE_GENERATION_SCHEMA_SQL = `
   ALTER TABLE source_files ADD COLUMN generation_json TEXT;
   ALTER TABLE raw_events ADD COLUMN identity_json TEXT;
@@ -254,4 +263,25 @@ export const CATALOG_CACHE_SCHEMA_SQL = `
   CREATE INDEX session_catalog_project_idx ON session_catalog(project_name COLLATE NOCASE, project_id);
 
   ${SEED_CATALOG_FROM_SESSIONS_SQL}
+`;
+
+export const METADATA_CATALOG_SCHEMA_SQL = `
+  ALTER TABLE session_catalog RENAME TO previous_session_catalog;
+  DROP INDEX session_catalog_scope_project_root_idx;
+  DROP INDEX session_catalog_parent_idx;
+  DROP INDEX session_catalog_materialization_idx;
+  DROP INDEX session_catalog_project_idx;
+  ${CATALOG_CACHE_SCHEMA_SQL.replace(SEED_CATALOG_FROM_SESSIONS_SQL, "")
+    .replace("source_path TEXT NOT NULL UNIQUE", "source_path TEXT")
+    .replace("created_at TEXT NOT NULL", "created_at TEXT")
+    .replace("updated_at TEXT NOT NULL", "updated_at TEXT")
+    .replace(
+      "summary_json TEXT NOT NULL",
+      "summary_json TEXT NOT NULL, structural_evidence_json TEXT",
+    )}
+  INSERT INTO session_catalog SELECT * FROM previous_session_catalog;
+  DROP TABLE previous_session_catalog;
+  CREATE INDEX session_catalog_source_path_idx ON session_catalog(source_path);
+  CREATE TABLE catalog_native_ownership (id TEXT PRIMARY KEY, authority TEXT NOT NULL) STRICT;
+  CREATE TABLE catalog_metadata_status (id INTEGER PRIMARY KEY CHECK (id = 1), payload_json TEXT NOT NULL) STRICT;
 `;

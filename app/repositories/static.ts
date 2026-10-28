@@ -7,9 +7,12 @@ import {
 } from "#shared/types/conversation.ts";
 import {
   deepSearchJobSchema,
+  libraryEntryFromSummary,
+  catalogProjectGroupFromLegacy,
   type ConversationListItem,
   type ConversationProject,
   type DeepSearchJob,
+  type CatalogProjectGroup,
 } from "#shared/types/library.ts";
 import {
   repositoryCapabilitiesForMode,
@@ -123,7 +126,101 @@ function includes(value: string | null, query: string): boolean {
   return value?.toLocaleLowerCase().includes(query) ?? false;
 }
 
-function matchesSession(item: ConversationListItem, query: SessionListQuery): boolean {
+interface StaticMembership {
+  projectId: string | null | undefined;
+  groupId: string;
+}
+
+const UNRESOLVED_STATIC_GROUP = "section:unresolved-static-v1";
+function staticProjection(
+  library: StaticLibraryPayload,
+  summaries: readonly ConversationSummary[],
+) {
+  const groups = library.projects.map(catalogProjectGroupFromLegacy);
+  const byId = new Map<string, StaticMembership>();
+  const ambiguousGroups = new Set<string>();
+  let unresolvedActive = 0;
+  let unresolvedArchived = 0;
+  for (const summary of summaries) {
+    const entry = library.entries[summary.id];
+    if (!entry) {
+      continue;
+    }
+    const candidates = library.projects.filter((project) => project.id === entry.projectId);
+    const project = candidates.length === 1 ? candidates[0] : undefined;
+    if (!project) {
+      candidates.forEach((candidate) =>
+        ambiguousGroups.add(catalogProjectGroupFromLegacy(candidate).groupId),
+      );
+      byId.set(summary.id, { projectId: undefined, groupId: UNRESOLVED_STATIC_GROUP });
+      if (entry.kind === "root" && entry.parentThreadId === null) {
+        if (summary.scope === "active") {
+          unresolvedActive += 1;
+        } else {
+          unresolvedArchived += 1;
+        }
+      }
+      continue;
+    }
+    const kind = project.sidebar?.kind ?? (project.source === "none" ? "recents" : "project");
+    byId.set(summary.id, {
+      projectId: kind === "section" ? undefined : kind === "recents" ? null : project.id,
+      groupId: catalogProjectGroupFromLegacy(project).groupId,
+    });
+  }
+  const projectedGroups: CatalogProjectGroup[] = groups
+    .filter(
+      (group, index) => groups.findIndex((other) => other.groupId === group.groupId) === index,
+    )
+    .map((group) =>
+      ambiguousGroups.has(group.groupId)
+        ? {
+            ...group,
+            activeCount: 0,
+            archivedCount: 0,
+            diagnostics: [
+              "Static v1 does not distinguish the definitions sharing this project ID.",
+            ],
+          }
+        : group.sidebar?.kind === "section"
+          ? {
+              ...group,
+              diagnostics: [
+                "Static v1 preserves this Section grouping but not its underlying project membership.",
+              ],
+            }
+          : group,
+    );
+  if (unresolvedActive + unresolvedArchived > 0) {
+    projectedGroups.push({
+      id: "unresolved-static-v1",
+      groupId: UNRESOLVED_STATIC_GROUP,
+      name: "Unresolved export membership",
+      rootPaths: [],
+      hostId: null,
+      source: "legacy",
+      position: null,
+      recencyAt: null,
+      activeCount: unresolvedActive,
+      archivedCount: unresolvedArchived,
+      sidebar: {
+        kind: "section",
+        sectionId: "unresolved-static-v1",
+        sectionName: "Unresolved export membership",
+      },
+      diagnostics: [
+        "This v1 export does not identify which group owns these conversations. Their underlying project membership is unknown.",
+      ],
+    });
+  }
+  return { groups: projectedGroups, byId };
+}
+
+function matchesSession(
+  item: ConversationListItem,
+  query: SessionListQuery,
+  membership: StaticMembership | undefined,
+): boolean {
   if (query.parentThreadId !== undefined && query.parentThreadId !== "__root__") {
     return item.kind === "subagent" && item.parentThreadId === query.parentThreadId;
   }
@@ -150,7 +247,10 @@ function matchesSession(item: ConversationListItem, query: SessionListQuery): bo
   if (query.tool !== undefined && !(query.tool in session.toolCounts)) {
     return false;
   }
-  if (query.projectId !== undefined && item.projectId !== query.projectId) {
+  if (query.projectId !== undefined && membership?.projectId !== query.projectId) {
+    return false;
+  }
+  if (query.groupId !== undefined && membership?.groupId !== query.groupId) {
     return false;
   }
   if (query.parentThreadId === undefined || query.parentThreadId === "__root__") {
@@ -260,16 +360,21 @@ export class StaticConversationRepository implements ConversationRepository {
     options.signal?.throwIfAborted();
     const summaries = await this.index(options);
     const library = (await this.library(options)) ?? fallbackLibrary(summaries);
+    const projection = staticProjection(library, summaries);
     const sessions = summaries
       .flatMap((summary): ConversationListItem[] => {
         const entry = library.entries[summary.id];
         return entry === undefined ? [] : [{ summary, materialization: "ready", ...entry }];
       })
-      .filter((item) => matchesSession(item, query));
+      .filter((item) => matchesSession(item, query, projection.byId.get(item.summary.id)));
     options.signal?.throwIfAborted();
     const offset = cursorOffset(query.cursor);
     const limit = query.limit ?? 20;
-    const items = sessions.slice(offset, offset + limit);
+    const items = sessions
+      .slice(offset, offset + limit)
+      .map((item) =>
+        libraryEntryFromSummary(item, projection.byId.get(item.summary.id)?.projectId ?? null),
+      );
     return {
       items,
       nextCursor: offset + items.length < sessions.length ? String(offset + items.length) : null,
@@ -279,7 +384,8 @@ export class StaticConversationRepository implements ConversationRepository {
 
   async listProjects(options: RepositoryRequestOptions = {}) {
     const summaries = await this.index(options);
-    return ((await this.library(options)) ?? fallbackLibrary(summaries)).projects;
+    return staticProjection((await this.library(options)) ?? fallbackLibrary(summaries), summaries)
+      .groups;
   }
 
   async prepareSessions(ids: string[]) {

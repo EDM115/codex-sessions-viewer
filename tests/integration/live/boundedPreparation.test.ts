@@ -18,10 +18,12 @@ import { rolloutRefFromSource } from "../../../server/ingestion/rolloutIdentity.
 import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
 import { LiveReconciler } from "../../../server/live/reconciler.ts";
 import { LiveConversationRepository } from "../../../server/live/repository.ts";
+import { readCatalogMetadata } from "../../../server/metadata/catalogMetadata.ts";
 import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
 import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import { representativeLargeSession } from "../../performance/fixtures.ts";
+import { createStateDatabase } from "../source-boundary/fixtures.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -35,7 +37,7 @@ async function root() {
 }
 
 async function storeVerifiedFixture(database: DatabaseSync, session: NormalizedSession) {
-  let source = getSourceManifestEntry(database, session.summary.sourcePath);
+  let source = getSourceManifestEntry(database, session.summary.sourcePath)!;
   if (source === null) {
     await writeFile(
       session.summary.sourcePath,
@@ -445,6 +447,7 @@ describe("production live preparation boundaries", () => {
     const repository = new LiveConversationRepository(database, bus, reconciler);
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       const id = String(database.prepare("SELECT id FROM session_catalog").get()?.["id"]);
       await repository.getTurns(id, { cursor: "0", limit: 1 });
       const stored = database
@@ -499,28 +502,27 @@ describe("production live preparation boundaries", () => {
     }
   });
 
-  it("coalesces watcher readiness and a fresh metadata snapshot into one startup followup", async () => {
+  it("takes one fresh metadata snapshot without scheduling another scan on watcher readiness", async () => {
+    const directory = await root();
+    const codexHome = join(directory, "home");
+    await mkdir(codexHome);
+    const native = createStateDatabase(join(codexHome, "state_5.sqlite"));
+    native.exec("DELETE FROM threads");
+    native.close();
     const database = openCacheDatabase(":memory:");
-    let discoveries = 0;
+    const readMetadata = vi.fn<typeof readCatalogMetadata>(readCatalogMetadata);
     const reconciler = new LiveReconciler({
       database,
       bus: new InvalidationBus(),
-      cacheDir: "C:/fixtures",
-      codexHome: "C:/fixtures",
+      cacheDir: join(directory, "cache"),
+      codexHome,
       fetchFavicons: false,
+      readMetadata,
       watch: () => ({ ready: Promise.resolve(), close: async () => {} }),
-      discover: async () => {
-        discoveries += 1;
-        return {
-          rollouts: [],
-          metadata: { sessionIndex: null, globalState: null, stateDatabase: null, stateWal: null },
-          diagnostics: [],
-        };
-      },
     });
     await reconciler.start();
     await reconciler.close();
     database.close();
-    expect(discoveries).toBe(2);
+    expect(readMetadata).toHaveBeenCalledOnce();
   });
 });

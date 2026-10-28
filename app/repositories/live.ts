@@ -4,7 +4,7 @@ import {
   type TurnNavigatorItem,
 } from "#shared/types/conversation.ts";
 import {
-  conversationProjectsSchema,
+  catalogProjectGroupsSchema,
   deepSearchJobSchema,
   preparationResultsSchema,
   type DeepSearchJob,
@@ -48,6 +48,8 @@ function queryString(input: object): string {
   for (const [key, value] of Object.entries(input) as Array<[string, unknown]>) {
     if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
       query.set(key, String(value));
+    } else if (key === "projectId" && value === null) {
+      query.set(key, "");
     }
   }
   const encoded = query.toString();
@@ -94,7 +96,7 @@ export class LiveApiConversationRepository implements ConversationRepository {
   }
 
   async listProjects(options: RepositoryRequestOptions = {}) {
-    return conversationProjectsSchema.parse(await this.requester("/api/projects", options));
+    return catalogProjectGroupsSchema.parse(await this.requester("/api/projects", options));
   }
 
   async prepareSessions(ids: string[], options: RepositoryRequestOptions = {}) {

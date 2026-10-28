@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { payloadObject, type CodexEvent, type TurnScopedEvent } from "./eventSchema.ts";
 
 export interface AssembledTurnEvents {
@@ -106,7 +108,16 @@ export function assembleTurnEvents(
     const turn: MutableTurn = {
       id:
         sourceTurnId === null
-          ? `${sessionId}:turn-${turns.length}`
+          ? `${sessionId}:turn-${createHash("sha256")
+              .update(
+                JSON.stringify([
+                  event!.identity?.codexHomeId ?? null,
+                  event!.identity?.physicalRolloutId ?? null,
+                  event!.byteStart,
+                  event!.raw,
+                ]),
+              )
+              .digest("hex")}`
           : viewerTurnId(sourceTurnId, event!),
       sourceTurnId,
       index: turns.length,
@@ -122,7 +133,7 @@ export function assembleTurnEvents(
     const explicit = explicitTurnId(event);
     if (beginsPrompt(event)) {
       if (active === null || active.closed) {
-        active = createTurn(null, true);
+        active = createTurn(null, true, event);
       }
       addEvent(active, event);
       continue;
@@ -157,6 +168,9 @@ export function assembleTurnEvents(
 
     if (active !== null && belongsToTurn(event)) {
       addEvent(active, event);
+      if (closesTurn(event)) {
+        active.closed = true;
+      }
       continue;
     }
 

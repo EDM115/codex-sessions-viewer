@@ -1,3 +1,5 @@
+import { watch as watchDirectory, type FSWatcher } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { watch } from "chokidar";
@@ -5,7 +7,13 @@ import { watch } from "chokidar";
 import type { ConversationScope } from "../../shared/types/conversation.ts";
 
 export type SourceChangeKind = "added" | "changed" | "removed";
-export type MetadataSourceKind = "global-state" | "session-index" | "state-database" | "state-wal";
+export type MetadataSourceKind =
+  | "global-state"
+  | "session-index"
+  | "state-database"
+  | "state-wal"
+  | "history-database"
+  | "history-wal";
 
 export interface RolloutSourceChange {
   kind: SourceChangeKind;
@@ -114,6 +122,8 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
     [join(options.codexHome, ".codex-global-state.json"), "global-state"],
     [join(options.codexHome, "state_5.sqlite"), "state-database"],
     [join(options.codexHome, "state_5.sqlite-wal"), "state-wal"],
+    [join(options.codexHome, "thread_history_1.sqlite"), "history-database"],
+    [join(options.codexHome, "thread_history_1.sqlite-wal"), "history-wal"],
     [join(options.codexHome, "sqlite", "state_5.sqlite"), "state-database"],
     [join(options.codexHome, "sqlite", "state_5.sqlite-wal"), "state-wal"],
   ];
@@ -124,6 +134,9 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
       metadataSources.map(([path, kind]) => [pathKey(path), kind]),
     ),
   };
+  if (options.metadataOnly) {
+    return watchMetadataParents(options, roots, debounceMs);
+  }
   const homeKey = pathKey(options.codexHome);
   const legacyKey = pathKey(join(options.codexHome, "sqlite"));
   const paths = options.metadataOnly
@@ -236,6 +249,110 @@ export function watchSources(options: WatchSourcesOptions): SourceWatcher {
       debounceTimers.clear();
       await enqueueFlush([...pending.keys()]);
       await Promise.all(watchers.map((watcher) => watcher.close()));
+    },
+  };
+}
+
+function watchMetadataParents(
+  options: WatchSourcesOptions,
+  roots: WatchRoots,
+  debounceMs: number,
+): SourceWatcher {
+  const watchers = new Map<string, FSWatcher>();
+  const pending = new Set<string>();
+  let timer: NodeJS.Timeout | null = null;
+  let closed = false;
+  let chain = Promise.resolve();
+  const home = resolve(options.codexHome);
+  const legacy = resolve(home, "sqlite");
+  function report(error: unknown) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      options.onError?.(error);
+    }
+  }
+  function install(directory: string) {
+    if (closed || watchers.has(directory)) {
+      return;
+    }
+    try {
+      const watcher = watchDirectory(directory, (_event, filename) => {
+        if (closed) {
+          return;
+        }
+        if (directory === home && (filename === null || filename === "sqlite")) {
+          watchers.get(legacy)?.close();
+          watchers.delete(legacy);
+          install(legacy);
+          for (const path of roots.metadata.keys()) {
+            if (path.startsWith(`${pathKey(legacy)}${sep}`)) {
+              pending.add(resolve(home, relative(pathKey(home), path)));
+            }
+          }
+        }
+        for (const path of roots.metadata.keys()) {
+          if (filename === null || pathKey(join(directory, filename)) === path) {
+            pending.add(resolve(home, relative(pathKey(home), path)));
+          }
+        }
+        if (!pending.size) {
+          return;
+        }
+        if (timer) {
+          clearTimeout(timer);
+        }
+        timer = setTimeout(() => {
+          timer = null;
+          const paths = [...pending];
+          pending.clear();
+          chain = chain
+            .then(async () => {
+              if (closed) {
+                return undefined;
+              }
+              const changes = await Promise.all(
+                paths.map(async (path): Promise<SourceChange> => {
+                  let present = false;
+                  try {
+                    const info = await lstat(path);
+                    present = info.isFile() && !info.isSymbolicLink();
+                  } catch (error) {
+                    report(error);
+                  }
+                  return {
+                    path,
+                    source: roots.metadata.get(pathKey(path))!,
+                    kind: present ? "changed" : "removed",
+                  };
+                }),
+              );
+              if (!closed) {
+                await options.onBatch({ changes, observedAt: new Date().toISOString() });
+              }
+              return undefined;
+            })
+            .catch(report);
+        }, debounceMs);
+      });
+      watcher.on("error", report);
+      watchers.set(directory, watcher);
+    } catch (error) {
+      report(error);
+    }
+  }
+  install(home);
+  install(legacy);
+  return {
+    ready: Promise.resolve(),
+    async close() {
+      closed = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      for (const watcher of watchers.values()) {
+        watcher.close();
+      }
+      watchers.clear();
+      await chain;
     },
   };
 }

@@ -2,13 +2,13 @@
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import { computed, nextTick, ref } from "vue";
 
-import type { ConversationListItem } from "#shared/types/library.ts";
+import type { LibraryEntry } from "#shared/types/library.ts";
 
 import LibrarySessionItem from "./LibrarySessionItem.vue";
 
 const props = withDefaults(
   defineProps<{
-    items: ConversationListItem[];
+    items: LibraryEntry[];
     selectedId?: string | null;
   }>(),
   { selectedId: null },
@@ -19,21 +19,13 @@ const virtualized = computed(() => props.items.length > 40);
 const rowVirtualizer = useVirtualizer(
   computed(() => ({
     count: props.items.length,
-    estimateSize: () => 112,
+    estimateSize: () => 44,
     getScrollElement: () => scrollElement.value,
-    getItemKey: (index: number) => props.items[index]?.summary.id ?? index,
+    getItemKey: (index: number) => props.items[index]?.id ?? index,
     initialRect: { width: 320, height: 720 },
     overscan: 6,
   })),
 );
-
-function groupLabel(index: number): string | undefined {
-  const item = props.items[index];
-  const previous = props.items[index - 1];
-  const label = item?.summary.sectionName ?? item?.summary.updatedAt.slice(0, 10);
-  const previousLabel = previous?.summary.sectionName ?? previous?.summary.updatedAt.slice(0, 10);
-  return index === 0 || label !== previousLabel ? label : undefined;
-}
 
 async function moveFocus(event: KeyboardEvent, index: number): Promise<void> {
   const direction = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
@@ -65,10 +57,9 @@ async function moveFocus(event: KeyboardEvent, index: number): Promise<void> {
     <template v-if="!virtualized">
       <LibrarySessionItem
         v-for="(session, index) in items"
-        :key="session.summary.id"
+        :key="session.id"
         :item="session"
-        :selected="session.summary.id === selectedId"
-        :group-label="groupLabel(index)"
+        :selected="session.id === selectedId"
         @keydown="moveFocus($event, index)"
       />
     </template>
@@ -87,8 +78,7 @@ async function moveFocus(event: KeyboardEvent, index: number): Promise<void> {
         class="library-session-list__virtual-row"
         :style="{ transform: `translateY(${virtualRow.start}px)` }"
         :item="items[virtualRow.index]!"
-        :selected="items[virtualRow.index]!.summary.id === selectedId"
-        :group-label="groupLabel(virtualRow.index)"
+        :selected="items[virtualRow.index]!.id === selectedId"
         @keydown="moveFocus($event, virtualRow.index)"
       />
     </div>

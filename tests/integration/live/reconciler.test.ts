@@ -19,13 +19,12 @@ import {
 } from "../../../server/cache/catalogStore.ts";
 import { getCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { discoverSources } from "../../../server/ingestion/discoverSources.ts";
 import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
 import { readSessionMetaPrefix } from "../../../server/ingestion/sessionMetaPrefix.ts";
 import type { WatchSourcesOptions } from "../../../server/ingestion/watchSources.ts";
 import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
 import { coalesceSourceWatchBatches, LiveReconciler } from "../../../server/live/reconciler.ts";
-import { readSessionIndex } from "../../../server/metadata/sessionIndex.ts";
+import { readCatalogMetadata } from "../../../server/metadata/catalogMetadata.ts";
 import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
 
 const temporaryRoots: string[] = [];
@@ -103,11 +102,13 @@ describe("live reconciliation", () => {
     });
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
+      await reconciler.reconcileNow("qualify-retained-recovery-evidence");
       bus.subscribe((event) => events.push(event));
       const id = "11111111-1111-4111-8111-111111111111";
       expect(
         listCatalogSessions(database, { scope: "active", projectId: "b" }).items.map(
-          (item) => item.summary.id,
+          (item) => item.id,
         ),
       ).toEqual(["row-b", "row-c"]);
       state["sidebar-project-thread-orders"].b.threadIds = ["row-c", "row-b"];
@@ -135,7 +136,7 @@ describe("live reconciliation", () => {
       expect(catalogSession(database, id)?.summary.title).toBe("Renamed A");
       expect(
         listCatalogSessions(database, { scope: "active", projectId: "b" }).items.map(
-          (item) => item.summary.id,
+          (item) => item.id,
         ),
       ).toEqual(["row-c", "row-b"]);
     } finally {
@@ -161,6 +162,8 @@ describe("live reconciliation", () => {
     });
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
+      await reconciler.reconcileNow("qualify-retained-recovery-evidence");
       bus.subscribe((event) => events.push(event));
       const path = join(codexHome, ".codex-global-state.json");
       await writeFile(
@@ -190,13 +193,13 @@ describe("live reconciliation", () => {
         }),
       );
       events.splice(0);
-      const before = database.prepare("SELECT total_changes() AS count").get()?.["count"];
+      const before = database.prepare("SELECT * FROM session_catalog ORDER BY id").all();
       await watcherOptions.onBatch({
         observedAt: "2026-10-27T00:00:01.000Z",
         changes: [{ source: "global-state", path, kind: "changed" }],
       });
       await reconciler.reconcileNow("unchanged-grouping");
-      expect(database.prepare("SELECT total_changes() AS count").get()?.["count"]).toBe(before);
+      expect(database.prepare("SELECT * FROM session_catalog ORDER BY id").all()).toEqual(before);
       expect(events.filter((event) => event.type === "library.updated")).toEqual([]);
     } finally {
       await reconciler.close();
@@ -215,6 +218,7 @@ describe("live reconciliation", () => {
     });
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       const id = "11111111-1111-4111-8111-111111111111";
       await reconciler.ensureMaterialized(id);
       const before = await stat(rollout);
@@ -255,8 +259,12 @@ describe("live reconciliation", () => {
 
   it("publishes the metadata catalog without waiting for the watcher initial scan", async () => {
     const { codexHome, cacheDir } = await createCodexHome();
+    await writeFile(
+      join(codexHome, "session_index.jsonl"),
+      '{"id":"indexed","thread_name":"Metadata first","updated_at":"2026-01-01T00:00:00Z"}\n',
+    );
     const database = openCacheDatabase(":memory:");
-    const closeWatcher = vi.fn(async () => undefined);
+    const closeWatcher = vi.fn<() => Promise<void>>(async () => undefined);
     const reconciler = new LiveReconciler({
       bus: new InvalidationBus(),
       cacheDir,
@@ -278,7 +286,7 @@ describe("live reconciliation", () => {
     expect(closeWatcher).toHaveBeenCalledOnce();
   });
 
-  it("updates only the appended session and publishes its changed turn IDs", async () => {
+  it("updates an explicitly reopened appended session and publishes its changed turn IDs", async () => {
     const { codexHome, rollout, cacheDir } = await createCodexHome();
     const database = openCacheDatabase(":memory:");
     const bus = new InvalidationBus();
@@ -299,6 +307,7 @@ describe("live reconciliation", () => {
 
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       const row = database.prepare("SELECT id FROM session_catalog").get();
       const sessionId = String(row?.["id"]);
       expect(database.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({
@@ -320,6 +329,7 @@ describe("live reconciliation", () => {
         "utf8",
       );
 
+      await reconciler.ensureMaterialized(sessionId);
       await vi.waitFor(
         () => {
           expect(getCachedSession(database, sessionId)?.summary.turnCount).toBe(
@@ -358,6 +368,7 @@ describe("live reconciliation", () => {
 
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       expect(readJsonl).not.toHaveBeenCalled();
       await reconciler.reconcileNow("test");
       expect(readJsonl).not.toHaveBeenCalled();
@@ -374,118 +385,78 @@ describe("live reconciliation", () => {
     }
   });
 
-  it("consumes rollout and metadata watcher details without broad discovery, prefix reads, or invalidations", async () => {
+  it("keeps periodic and metadata watcher refreshes free of rollout observations and preparation", async () => {
     const { codexHome, rollout, cacheDir } = await createCodexHome();
     const database = openCacheDatabase(":memory:");
     const bus = new InvalidationBus();
     const events: ViewerInvalidation[] = [];
-    const discover = vi.fn(discoverSources);
-    const readPrefix = vi.fn(readSessionMetaPrefix);
-    const readIndex = vi.fn(readSessionIndex);
+    const readMetadata = vi.fn<typeof readCatalogMetadata>(readCatalogMetadata);
+    const readPrefix = vi.fn<typeof readSessionMetaPrefix>(readSessionMetaPrefix);
     let watcherOptions!: WatchSourcesOptions;
     const reconciler = new LiveReconciler({
       bus,
       cacheDir,
       codexHome,
       database,
-      reconciliationIntervalMs: 60_000,
-      discover,
+      readMetadata,
       readPrefix,
-      readSessionIndex: readIndex,
+      reconciliationIntervalMs: 60_000,
       watch(options) {
         watcherOptions = options;
         return { ready: new Promise<void>(() => undefined), close: async () => undefined };
       },
     });
-
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
+      expect(watcherOptions.metadataOnly).toBe(true);
       const id = String(database.prepare("SELECT id FROM session_catalog").get()?.["id"]);
+      await reconciler.reconcileNow("qualify-retained-recovery-evidence");
       bus.subscribe((event) => events.push(event));
-
       await reconciler.reconcileNow("unchanged");
       expect(readPrefix).toHaveBeenCalledOnce();
       expect(events.filter(({ type }) => type === "library.updated")).toEqual([]);
-      const discoveryCallsBeforeBatches = discover.mock.calls.length;
-
+      const reads = readMetadata.mock.calls.length;
       await appendFile(rollout, "\n", "utf8");
       await watcherOptions.onBatch({
         observedAt: "2026-08-20T10:00:00.000Z",
         changes: [{ source: "rollout", scope: "active", path: rollout, kind: "changed" }],
       });
-      await vi.waitFor(() => {
-        expect(events).toContainEqual({
-          type: "library.updated",
-          ids: [id],
-          revision: expect.any(String),
-        });
-      });
-      expect(discover).toHaveBeenCalledTimes(discoveryCallsBeforeBatches);
-      expect(readPrefix).toHaveBeenCalledTimes(2);
-
-      events.splice(0);
+      await reconciler.reconcileNow("metadata-only-periodic");
+      expect(readPrefix).toHaveBeenCalledOnce();
+      expect(readMetadata).toHaveBeenCalledTimes(reads + 1);
+      expect(events.filter(({ type }) => type === "library.updated")).toEqual([]);
       const sessionIndexPath = join(codexHome, "session_index.jsonl");
       await writeFile(
         sessionIndexPath,
-        `${JSON.stringify({
+        JSON.stringify({
           id,
           thread_name: "Renamed from watcher metadata",
           updated_at: "2026-08-20T10:00:01.000Z",
-        })}\n`,
-        "utf8",
+        }) + "\n",
       );
       await watcherOptions.onBatch({
         observedAt: "2026-08-20T10:00:01.000Z",
         changes: [{ source: "session-index", path: sessionIndexPath, kind: "added" }],
       });
-      await vi.waitFor(() => {
-        expect(database.prepare("SELECT title FROM session_catalog WHERE id = ?").get(id)).toEqual({
-          title: "Renamed from watcher metadata",
-        });
-      });
-      expect(discover).toHaveBeenCalledTimes(discoveryCallsBeforeBatches);
-      expect(readPrefix).toHaveBeenCalledTimes(2);
-      expect(readIndex).toHaveBeenCalledOnce();
-      expect(events).toEqual([
-        { type: "library.updated", ids: [id], groupsChanged: true, revision: expect.any(String) },
-        {
-          type: "diagnostic.updated",
-          ids: ["metadata.snapshot_invalid:viewer"],
-          revision: expect.any(String),
-        },
-      ]);
+      await reconciler.reconcileNow("drain-metadata");
+      expect(catalogSession(database, id)?.summary.title).toBe("Renamed from watcher metadata");
+      expect(readPrefix).toHaveBeenCalledOnce();
       expect(catalogSession(database, id)?.structuralEvidence?.classification).toMatchObject({
         visibility: "delegated-child",
         parentThreadId: "00000000-0000-4000-8000-000000000001",
       });
-
       events.splice(0);
       await rm(rollout);
       await watcherOptions.onBatch({
         observedAt: "2026-08-20T10:00:02.000Z",
         changes: [{ source: "rollout", scope: "active", path: rollout, kind: "removed" }],
       });
-      await vi.waitFor(() => {
-        expect(database.prepare("SELECT count(*) AS count FROM session_catalog").get()).toEqual({
-          count: 1,
-        });
-        expect(database.prepare("SELECT error FROM session_catalog WHERE id = ?").get(id)).toEqual({
-          error: "Rollout source is temporarily unavailable, awaiting a stable representation.",
-        });
-      });
-      expect(discover).toHaveBeenCalledTimes(discoveryCallsBeforeBatches);
-      expect(readPrefix).toHaveBeenCalledTimes(2);
-      expect(events).toEqual([
-        { type: "library.updated", ids: [id], revision: expect.any(String) },
-        {
-          type: "diagnostic.updated",
-          ids: ["metadata.snapshot_invalid:viewer"],
-          revision: expect.any(String),
-        },
-      ]);
-      expect(catalogSession(database, id)?.structuralEvidence?.classification).toMatchObject({
-        visibility: "delegated-child",
-        parentThreadId: "00000000-0000-4000-8000-000000000001",
+      await reconciler.reconcileNow("metadata-still-retains-identity");
+      expect(catalogSession(database, id)).not.toBeNull();
+      expect(events.filter(({ type }) => type === "library.updated")).toEqual([]);
+      expect(database.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({
+        count: 0,
       });
     } finally {
       await reconciler.close();
@@ -493,12 +464,12 @@ describe("live reconciliation", () => {
     }
   });
 
-  it("verifies a content-identical touch through the source manifest without catalog invalidation", async () => {
+  it("verifies a content-identical touch only on explicit reopen without catalog invalidation", async () => {
     const { codexHome, rollout, cacheDir } = await createCodexHome();
     const database = openCacheDatabase(":memory:");
     const bus = new InvalidationBus();
     const events: ViewerInvalidation[] = [];
-    const readPrefix = vi.fn(readSessionMetaPrefix);
+    const readPrefix = vi.fn<typeof readSessionMetaPrefix>(readSessionMetaPrefix);
     let watcherOptions!: WatchSourcesOptions;
     const reconciler = new LiveReconciler({
       bus,
@@ -515,12 +486,17 @@ describe("live reconciliation", () => {
 
     try {
       await reconciler.start();
+      await reconciler.whenRecoverySettled();
       const id = String(database.prepare("SELECT id FROM session_catalog").get()?.["id"]);
       await expect(reconciler.prepareSessions([id])).resolves.toEqual([
         { id, state: "ready", error: null },
       ]);
+      await reconciler.reconcileNow("qualify-retained-recovery-evidence");
       bus.subscribe((event) => events.push(event));
       const before = await stat(rollout);
+      const retainedMtime = database
+        .prepare("SELECT mtime_ms FROM source_files WHERE path = ?")
+        .get(rollout)?.["mtime_ms"];
       await utimes(rollout, before.atime, new Date(before.mtimeMs + 5_000));
 
       await watcherOptions.onBatch({
@@ -528,6 +504,12 @@ describe("live reconciliation", () => {
         changes: [{ source: "rollout", scope: "active", path: rollout, kind: "changed" }],
       });
       await reconciler.reconcileNow("after-identical-touch");
+      expect(
+        database.prepare("SELECT mtime_ms FROM source_files WHERE path = ?").get(rollout)?.[
+          "mtime_ms"
+        ],
+      ).toBe(retainedMtime);
+      await reconciler.ensureMaterialized(id);
 
       expect(readPrefix).toHaveBeenCalledOnce();
       expect(events.filter(({ type }) => type === "library.updated")).toEqual([]);

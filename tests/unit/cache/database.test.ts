@@ -5,9 +5,21 @@ import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  upsertCatalogSessions,
+  catalogSession,
+  writeCatalogLibrary,
+} from "../../../server/cache/catalogStore.ts";
 import { openCacheDatabase, withCacheTransaction } from "../../../server/cache/database.ts";
 import { migrateCacheDatabase } from "../../../server/cache/migrations.ts";
-import { CACHE_SCHEMA_VERSION, INITIAL_CACHE_SCHEMA_SQL } from "../../../server/cache/schema.ts";
+import {
+  CACHE_SCHEMA_VERSION,
+  INITIAL_CACHE_SCHEMA_SQL,
+  CATALOG_CACHE_SCHEMA_SQL,
+  STRUCTURAL_EVIDENCE_SCHEMA_SQL,
+  SOURCE_GENERATION_SCHEMA_SQL,
+} from "../../../server/cache/schema.ts";
+import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
 
 function seedVersionOneSession(database: DatabaseSync): void {
   const summary = {
@@ -96,6 +108,110 @@ function seedVersionOneSession(database: DatabaseSync): void {
 }
 
 describe("viewer cache database", () => {
+  it("upgrades populated schema4 metadata and normalized storage without losing evidence, grouping or IDs", () => {
+    const database = new DatabaseSync(":memory:");
+    try {
+      database.exec(INITIAL_CACHE_SCHEMA_SQL);
+      seedVersionOneSession(database);
+      database.exec(CATALOG_CACHE_SCHEMA_SQL);
+      database.exec(STRUCTURAL_EVIDENCE_SCHEMA_SQL);
+      database.exec(SOURCE_GENERATION_SCHEMA_SQL);
+      database.exec("PRAGMA user_version = 4");
+      const classification = classifyCatalogThread({ threadSource: "user" });
+      const evidence = {
+        version: 2,
+        origin: "rollout-prefix",
+        status: "missing",
+        parentThreadIdHint: null,
+        meta: null,
+        classification,
+      };
+      database
+        .prepare("UPDATE session_catalog SET structural_evidence_json = ?")
+        .run(JSON.stringify(evidence));
+      writeCatalogLibrary(database, {
+        projects: [
+          {
+            id: "native-project",
+            name: "Native",
+            rootPaths: ["C:/Work/viewer"],
+            hostId: null,
+            source: "native",
+            position: 0,
+            recencyAt: null,
+          },
+        ],
+        threads: [
+          {
+            id: "session-v1",
+            title: "Existing cached session",
+            scope: "active",
+            projectId: "native-project",
+            hostId: null,
+            sectionId: null,
+            sectionPosition: null,
+            pinned: false,
+            recencyAt: 1,
+            classification,
+          },
+        ],
+        sections: [],
+        preferences: {
+          scope: "active",
+          chatSortMode: "manual",
+          projectSortMode: "manual",
+          projectOrder: ["native-project"],
+          pinnedOrder: [],
+          projectThreadOrders: {},
+        },
+        diagnostics: [],
+      });
+      const tables = ["source_files", "sessions", "session_catalog", "catalog_sidebar"];
+      const before = tables.map((table) => database.prepare(`SELECT * FROM ${table}`).all());
+      migrateCacheDatabase(database);
+      expect(database.prepare("PRAGMA user_version").get()).toEqual({
+        user_version: CACHE_SCHEMA_VERSION,
+      });
+      expect(tables.map((table) => database.prepare(`SELECT * FROM ${table}`).all())).toEqual(
+        before,
+      );
+      const retained = catalogSession(database, "session-v1")!;
+      expect(retained.structuralEvidence).toEqual(evidence);
+      upsertCatalogSessions(database, [
+        {
+          ...retained,
+          summary: {
+            ...retained.summary,
+            id: "db-only",
+            sourcePath: null,
+            createdAt: null,
+            updatedAt: null,
+          },
+          materialization: "cold",
+          sourceRevision: "metadata:db-only",
+        },
+      ]);
+      expect(catalogSession(database, "db-only")?.summary).toMatchObject({
+        id: "db-only",
+        sourcePath: null,
+        createdAt: null,
+        updatedAt: null,
+      });
+      upsertCatalogSessions(database, [
+        {
+          ...retained,
+          summary: { ...retained.summary, id: "distinct-thread-same-path" },
+          sourceRevision: "metadata:distinct-thread",
+        },
+      ]);
+      expect(catalogSession(database, "distinct-thread-same-path")?.summary.sourcePath).toBe(
+        retained.summary.sourcePath,
+      );
+      expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    } finally {
+      database.close();
+    }
+  });
   it("creates the versioned cache schema with foreign keys and FTS5 enabled", () => {
     const database = openCacheDatabase(":memory:");
 

@@ -1,4 +1,4 @@
-import { basename, extname, resolve } from "node:path";
+import { basename, extname, resolve, relative, isAbsolute, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import {
@@ -6,12 +6,12 @@ import {
   membershipProject,
   resolveThreadMembershipFromSources,
 } from "../../shared/library/projectIdentity.ts";
-import type { ConversationSummary } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { ConversationProject } from "../../shared/types/library.ts";
+import type { CatalogSessionMetadata, ConversationProject } from "../../shared/types/library.ts";
 import {
   listCatalogProjects,
   listAllCatalogSessions,
+  readCatalogLibrary,
   upsertCatalogSessions,
   writeCatalogLibrary,
   type CatalogSessionInput,
@@ -34,6 +34,7 @@ import {
   type SessionMetaPrefixObservation,
   type SessionMetaPrefixResult,
 } from "../ingestion/sessionMetaPrefix.ts";
+import type { CatalogMetadataSnapshot } from "../metadata/catalogMetadata.ts";
 import type { GlobalStateMetadata } from "../metadata/globalState.ts";
 import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import { resolveSidebarMetadata } from "../metadata/sidebarMetadata.ts";
@@ -43,6 +44,7 @@ import {
   classificationKind,
   isThreadVisible,
 } from "../metadata/threadClassification.ts";
+import { catalogMetadataRevision, resolveThreadFields } from "../metadata/threadFields.ts";
 import { classifySessionStructure } from "../normalization/subagentTopology.ts";
 
 export interface SessionMetaClassification {
@@ -59,6 +61,9 @@ export interface RefreshLiveCatalogOptions {
   sessionIndexEntries: readonly SessionIndexEntry[];
   globalState: GlobalStateMetadata;
   stateSnapshot: StateMetadataSnapshot | null;
+  catalogMetadata?: CatalogMetadataSnapshot;
+  recoveryBatch?: boolean;
+  signal?: AbortSignal;
   sidebarIdentityScopeKey?: string | undefined;
   prefixBytes?: number | undefined;
   /** Omit for recovery scans; [] refreshes metadata without rollout observations. */
@@ -86,7 +91,54 @@ interface DraftCatalogRow {
 const SOURCE_OBSERVATION_CONCURRENCY = 32;
 const CATALOG_REVISION_PREFIX = `catalog:${CACHE_PARSER_VERSION}:`;
 
-function sourcePathKey(path: string): string {
+function metadataRolloutPath(home: string, path: string): string | null {
+  const candidate = resolve(home, path);
+  const inside = ["sessions", "archived_sessions"].some((directory) => {
+    const child = relative(resolve(home, directory), candidate);
+    return child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+  });
+  return inside && /\.jsonl(?:\.zst)?$/iu.test(candidate) ? candidate : null;
+}
+
+async function readRecoveryBatch(options: RefreshLiveCatalogOptions) {
+  // oxlint-disable no-await-in-loop -- One bounded prefix at a time keeps recovery cancellable between files
+  const selected = [];
+  let bytesRead = 0;
+  for (const source of options.discovery.rollouts) {
+    options.signal?.throwIfAborted();
+    // Compressed filenames can establish recovery identity, decoding belongs to explicit open
+    const prefix: SessionMetaPrefixResult = source.path.endsWith(".zst")
+      ? {
+          status: "missing",
+          meta: null,
+          parentThreadIdHint: null,
+          bytesRead: 0,
+          diagnostics: [],
+          observation: {
+            device: 0n,
+            inode: 0n,
+            size: 0n,
+            mtimeNs: 0n,
+            ctimeNs: 0n,
+            regular: false,
+            symbolicLink: false,
+          },
+        }
+      : await (options.readPrefix ?? readSessionMetaPrefix)(source.path, 4096, {
+          firstRecordMaxBytes: 4096,
+        });
+    options.signal?.throwIfAborted();
+    bytesRead += prefix.bytesRead;
+    selected.push({ source, prefix });
+  }
+  return { selected, bytesRead, diagnostics: selected.flatMap(({ prefix }) => prefix.diagnostics) };
+  // oxlint-enable no-await-in-loop
+}
+
+function sourcePathKey(path: string | null): string {
+  if (path === null) {
+    return "";
+  }
   const normalized = resolve(path);
   return process.platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
 }
@@ -227,13 +279,6 @@ function fallbackSessionId(path: string): string {
   return uuid ?? name;
 }
 
-function stateTimestamp(value: number | undefined, fallbackMs: number): string {
-  if (value === undefined || !Number.isFinite(value) || value < 0) {
-    return new Date(fallbackMs).toISOString();
-  }
-  return new Date(value < 1_000_000_000_000 ? value * 1_000 : value).toISOString();
-}
-
 function sourceRevision(prefix: SessionMetaPrefixResult): string {
   const observation = prefix.observation;
   return [
@@ -274,52 +319,47 @@ function coldSummary(options: {
   section: string | null;
   parentThreadId: string | null;
   childThreadIds: string[];
-  existingSummary?: ConversationSummary | undefined;
-}): ConversationSummary {
+  existingSummary?: CatalogSessionMetadata | undefined;
+  existingHistoryMode?: string | null | undefined;
+}): CatalogSessionMetadata {
   const { id, source, prefix, sessionIndex, thread } = options;
-  const mtimeMs = Number(prefix.observation.mtimeNs) / 1_000_000;
-  const createdAt =
-    prefix.meta?.timestamp ??
-    stateTimestamp(thread?.createdAt, Number.isFinite(mtimeMs) ? mtimeMs : 0);
-  const updatedAt =
-    sessionIndex?.updatedAt ??
-    (thread?.updatedAt === undefined
-      ? options.existingSummary?.updatedAt
-      : stateTimestamp(thread.updatedAt, Number.isFinite(mtimeMs) ? mtimeMs : 0)) ??
-    stateTimestamp(undefined, Number.isFinite(mtimeMs) ? mtimeMs : 0);
-  const title =
-    sessionIndex?.threadName?.trim() ||
-    thread?.name?.trim() ||
-    thread?.title.trim() ||
-    thread?.firstUserMessage.trim() ||
-    options.existingSummary?.title ||
-    fallbackSessionId(source.path);
-  const preview = thread?.firstUserMessage.trim() || options.existingSummary?.preview || title;
-  const cwd = prefix.meta?.cwd ?? thread?.cwd ?? null;
+  const fields = resolveThreadFields({
+    id,
+    thread,
+    index: sessionIndex,
+    knownTitle: options.existingSummary?.title,
+    historyMode: prefix.meta?.historyMode ?? options.existingHistoryMode,
+    createdAt: prefix.meta?.timestamp ?? options.existingSummary?.createdAt,
+    updatedAt: options.existingSummary?.updatedAt ?? prefix.meta?.timestamp,
+    recencyAt: options.existingSummary?.recencyAt,
+    createdAtSource: prefix.meta?.timestamp
+      ? "rollout.timestamp"
+      : (options.existingSummary?.fieldSources?.createdAt ?? "retained.createdAt"),
+    updatedAtSource: options.existingSummary?.updatedAt
+      ? (options.existingSummary.fieldSources?.updatedAt ?? "retained.updatedAt")
+      : "rollout.timestamp",
+    recencyAtSource: options.existingSummary?.fieldSources?.recencyAt ?? undefined,
+  });
+  const cwd = prefix.meta?.cwd ?? thread?.cwd ?? options.existingSummary?.cwd ?? null;
   return {
     id,
-    title,
+    ...fields,
     scope: source.scope,
     sourcePath: source.path,
-    createdAt,
-    updatedAt,
     cwd,
-    gitBranch: prefix.meta?.git?.branch ?? thread?.gitBranch ?? null,
-    gitSha: prefix.meta?.git?.commitHash ?? thread?.gitSha ?? null,
-    gitOriginUrl: prefix.meta?.git?.repositoryUrl ?? thread?.gitOriginUrl ?? null,
-    models: thread?.model ? [thread.model] : [],
-    reasoningEfforts: thread?.reasoningEffort ? [thread.reasoningEffort] : [],
-    turnCount: 0,
-    assistantMessageCount: 0,
-    toolCallCount: 0,
-    toolCounts: {},
-    preview,
+    gitBranch:
+      prefix.meta?.git?.branch ?? thread?.gitBranch ?? options.existingSummary?.gitBranch ?? null,
+    gitSha:
+      prefix.meta?.git?.commitHash ?? thread?.gitSha ?? options.existingSummary?.gitSha ?? null,
+    gitOriginUrl:
+      prefix.meta?.git?.repositoryUrl ??
+      thread?.gitOriginUrl ??
+      options.existingSummary?.gitOriginUrl ??
+      null,
     pinned: options.pinned,
     sectionName: options.section,
     parentThreadId: options.parentThreadId,
     childThreadIds: options.childThreadIds,
-    hasMedia: false,
-    diagnosticCount: 0,
     revision: sourceRevision(prefix),
   };
 }
@@ -360,6 +400,8 @@ function applyTopology(
   drafts: DraftCatalogRow[],
   stateSnapshot: StateMetadataSnapshot | null,
   diagnostics: ViewerDiagnostic[],
+  metadataOnly = false,
+  recovery = false,
 ): void {
   const byId = new Map(drafts.map((draft) => [draft.input.summary.id, draft]));
   const threads = new Map((stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread]));
@@ -369,8 +411,10 @@ function applyTopology(
       thread === undefined ||
       thread.rolloutPath === "" ||
       sourcePathKey(thread.rolloutPath) === sourcePathKey(input.summary.sourcePath);
-    const meta = currentSource ? (input.structuralEvidence?.meta ?? prefix.meta) : null;
-    const classification = classifyThreadMetadata(
+    const retained = metadataOnly ? input.structuralEvidence?.classification : undefined;
+    const meta =
+      currentSource && !metadataOnly ? (input.structuralEvidence?.meta ?? prefix.meta) : null;
+    let classification = classifyThreadMetadata(
       {
         metadata: meta,
         status:
@@ -386,12 +430,67 @@ function applyTopology(
         spawnParentThreadIds: (stateSnapshot?.spawnEdges ?? [])
           .filter((edge) => edge.childThreadId === input.summary.id)
           .map((edge) => edge.parentThreadId),
-        parentThreadIdHint: prefix.parentThreadIdHint,
+        parentThreadIdHint: metadataOnly ? null : prefix.parentThreadIdHint,
       },
     );
+    const nativeDeclaration = classification.declarations?.find(
+      (declaration) => declaration.origin === "native",
+    );
+    const explicitNative =
+      thread?.threadSource != null ||
+      thread?.parentThreadId != null ||
+      thread?.attachedParentThreadId != null ||
+      nativeDeclaration?.spawn ||
+      nativeDeclaration?.internal ||
+      classification.relationship !== "none";
+    if (
+      metadataOnly &&
+      retained &&
+      input.structuralEvidence?.meta == null &&
+      (thread === undefined || (!explicitNative && retained.visibility !== "user-root"))
+    ) {
+      classification = {
+        ...retained,
+        reasons: [...retained.reasons, "retained-structure-unvalidated"],
+      };
+      input.structuralEvidence = {
+        ...input.structuralEvidence!,
+        freshness: "retained-unvalidated",
+      };
+    }
+    if (metadataOnly && input.structuralEvidence?.meta != null) {
+      if (!explicitNative && retained && retained.visibility !== "user-root") {
+        classification = {
+          ...retained,
+          reasons: [...retained.reasons, "retained-raw-structure-unvalidated"],
+        };
+      } else {
+        classification.reasons.push("retained-raw-structure-unvalidated");
+      }
+      input.structuralEvidence = { ...input.structuralEvidence, freshness: "retained-unvalidated" };
+    }
+    if (recovery && thread === undefined && prefix.meta === null) {
+      if (input.structuralEvidence?.classification) {
+        classification = {
+          ...input.structuralEvidence.classification,
+          reasons: [
+            ...input.structuralEvidence.classification.reasons,
+            "retained-structure-unvalidated",
+          ],
+        };
+        input.structuralEvidence = {
+          ...input.structuralEvidence,
+          freshness: "retained-unvalidated",
+        };
+      } else {
+        classification.visibility = "unresolved";
+        classification.reasons.push("recovery-structure-not-loaded");
+      }
+    }
     if (!currentSource) {
       classification.reasons.push("stale-rollout-structure-ignored");
     }
+    classification.reasons = [...new Set(classification.reasons)];
     input.kind = classificationKind(classification);
     input.parentThreadId =
       classification.relationship === "attached" || classification.relationship === "fork"
@@ -493,24 +592,64 @@ function applyTopology(
 export async function refreshLiveCatalog(
   options: RefreshLiveCatalogOptions,
 ): Promise<CatalogRefreshResult> {
+  const metadataOnly = options.catalogMetadata !== undefined;
+  const previousLibrary = readCatalogLibrary(options.database);
+  const previousThreads = new Map(previousLibrary?.threads.map((thread) => [thread.id, thread]));
+  const removedIds: string[] = [];
+  const absentNativeIds = new Set<string>();
+  const native = options.catalogMetadata;
+  if (native?.freshness.state === "fresh" && native.threadsComplete) {
+    const ids = new Set(native.threads.map((thread) => thread.id));
+    for (const row of options.database
+      .prepare("SELECT id FROM catalog_native_ownership WHERE authority = ?")
+      .all(native.stateAuthority)) {
+      const id = String(row["id"]);
+      if (!ids.has(id)) {
+        absentNativeIds.add(id);
+        if (options.database.prepare("DELETE FROM session_catalog WHERE id = ?").run(id).changes) {
+          removedIds.push(id);
+        }
+      }
+    }
+  }
   const existingRows = listAllCatalogSessions(options.database);
+  const removedNativeIds = new Set(
+    options.database
+      .prepare(
+        "SELECT n.id FROM catalog_native_ownership n WHERE NOT EXISTS (SELECT 1 FROM session_catalog c WHERE c.id = n.id)",
+      )
+      .all()
+      .map((row) => String(row["id"])),
+  );
   const observedChanges = options.database.prepare("SELECT total_changes() AS count").get()?.[
     "count"
   ];
-  const reusable = await reusablePrefixes(options, existingRows);
+  const reusable =
+    metadataOnly || options.recoveryBatch
+      ? {
+          prefixes: new Map<string, SessionMetaPrefixResult>(),
+          rows: new Map<string, CatalogSessionInput>(),
+        }
+      : await reusablePrefixes(options, existingRows);
   const readPrefix = options.readPrefix ?? readSessionMetaPrefix;
-  const sourceSelection = await selectSessionSources(options.discovery.rollouts, {
-    currentRolloutPaths: new Map(
-      (options.stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread.rolloutPath]),
-    ),
-    prefixBytes: options.prefixBytes,
-    readPrefix: (path, maxBytes, prefixOptions) =>
-      Promise.resolve(
-        reusable.prefixes.get(sourcePathKey(path)) ?? readPrefix(path, maxBytes, prefixOptions),
-      ),
-    readJsonl: options.readJsonl,
-  });
+  const sourceSelection = metadataOnly
+    ? { selected: [], diagnostics: [], bytesRead: 0 }
+    : options.recoveryBatch
+      ? await readRecoveryBatch(options)
+      : await selectSessionSources(options.discovery.rollouts, {
+          currentRolloutPaths: new Map(
+            (options.stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread.rolloutPath]),
+          ),
+          prefixBytes: options.prefixBytes,
+          readPrefix: (path, maxBytes, prefixOptions) =>
+            Promise.resolve(
+              reusable.prefixes.get(sourcePathKey(path)) ??
+                readPrefix(path, maxBytes, prefixOptions),
+            ),
+          readJsonl: options.readJsonl,
+        });
   const diagnostics = [...options.discovery.diagnostics, ...sourceSelection.diagnostics];
+  options.signal?.throwIfAborted();
   const prefixes = sourceSelection.selected;
   const sessionIndex = new Map(options.sessionIndexEntries.map((entry) => [entry.id, entry]));
   const threads = new Map(
@@ -529,6 +668,90 @@ export async function refreshLiveCatalog(
   };
   const projects = catalogProjects(metadata);
 
+  if (native) {
+    const existing = new Map(existingRows.map((row) => [row.summary.id, row]));
+    const ids = new Set([...threads.keys(), ...sessionIndex.keys(), ...existing.keys()]);
+    for (const id of ids) {
+      if (absentNativeIds.has(id) || (removedNativeIds.has(id) && !threads.has(id))) {
+        continue;
+      }
+      const previous = existing.get(id);
+      const thread = threads.get(id);
+      const sourcePath = thread?.rolloutPath
+        ? metadataRolloutPath(native.codexHome, thread.rolloutPath)
+        : (previous?.summary.sourcePath ?? null);
+      const prefix: SessionMetaPrefixResult = {
+        status: "missing",
+        meta: null,
+        parentThreadIdHint: null,
+        bytesRead: 0,
+        diagnostics: [],
+        observation: {
+          device: 0n,
+          inode: 0n,
+          size: 0n,
+          mtimeNs: 0n,
+          ctimeNs: 0n,
+          regular: false,
+          symbolicLink: false,
+        },
+      };
+      const currentSourceRevision =
+        previous?.summary.sourcePath === sourcePath
+          ? previous.sourceRevision
+          : `metadata:${id}:${sourcePath ?? "unresolved"}`;
+      const summary = coldSummary({
+        id,
+        source: {
+          path: sourcePath ?? "",
+          scope: thread
+            ? thread.archived
+              ? "archived"
+              : "active"
+            : (previous?.summary.scope ?? "active"),
+        },
+        prefix,
+        thread,
+        sessionIndex: sessionIndex.get(id),
+        pinned: pinned.has(id) || thread?.pinned === true,
+        section: thread ? sectionName(thread, sections) : (previous?.summary.sectionName ?? null),
+        parentThreadId: null,
+        childThreadIds: [],
+        existingSummary: previous?.summary,
+        existingHistoryMode: previous?.structuralEvidence?.classification?.historyMode,
+      });
+      summary.sourcePath = sourcePath;
+      summary.revision = currentSourceRevision;
+      drafts.push({
+        prefix,
+        input: {
+          summary,
+          kind: previous?.kind ?? "root",
+          materialization: "cold",
+          project: previous?.project ?? { id: "none", name: "Recents", source: "none", hint: null },
+          parentThreadId: null,
+          agentPath: null,
+          agentNickname: null,
+          agentDepth: null,
+          childCount: 0,
+          sourceSize: previous?.sourceSize ?? 0,
+          sourceMtimeMs: previous?.sourceMtimeMs ?? 0,
+          sourceDevice: previous?.sourceDevice ?? null,
+          sourceInode: previous?.sourceInode ?? null,
+          sourceRevision: currentSourceRevision,
+          error: null,
+          structuralEvidence: previous?.structuralEvidence ?? {
+            version: CATALOG_EVIDENCE_VERSION,
+            origin: thread ? "native-metadata" : "session-index",
+            status: "missing",
+            meta: null,
+            parentThreadIdHint: null,
+          },
+        },
+      });
+    }
+  }
+
   for (const { source, prefix } of prefixes) {
     if (prefix.status === "changed") {
       const existing = existingRows.find(
@@ -539,9 +762,20 @@ export async function refreshLiveCatalog(
       }
       continue;
     }
-    const id = prefix.meta?.id ?? fallbackSessionId(source.path);
+    const retainedSource = options.recoveryBatch
+      ? existingRows.find(
+          (row) => sourcePathKey(row.summary.sourcePath) === sourcePathKey(source.path),
+        )
+      : undefined;
+    const id = prefix.meta?.id ?? retainedSource?.summary.id ?? fallbackSessionId(source.path);
     const thread = threads.get(id);
-    const existing = reusable.rows.get(sourcePathKey(source.path));
+    const existing = retainedSource ?? reusable.rows.get(sourcePathKey(source.path));
+    const retainedEvidence =
+      options.recoveryBatch &&
+      prefix.meta === null &&
+      ["missing", "exhausted", "incomplete"].includes(prefix.status)
+        ? existing?.structuralEvidence
+        : undefined;
     const classification = classifySessionMeta(
       prefix.meta,
       thread?.model,
@@ -579,13 +813,15 @@ export async function refreshLiveCatalog(
         sourceInode: existing?.sourceInode ?? prefix.observation.inode.toString(),
         sourceRevision: reusableSourceRevision(existing, prefix),
         error: null,
-        structuralEvidence: {
-          version: CATALOG_EVIDENCE_VERSION,
-          origin: existing?.structuralEvidence?.origin ?? "rollout-prefix",
-          status: prefix.status,
-          meta: prefix.meta,
-          parentThreadIdHint: prefix.parentThreadIdHint,
-        },
+        structuralEvidence: retainedEvidence
+          ? { ...retainedEvidence, freshness: "retained-unvalidated" }
+          : {
+              version: CATALOG_EVIDENCE_VERSION,
+              origin: existing?.structuralEvidence?.origin ?? "rollout-prefix",
+              status: prefix.status,
+              meta: prefix.meta,
+              parentThreadIdHint: prefix.parentThreadIdHint,
+            },
       },
     });
   }
@@ -632,11 +868,15 @@ export async function refreshLiveCatalog(
     drafts.push({
       input: {
         ...existing,
-        materialization: "cold",
-        sourceRevision: existing.sourceRevision.endsWith(":unavailable")
+        materialization: options.recoveryBatch ? existing.materialization : "cold",
+        sourceRevision: options.recoveryBatch
           ? existing.sourceRevision
-          : `${existing.sourceRevision}:unavailable`,
-        error: "Rollout source is temporarily unavailable, awaiting a stable representation.",
+          : existing.sourceRevision.endsWith(":unavailable")
+            ? existing.sourceRevision
+            : `${existing.sourceRevision}:unavailable`,
+        error: options.recoveryBatch
+          ? existing.error
+          : "Rollout source is temporarily unavailable, awaiting a stable representation.",
       },
       prefix: {
         status: "missing",
@@ -656,14 +896,14 @@ export async function refreshLiveCatalog(
       },
     });
   }
-  applyTopology(drafts, options.stateSnapshot, diagnostics);
+  applyTopology(drafts, options.stateSnapshot, diagnostics, metadataOnly, options.recoveryBatch);
   const rows = drafts.map(({ input }) => input);
   const prefixesById = new Map(drafts.map(({ input, prefix }) => [input.summary.id, prefix]));
   const memberships = rows.map((row) => {
     const id = row.summary.id;
-    const native = threads.get(id);
-    if (native) {
-      row.summary = { ...row.summary, scope: native.archived ? "archived" : "active" };
+    const nativeThread = threads.get(id);
+    if (nativeThread) {
+      row.summary = { ...row.summary, scope: nativeThread.archived ? "archived" : "active" };
     }
     const workspace = metadata.globalState.workspaceStates?.[id];
     const source = metadata.threads.some((thread) => thread.id === id)
@@ -681,7 +921,32 @@ export async function refreshLiveCatalog(
             },
           },
         };
-    const membership = resolveThreadMembershipFromSources(id, source);
+    let membership = resolveThreadMembershipFromSources(id, source);
+    const previous = previousThreads.get(id);
+    const explicitGlobalMembership =
+      (!native || native.freshness.globalState === "fresh") &&
+      (metadata.globalState.projectlessThreadIds?.includes(id) ||
+        Object.hasOwn(metadata.globalState.threadProjectAssignments ?? {}, id) ||
+        Object.hasOwn(workspace ?? {}, "project"));
+    const retainMembership =
+      (metadataOnly || options.recoveryBatch === true) &&
+      !nativeThread &&
+      previous !== undefined &&
+      !explicitGlobalMembership;
+    if (retainMembership) {
+      membership = {
+        ...membership,
+        projectId: previous.projectId,
+        hostId: previous.hostId,
+        diagnostics: [...membership.diagnostics, "retained-membership-unvalidated"],
+      };
+      const retainedProject = previousLibrary?.projects.find(
+        (project) => project.id === previous.projectId,
+      );
+      if (retainedProject && !projects.some((project) => project.id === retainedProject.id)) {
+        projects.push(retainedProject);
+      }
+    }
     row.project = membershipProject(membership, projects);
     for (const reason of membership.diagnostics) {
       diagnostics.push(
@@ -695,11 +960,71 @@ export async function refreshLiveCatalog(
         }),
       );
     }
-    return { row, membership };
+    return {
+      row,
+      membership,
+      retainMembership,
+      retainedSection:
+        (metadataOnly || options.recoveryBatch === true) && !nativeThread ? previous : undefined,
+    };
   });
   const sidebar = resolveSidebarMetadata(metadata, {
     identityScopeKey: options.sidebarIdentityScopeKey,
   });
+  const retainedSectionIds = new Set(
+    memberships
+      .filter(({ retainedSection }) => retainedSection !== undefined)
+      .map(({ row }) => row.summary.id),
+  );
+  const currentSectionMembers = new Set(sidebar.sections.flatMap((section) => section.threadIds));
+  const qualifiedSectionIdentity = sidebar.qualifiedSectionIdentity;
+  const freshSectionState =
+    native?.freshness.globalState === "fresh" && qualifiedSectionIdentity
+      ? metadata.globalState.sectionsByIdentity?.[qualifiedSectionIdentity]
+      : undefined;
+  for (const previous of previousLibrary?.sections ?? []) {
+    const qualifiedPrefix = `custom:${qualifiedSectionIdentity}:`;
+    const qualifiedCurrentCollection =
+      freshSectionState?.sections !== undefined && previous.id.startsWith(qualifiedPrefix);
+    const currentDefinition = qualifiedCurrentCollection
+      ? freshSectionState.sections?.find(
+          (section) => section.id === previous.id.slice(qualifiedPrefix.length),
+        )
+      : undefined;
+    // A qualified section collection can explicitly remove the entire section
+    if (qualifiedCurrentCollection && !currentDefinition) {
+      continue;
+    }
+    const retainedIds = previous.threadIds.filter((id) => {
+      const host =
+        freshSectionState?.threadHostIds?.[id] ??
+        metadata.globalState.threadProjectMembershipHostIds?.[id];
+      const explicitlyDeleted =
+        host !== undefined &&
+        currentDefinition?.pendingDeletionHostIdsByItemKey?.[
+          `codex:thread:${host}:${id}`
+        ]?.includes(host);
+      const observedHostItems =
+        host !== undefined &&
+        currentDefinition !== undefined &&
+        sidebar.sectionItemCoverage[previous.id] === "complete";
+      return (
+        retainedSectionIds.has(id) &&
+        !currentSectionMembers.has(id) &&
+        !explicitlyDeleted &&
+        !observedHostItems
+      );
+    });
+    if (!retainedIds.length) {
+      continue;
+    }
+    const current = sidebar.sections.find((section) => section.id === previous.id);
+    if (current) {
+      current.threadIds.push(...retainedIds);
+    } else {
+      sidebar.sections.push({ ...previous, threadIds: retainedIds, projectIds: [] });
+    }
+  }
   for (const reason of sidebar.diagnostics) {
     diagnostics.push(
       createViewerDiagnostic({
@@ -711,32 +1036,73 @@ export async function refreshLiveCatalog(
       }),
     );
   }
+  for (const row of rows) {
+    row.summary.metadataRevision = catalogMetadataRevision(row.summary);
+    if (row.summary.metadataConflicts?.length) {
+      diagnostics.push(
+        createViewerDiagnostic({
+          code: "metadata.snapshot_invalid",
+          severity: "info",
+          area: "metadata",
+          sessionId: row.summary.id,
+          message: "Independent metadata sources disagree, field precedence was applied.",
+          details: {
+            fields: row.summary.metadataConflicts,
+            sources: row.summary.fieldSources ?? {},
+          },
+        }),
+      );
+    }
+  }
   const changedIds = upsertCatalogSessions(options.database, rows, currentRows);
+  if (native) {
+    for (const thread of native.threads) {
+      options.database
+        .prepare(
+          "INSERT INTO catalog_native_ownership (id, authority) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET authority = excluded.authority",
+        )
+        .run(thread.id, native.stateAuthority);
+    }
+    options.database
+      .prepare(
+        "INSERT INTO catalog_metadata_status (id, payload_json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json",
+      )
+      .run(
+        JSON.stringify({
+          codexHome: native.codexHome,
+          freshness: native.freshness,
+          generations: native.generations,
+          stateAuthority: native.stateAuthority,
+          threadsComplete: native.threadsComplete,
+        }),
+      );
+  }
   const groupsChanged = writeCatalogLibrary(options.database, {
     projects,
     sections: sidebar.sections,
     preferences: sidebar.preferences,
     diagnostics: sidebar.diagnostics,
-    threads: memberships.map(({ row, membership }) => {
+    threads: memberships.map(({ row, membership, retainMembership, retainedSection }) => {
       const thread = threads.get(row.summary.id);
       const legacyTimestamp =
         sessionIndex.get(row.summary.id)?.updatedAt ??
-        prefixesById.get(row.summary.id)?.meta?.timestamp;
+        prefixesById.get(row.summary.id)?.meta?.timestamp ??
+        row.summary.updatedAt;
       const updatedAt =
         thread?.updatedAtMs ??
         (thread ? thread.updatedAt * 1000 : legacyTimestamp ? Date.parse(legacyTimestamp) : null);
       return {
         id: row.summary.id,
-        title:
-          thread?.name ??
-          thread?.title ??
-          sessionIndex.get(row.summary.id)?.threadName ??
-          row.summary.id,
+        title: row.summary.title,
         projectId: membership.projectId,
         hostId: membership.hostId,
         scope: row.summary.scope,
-        sectionId: thread?.sectionId ?? null,
-        sectionPosition: thread?.sectionPosition ?? null,
+        sectionId: thread ? thread.sectionId : (retainedSection?.sectionId ?? null),
+        sectionPosition: thread
+          ? (thread.sectionPosition ?? null)
+          : (retainedSection?.sectionPosition ?? null),
+        membershipFreshness: retainMembership ? "retained-unvalidated" : "fresh",
+        sectionFreshness: retainedSection ? "retained-unvalidated" : "fresh",
         pinned: row.summary.pinned,
         recencyAt:
           thread?.recencyAtMs ??
@@ -753,7 +1119,7 @@ export async function refreshLiveCatalog(
     groupsChanged,
     changedIds,
     projects: listCatalogProjects(options.database),
-    removedIds: [],
+    removedIds,
     diagnostics,
     bytesRead: sourceSelection.bytesRead,
   };

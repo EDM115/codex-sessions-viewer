@@ -3,7 +3,7 @@ import { PhFunnel, PhX } from "@phosphor-icons/vue";
 import { computed } from "vue";
 
 import type { ConversationScope } from "#shared/types/conversation.ts";
-import type { ConversationListItem } from "#shared/types/library.ts";
+import type { LibraryEntry } from "#shared/types/library.ts";
 import type { SearchHit } from "#shared/types/repository.ts";
 
 import { useOptionalLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
@@ -25,7 +25,7 @@ const props = withDefaults(
     error: string | null;
     hasMedia: boolean;
     hits: SearchHit[];
-    items: ConversationListItem[];
+    items: LibraryEntry[];
     loading: boolean;
     mode?: "live" | "static";
     model: string;
@@ -105,6 +105,47 @@ function updateMedia(event: Event): void {
       <span class="mode-indicator" :class="mode === 'live' ? 'is-live' : null" aria-hidden="true" />
       <span>{{ mode === "live" ? "Watching local Codex files" : "Static read-only export" }}</span>
     </div>
+
+    <p
+      v-if="workspace?.runtimeStatus.value.catalogSource === 'partial'"
+      class="library-sidebar__boundary"
+      role="status"
+    >
+      {{
+        workspace.runtimeStatus.value.recoveryState === "running"
+          ? "Some metadata could not be read. Recovering conversations in the background…"
+          : "Some metadata could not be read. Showing last known conversations where needed."
+      }}
+    </p>
+    <p
+      v-else-if="workspace?.runtimeStatus.value.catalogSource === 'retained'"
+      class="library-sidebar__boundary"
+      role="status"
+    >
+      Showing retained metadata while current metadata is unavailable.
+    </p>
+    <p
+      v-else-if="workspace?.runtimeStatus.value.catalogSource === 'recovery'"
+      class="library-sidebar__boundary"
+      role="status"
+    >
+      {{
+        workspace.runtimeStatus.value.recoveryState === "running"
+          ? "Metadata unavailable. Recovering conversations in the background…"
+          : workspace.runtimeStatus.value.recoveryState === "failed"
+            ? "Recovery could not finish. Existing conversations remain available."
+            : "Showing recovered conversations. Current metadata is unavailable."
+      }}
+    </p>
+
+    <p
+      v-if="workspace?.projects.value.some((project) => project.diagnostics?.length)"
+      class="library-sidebar__boundary"
+      role="status"
+    >
+      Some project membership is missing from this export. Existing groups are preserved, and
+      ambiguous conversations appear under Unresolved export membership.
+    </p>
 
     <UiTextField
       id="library-search"

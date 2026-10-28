@@ -41,12 +41,16 @@ export interface JsonlParserState {
 }
 
 export interface JsonlStreamParserOptions {
+  maxRecordBytes?: number;
   state?: JsonlParserState | undefined;
   onRecord?: ((record: JsonlRecord) => void) | undefined;
   onError?: ((error: JsonlParseError) => void) | undefined;
 }
 
 export interface ReadStableJsonlOptions {
+  retainRecords?: boolean;
+  onRecord?: (record: JsonlRecord) => void;
+  maxRecordBytes?: number;
   start?: number | undefined;
   chunkSize?: number | undefined;
   expectedPrefix?: ExpectedSourcePrefix | undefined;
@@ -75,11 +79,16 @@ function copyState(state: JsonlParserState): JsonlParserState {
 }
 
 export class JsonlStreamParser {
+  readonly #maxRecordBytes: number;
   readonly #onRecord: ((record: JsonlRecord) => void) | undefined;
   readonly #onError: ((error: JsonlParseError) => void) | undefined;
   #state: JsonlParserState;
 
   constructor(options: JsonlStreamParserOptions = {}) {
+    this.#maxRecordBytes = options.maxRecordBytes ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(this.#maxRecordBytes) || this.#maxRecordBytes < 1) {
+      throw new RangeError("Invalid record byte budget");
+    }
     this.#state = copyState(options.state ?? initialState());
     this.#onRecord = options.onRecord;
     this.#onError = options.onError;
@@ -110,21 +119,16 @@ export class JsonlStreamParser {
           : physicalLine;
       const byteStart = combinedStart + lineStart;
       const byteEnd = combinedStart + newline + 1;
+      if (line.byteLength > this.#maxRecordBytes) {
+        throw new Error("rollout.record_budget");
+      }
 
       if (line.byteLength > 0) {
-        const raw = line.toString("utf8");
+        let raw: string;
+        let value: JsonValue;
         try {
-          const value = jsonValueSchema.parse(JSON.parse(raw));
-          this.#onRecord?.({
-            rangeSha256: createHash("sha256")
-              .update(combined.subarray(lineStart, newline + 1))
-              .digest("hex"),
-            lineNumber: this.#state.nextLineNumber,
-            byteStart,
-            byteEnd,
-            raw,
-            value,
-          });
+          raw = new TextDecoder("utf-8", { fatal: true }).decode(line);
+          value = jsonValueSchema.parse(JSON.parse(raw));
         } catch {
           this.#onError?.({
             lineNumber: this.#state.nextLineNumber,
@@ -132,13 +136,29 @@ export class JsonlStreamParser {
             byteEnd,
             reason: "invalid-json",
           });
+          this.#state.nextLineNumber += 1;
+          lineStart = newline + 1;
+          continue;
         }
+        this.#onRecord?.({
+          rangeSha256: createHash("sha256")
+            .update(combined.subarray(lineStart, newline + 1))
+            .digest("hex"),
+          lineNumber: this.#state.nextLineNumber,
+          byteStart,
+          byteEnd,
+          raw,
+          value,
+        });
       }
 
       this.#state.nextLineNumber += 1;
       lineStart = newline + 1;
     }
 
+    if (combined.length - lineStart > this.#maxRecordBytes) {
+      throw new Error("rollout.record_budget");
+    }
     this.#state.pending = Buffer.from(combined.subarray(lineStart));
     this.#state.pendingStart = combinedStart + lineStart;
     this.#state.nextOffset += chunk.byteLength;
@@ -163,7 +183,13 @@ export async function readStableJsonl(
   const errors: JsonlParseError[] = [];
   const parser = new JsonlStreamParser({
     state: originalState,
-    onRecord: (record) => records.push(record),
+    ...(options.maxRecordBytes === undefined ? {} : { maxRecordBytes: options.maxRecordBytes }),
+    onRecord: (record) => {
+      if (options.retainRecords !== false) {
+        records.push(record);
+      }
+      options.onRecord?.(record);
+    },
     onError: (error) => errors.push(error),
   });
   const read = await stableRead(path, {

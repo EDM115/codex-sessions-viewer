@@ -10,6 +10,45 @@ import {
   type SourceWatchBatch,
 } from "../../../server/ingestion/watchSources.ts";
 
+it("observes metadata already present in an atomically installed legacy sqlite directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "viewer-legacy-metadata-watch-"));
+  const home = join(root, "home");
+  const incoming = join(root, "incoming");
+  await Promise.all([mkdir(home), mkdir(incoming)]);
+  await Promise.all([
+    writeFile(join(incoming, "state_5.sqlite"), "database"),
+    writeFile(join(incoming, "state_5.sqlite-wal"), "wal"),
+  ]);
+  const batches: SourceWatchBatch[] = [];
+  const watcher = watchSources({
+    codexHome: home,
+    metadataOnly: true,
+    debounceMs: 0,
+    onBatch(batch) {
+      batches.push(batch);
+    },
+  });
+  try {
+    await watcher.ready;
+    await rename(incoming, join(home, "sqlite"));
+    await vi.waitFor(
+      () => {
+        const paths = batches.flatMap((batch) => batch.changes.map((change) => change.path));
+        expect(paths).toEqual(
+          expect.arrayContaining([
+            join(home, "sqlite", "state_5.sqlite"),
+            join(home, "sqlite", "state_5.sqlite-wal"),
+          ]),
+        );
+      },
+      { timeout: 3000 },
+    );
+  } finally {
+    await watcher.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("watches atomic metadata replacement and WAL creation without subscribing to rollout trees", async () => {
   const home = await mkdtemp(join(await realpath(tmpdir()), "viewer-metadata-watch-"));
   let watcher: SourceWatcher | undefined;

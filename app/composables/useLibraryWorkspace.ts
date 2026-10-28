@@ -11,11 +11,7 @@ import {
 } from "vue";
 
 import type { ConversationScope } from "#shared/types/conversation.ts";
-import type {
-  ConversationListItem,
-  ConversationProject,
-  DeepSearchJob,
-} from "#shared/types/library.ts";
+import type { LibraryEntry, CatalogProjectGroup, DeepSearchJob } from "#shared/types/library.ts";
 import {
   viewerRuntimeStatusSchema,
   type ConversationRepository,
@@ -33,16 +29,16 @@ import type { RepositoryRequester } from "../repositories/live.ts";
 export interface LibraryPayload {
   counts: Record<ConversationScope, number>;
   hits: SearchHit[];
-  items: ConversationListItem[];
+  items: LibraryEntry[];
   nextCursor: string | null;
-  projects: ConversationProject[];
+  projects: CatalogProjectGroup[];
   runtimeStatus: ViewerRuntimeStatus;
   total: number;
 }
 
 export interface LibraryPageState {
   error: string | null;
-  items: ConversationListItem[];
+  items: LibraryEntry[];
   loading: boolean;
   nextCursor: string | null;
   total: number;
@@ -60,23 +56,22 @@ export interface LibraryWorkspaceState {
   hasSettledContent: Readonly<Ref<boolean>>;
   hits: Ref<SearchHit[]>;
   hydrate(payload: LibraryPayload): void;
-  items: Ref<ConversationListItem[]>;
+  items: Ref<LibraryEntry[]>;
   childPages: Map<string, LibraryPageState>;
   loadPayload(options?: RepositoryRequestOptions, cursor?: string): Promise<LibraryPayload>;
   loading: Ref<boolean>;
   mode: RepositoryMode;
   model: Readonly<Ref<string>>;
   nextCursor: Ref<string | null>;
-  projects: Ref<ConversationProject[]>;
+  projects: Ref<CatalogProjectGroup[]>;
   sidebarGroups: Readonly<
-    Ref<{ id: string; name: string | null; projects: ConversationProject[] }[]>
+    Ref<{ id: string; name: string | null; projects: CatalogProjectGroup[] }[]>
   >;
   projectPages: Map<string, LibraryPageState>;
   query: Readonly<Ref<string>>;
   refresh(append?: boolean): Promise<void>;
-  loadChildren(parent: ConversationListItem, append?: boolean): Promise<void>;
+  loadChildren(parent: LibraryEntry, append?: boolean): Promise<void>;
   loadProject(projectId: string, append?: boolean): Promise<void>;
-  observeSession(element: Element, item: ConversationListItem): () => void;
   repository: ConversationRepository;
   runtimeStatus: Ref<ViewerRuntimeStatus>;
   scope: Readonly<Ref<ConversationScope>>;
@@ -88,11 +83,10 @@ export interface LibraryWorkspaceState {
   startDeepSearch(): Promise<void>;
   stop(): void;
   toggleProject(projectId: string): Promise<void>;
-  toggleSession(item: ConversationListItem): Promise<void>;
+  toggleSession(item: LibraryEntry): Promise<void>;
   cancelDeepSearch(): Promise<void>;
   tool: Readonly<Ref<string>>;
   updateQuery(name: string, value: string | boolean): void;
-  retryPreparation(id: string): Promise<void>;
   sessionDestination(
     id: string,
     turnId?: string,
@@ -184,26 +178,27 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
       }),
       { active: 0, archived: 0 },
     );
-    const result = searching
-      ? searchExactTurns
-        ? await repository.search(searchQuery(cursor), options)
-        : await repository.listSessions(listQuery(cursor), options)
-      : { items: [], nextCursor: null, total: nextCounts[scope.value] };
+    const searchPage =
+      searching && searchExactTurns ? await repository.search(searchQuery(cursor), options) : null;
+    const libraryPage =
+      searching && !searchExactTurns
+        ? await repository.listSessions(listQuery(cursor), options)
+        : null;
     return {
       counts: nextCounts,
-      hits: searching && searchExactTurns ? (result.items as SearchHit[]) : [],
-      items: searching && searchExactTurns ? [] : (result.items as ConversationListItem[]),
-      nextCursor: result.nextCursor,
+      hits: searchPage?.items ?? [],
+      items: libraryPage?.items ?? [],
+      nextCursor: searchPage?.nextCursor ?? libraryPage?.nextCursor ?? null,
       projects,
       runtimeStatus: nextRuntimeStatus,
-      total: result.total,
+      total: searchPage?.total ?? libraryPage?.total ?? nextCounts[scope.value],
     };
   }
 
   const counts = reactive<Record<ConversationScope, number>>({ active: 0, archived: 0 });
-  const projects = ref<ConversationProject[]>([]);
+  const projects = ref<CatalogProjectGroup[]>([]);
   const sidebarGroups = computed(() => {
-    const count = (project: ConversationProject) =>
+    const count = (project: CatalogProjectGroup) =>
       scope.value === "active" ? project.activeCount : project.archivedCount;
     const orderedProjects = projects.value.toSorted(
       (a, b) =>
@@ -231,9 +226,9 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     return [
       ...standalone
         .filter((project) => project.sidebar?.kind !== "recents")
-        .map((project) => ({ id: project.id, name: null, projects: [project] })),
+        .map((project) => ({ id: project.groupId, name: null, projects: [project] })),
       ...sections.map((section) => ({
-        id: section.id,
+        id: section.groupId,
         name: section.name,
         projects: [
           ...(count(section) > 0 ? [section] : []),
@@ -243,10 +238,10 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
           ),
         ],
       })),
-      ...recents.map((project) => ({ id: project.id, name: null, projects: [project] })),
+      ...recents.map((project) => ({ id: project.groupId, name: null, projects: [project] })),
     ];
   });
-  const items = ref<ConversationListItem[]>([]);
+  const items = ref<LibraryEntry[]>([]);
   const hits = ref<SearchHit[]>([]);
   const settledTotal = ref(0);
   const nextCursor = ref<string | null>(null);
@@ -261,7 +256,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
   const expandedSessionIds = ref(new Set<string>());
   const projectPages = reactive(new Map<string, LibraryPageState>());
   const childPages = reactive(new Map<string, LibraryPageState>());
-  const childParents = new Map<string, ConversationListItem>();
+  const childParents = new Map<string, LibraryEntry>();
   const pageRequests = new Map<LibraryPageState, AbortController>();
   const dirtyPages = new WeakSet<LibraryPageState>();
   let pageGeneration = 0;
@@ -279,11 +274,6 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
   let controller: AbortController | null = null;
   let unsubscribe: () => void = () => undefined;
   let generation = 0;
-  let preparationObserver: IntersectionObserver | null = null;
-  let preparationController: AbortController | null = null;
-  let preparationScheduled = false;
-  const observedSessions = new WeakMap<Element, string>();
-  const queuedPreparation = new Set<string>();
 
   function hydrate(payload: LibraryPayload, append = false): void {
     initialized = true;
@@ -351,7 +341,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
       const result = await reloadPage(
         {
           ...listQuery(append ? (page.nextCursor ?? undefined) : undefined),
-          projectId,
+          groupId: projectId,
           parentThreadId: "__root__",
         },
         append ? 0 : page.items.length,
@@ -364,8 +354,8 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
       page.nextCursor = result.nextCursor;
       page.total = result.total;
       for (const item of result.items) {
-        if (childParents.has(item.summary.id)) {
-          childParents.set(item.summary.id, item);
+        if (childParents.has(item.id)) {
+          childParents.set(item.id, item);
         }
       }
       dirtyPages.delete(page);
@@ -381,10 +371,10 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     }
   }
 
-  async function loadChildren(parent: ConversationListItem, append = false): Promise<void> {
-    childParents.set(parent.summary.id, parent);
-    const page = childPages.get(parent.summary.id) ?? reactive(emptyPage());
-    childPages.set(parent.summary.id, page);
+  async function loadChildren(parent: LibraryEntry, append = false): Promise<void> {
+    childParents.set(parent.id, parent);
+    const page = childPages.get(parent.id) ?? reactive(emptyPage());
+    childPages.set(parent.id, page);
     if (page.loading || (append && page.nextCursor === null)) {
       return;
     }
@@ -399,7 +389,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
           scope: scope.value,
           limit: 20,
           ...(append && page.nextCursor !== null ? { cursor: page.nextCursor } : {}),
-          parentThreadId: parent.summary.id,
+          parentThreadId: parent.id,
         },
         append ? 0 : page.items.length,
         request.signal,
@@ -411,8 +401,8 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
       page.nextCursor = result.nextCursor;
       page.total = result.total;
       for (const item of result.items) {
-        if (childParents.has(item.summary.id)) {
-          childParents.set(item.summary.id, item);
+        if (childParents.has(item.id)) {
+          childParents.set(item.id, item);
         }
       }
       dirtyPages.delete(page);
@@ -446,20 +436,20 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     }
   }
 
-  async function toggleSession(item: ConversationListItem): Promise<void> {
+  async function toggleSession(item: LibraryEntry): Promise<void> {
     const requestGeneration = refreshGeneration;
     const expanded = new Set(expandedSessionIds.value);
-    if (expanded.has(item.summary.id)) {
-      expanded.delete(item.summary.id);
+    if (expanded.has(item.id)) {
+      expanded.delete(item.id);
     } else {
-      expanded.add(item.summary.id);
+      expanded.add(item.id);
     }
     expandedSessionIds.value = expanded;
-    const page = childPages.get(item.summary.id);
-    if (expanded.has(item.summary.id) && (page === undefined || dirtyPages.has(page))) {
+    const page = childPages.get(item.id);
+    if (expanded.has(item.id) && (page === undefined || dirtyPages.has(page))) {
       await loadChildren(item);
     }
-    if (expandedSessionIds.value.has(item.summary.id)) {
+    if (expandedSessionIds.value.has(item.id)) {
       await refreshDirtyChildren(requestGeneration);
     }
   }
@@ -491,79 +481,6 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
       result.total = next.total;
     }
     return result;
-  }
-
-  function updateMaterialization(id: string, state: ConversationListItem["materialization"]): void {
-    const collections = [items.value, ...projectPages.values(), ...childPages.values()].map(
-      (collection) => (Array.isArray(collection) ? collection : collection.items),
-    );
-    for (const collection of collections) {
-      const item = collection.find(({ summary }) => summary.id === id);
-      if (item !== undefined) {
-        item.materialization = state;
-      }
-    }
-  }
-
-  async function flushPreparation(): Promise<void> {
-    preparationScheduled = false;
-    const ids = [...queuedPreparation].slice(0, 20);
-    ids.forEach((id) => queuedPreparation.delete(id));
-    if (ids.length === 0) {
-      return;
-    }
-    preparationController ??= new AbortController();
-    ids.forEach((id) => updateMaterialization(id, "queued"));
-    try {
-      const results = await repository.prepareSessions(ids, {
-        signal: preparationController.signal,
-      });
-      results.forEach(({ id, state }) => updateMaterialization(id, state));
-    } catch (reason) {
-      if (!(reason instanceof Error && reason.name === "AbortError")) {
-        ids.forEach((id) => updateMaterialization(id, "failed"));
-      }
-    }
-    if (queuedPreparation.size > 0 && !preparationScheduled) {
-      preparationScheduled = true;
-      queueMicrotask(() => void flushPreparation());
-    }
-  }
-
-  function ensurePreparationObserver(): IntersectionObserver | null {
-    if (preparationObserver === null && typeof IntersectionObserver !== "undefined") {
-      preparationObserver = new IntersectionObserver((entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) {
-            continue;
-          }
-          const id = observedSessions.get(entry.target);
-          if (id !== undefined) {
-            queuedPreparation.add(id);
-            preparationObserver?.unobserve(entry.target);
-          }
-        }
-        if (queuedPreparation.size > 0 && !preparationScheduled) {
-          preparationScheduled = true;
-          queueMicrotask(() => void flushPreparation());
-        }
-      });
-    }
-    return preparationObserver;
-  }
-
-  function observeSession(element: Element, item: ConversationListItem): () => void {
-    if (item.materialization === "ready") {
-      return () => undefined;
-    }
-    observedSessions.set(element, item.summary.id);
-    ensurePreparationObserver()?.observe(element);
-    return () => preparationObserver?.unobserve(element);
-  }
-
-  async function retryPreparation(id: string): Promise<void> {
-    queuedPreparation.add(id);
-    await flushPreparation();
   }
 
   async function startDeepSearch(): Promise<void> {
@@ -620,13 +537,13 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     for (const id of ids) {
       let known = false;
       for (const [projectId, page] of projectPages) {
-        if (page.items.some(({ summary }) => summary.id === id)) {
+        if (page.items.some(({ id: entryId }) => entryId === id)) {
           known = true;
           refreshProjectIds.add(projectId);
         }
       }
       for (const [parentId, page] of childPages) {
-        if (parentId === id || page.items.some(({ summary }) => summary.id === id)) {
+        if (parentId === id || page.items.some(({ id: entryId }) => entryId === id)) {
           known = true;
           refreshParentIds.add(parentId);
           let ancestor: string | null = parentId;
@@ -635,7 +552,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
             visited.add(ancestor);
             const currentAncestor = ancestor;
             for (const [projectId, roots] of projectPages) {
-              if (roots.items.some(({ summary }) => summary.id === currentAncestor)) {
+              if (roots.items.some(({ id: entryId }) => entryId === currentAncestor)) {
                 refreshProjectIds.add(projectId);
               }
             }
@@ -692,13 +609,13 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
       return;
     }
     for (const project of projects.value) {
-      const previous = previousProjects.find(({ id }) => id === project.id);
+      const previous = previousProjects.find(({ groupId }) => groupId === project.groupId);
       if (
         previous?.activeCount !== project.activeCount ||
         previous?.archivedCount !== project.archivedCount
       ) {
-        refreshProjectIds.add(project.id);
-        const page = projectPages.get(project.id);
+        refreshProjectIds.add(project.groupId);
+        const page = projectPages.get(project.groupId);
         if (page !== undefined) {
           cancelPage(page);
         }
@@ -719,8 +636,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
           previousRoots
             .get(id)
             ?.some(
-              (item) =>
-                !projectPages.get(id)?.items.some(({ summary }) => summary.id === item.summary.id),
+              (item) => !projectPages.get(id)?.items.some(({ id: entryId }) => entryId === item.id),
             ),
         )
       ) {
@@ -753,8 +669,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
           previousChildren
             .get(id)
             ?.some(
-              (item) =>
-                !childPages.get(id)?.items.some(({ summary }) => summary.id === item.summary.id),
+              (item) => !childPages.get(id)?.items.some(({ id: entryId }) => entryId === item.id),
             ),
         )
       ) {
@@ -777,19 +692,19 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     refreshParentIds.clear();
   }
 
-  function parentIsVisible(parent: ConversationListItem): boolean {
+  function parentIsVisible(parent: LibraryEntry): boolean {
     const visited = new Set<string>();
     let current = parent;
     while (current.parentThreadId !== null) {
-      if (visited.has(current.summary.id)) {
+      if (visited.has(current.id)) {
         return false;
       }
-      visited.add(current.summary.id);
+      visited.add(current.id);
       const ancestorId = current.parentThreadId;
-      const currentId = current.summary.id;
+      const currentId = current.id;
       if (
         !expandedSessionIds.value.has(ancestorId) ||
-        !childPages.get(ancestorId)?.items.some(({ summary }) => summary.id === currentId)
+        !childPages.get(ancestorId)?.items.some(({ id: entryId }) => entryId === currentId)
       ) {
         return false;
       }
@@ -802,7 +717,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     return (
       projectPages.size === 0 ||
       [...expandedProjectIds.value].some((projectId) =>
-        projectPages.get(projectId)?.items.some(({ summary }) => summary.id === current.summary.id),
+        projectPages.get(projectId)?.items.some(({ id: entryId }) => entryId === current.id),
       )
     );
   }
@@ -919,8 +834,6 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     }
     unsubscribe();
     controller?.abort();
-    preparationController?.abort();
-    preparationObserver?.disconnect();
     if (timer !== null) {
       clearTimeout(timer);
     }
@@ -957,7 +870,6 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     query,
     refresh,
     repository,
-    observeSession,
     runtimeStatus,
     scope,
     searchExactTurns,
@@ -971,7 +883,6 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     toggleSession,
     tool,
     updateQuery,
-    retryPreparation,
     sessionDestination,
   };
 }

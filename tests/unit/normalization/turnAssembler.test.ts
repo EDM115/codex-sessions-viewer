@@ -24,6 +24,20 @@ function event(lineNumber: number, type: string, payload: Record<string, unknown
 }
 
 describe("turn event assembly", () => {
+  it("keeps a legacy turn key when an earlier page is prepended", () => {
+    const older = [
+      event(1, "event_msg", { type: "user_message", message: "old" }),
+      event(2, "event_msg", { type: "task_complete" }),
+    ];
+    const recent = [
+      event(10, "event_msg", { type: "user_message", message: "recent" }),
+      event(11, "response_item", { type: "message", role: "assistant", content: [] }),
+    ];
+    const tail = assembleTurnEvents(recent, "session-1");
+    const all = assembleTurnEvents([...older, ...recent], "session-1");
+    expect(all.turns.at(-1)!.id).toBe(tail.turns.at(0)!.id);
+    expect(all.turns).toHaveLength(2);
+  });
   it("uses explicit task boundaries and associates response items with the active turn", () => {
     const result = assembleTurnEvents(
       [

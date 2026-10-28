@@ -19,6 +19,7 @@ async function cachedFixture(turnCount?: number, rootFilters = false) {
     sourcePath: "C:/fixtures/repository-store.jsonl",
     scope: "active",
     revision: "sha256:repository-store",
+    root: rootFilters,
   });
   const session = turnCount === undefined ? source : representativeLargeSession(source, turnCount);
   session.summary.cwd = "C:/work_100%\\viewer";
@@ -85,7 +86,7 @@ describe("bounded cache repository", () => {
         { scope: "active" as const, parentThreadId, hasMedia: true },
       ]) {
         expect(listCachedSessions(database, query)).toMatchObject({
-          items: [{ summary: { id: session.summary.id } }],
+          items: [{ id: session.summary.id }],
           nextCursor: null,
           total: 1,
         });

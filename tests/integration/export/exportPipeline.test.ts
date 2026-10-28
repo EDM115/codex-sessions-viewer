@@ -11,8 +11,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as z from "zod";
 
 import { getCachedSession } from "../../../server/cache/conversationStore.ts";
@@ -23,12 +24,15 @@ import { collectDoctorReport } from "../../../server/export/doctorReport.ts";
 import { runStaticExport } from "../../../server/export/exportPipeline.ts";
 import { CliExportProgress } from "../../../server/export/exportProgress.ts";
 import { discoverSources } from "../../../server/ingestion/discoverSources.ts";
+import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
 import { selectSessionSources } from "../../../server/ingestion/selectSessionSources.ts";
 import { refreshLiveCatalog } from "../../../server/live/catalogBuilder.ts";
+import { LiveViewerRuntime } from "../../../server/live/viewerRuntime.ts";
 import {
   hydrateStaticInspectorRecords,
   staticInspectorChunkSchema,
 } from "../../../shared/types/staticPayloads.ts";
+import { createStateDatabase } from "../source-boundary/fixtures.ts";
 
 const temporaryDirectories: string[] = [];
 const routeManifestSchema = z.object({ routes: z.array(z.string()) });
@@ -60,6 +64,122 @@ afterEach(async () => {
 });
 
 describe("static export pipeline", () => {
+  it("overlays current metadata titles and millisecond timestamps on warm selected and exported summaries without reparsing", async () => {
+    const root = await temporaryRoot();
+    const codexHome = join(root, "home");
+    const paths = viewerPaths(root);
+    await mkdir(join(codexHome, "sessions"), { recursive: true });
+    await writeFile(
+      join(codexHome, "sessions", "rollout-thread-1.jsonl"),
+      [
+        {
+          timestamp: "2026-01-01T00:00:00Z",
+          type: "session_meta",
+          payload: {
+            id: "thread-1",
+            source: "cli",
+            thread_source: "user",
+            timestamp: "2026-01-01T00:00:00Z",
+          },
+        },
+        {
+          timestamp: "2026-01-01T00:00:01Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "A prompt does not replace the human name" },
+        },
+      ]
+        .map((record) => JSON.stringify(record))
+        .join("\n") + "\n",
+    );
+    const statePath = join(codexHome, "state_5.sqlite");
+    const state = createStateDatabase(statePath);
+    state.exec(
+      "ALTER TABLE threads ADD COLUMN created_at_ms INTEGER; ALTER TABLE threads ADD COLUMN updated_at_ms INTEGER; ALTER TABLE threads ADD COLUMN history_mode TEXT; ALTER TABLE threads ADD COLUMN thread_source TEXT; UPDATE threads SET created_at_ms=1001, updated_at_ms=2001, history_mode='paginated', thread_source='user'",
+    );
+    state
+      .prepare("UPDATE threads SET rollout_path = ?")
+      .run(join(codexHome, "sessions", "rollout-thread-1.jsonl"));
+    state.close();
+    await writeFile(
+      join(codexHome, "session_index.jsonl"),
+      '{"id":"thread-1","thread_name":"Incompatible legacy name","updated_at":"2026-01-01T00:00:00Z"}\n',
+    );
+    const readJsonl = vi.fn<typeof readStableJsonl>(readStableJsonl);
+    const runtime = await LiveViewerRuntime.start(
+      {
+        settings: { codexHome, port: 3000, fetchFavicons: false },
+        paths,
+        codexHomeSource: "cli",
+        onboardingRequired: false,
+        diagnostics: [],
+      },
+      { readJsonl, debounceMs: 0, reconciliationIntervalMs: 60_000 },
+    );
+    try {
+      expect((await runtime.repository.listSessions({ scope: "active" })).items[0]?.title).toBe(
+        "Chosen name",
+      );
+      expect(readJsonl).not.toHaveBeenCalled();
+      await expect(runtime.repository.getSession("thread-1")).resolves.toMatchObject({
+        title: "Chosen name",
+        createdAt: "1970-01-01T00:00:01.001Z",
+        updatedAt: "1970-01-01T00:00:02.001Z",
+      });
+      expect(readJsonl).toHaveBeenCalledOnce();
+      const changed = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          unsubscribe();
+          reject(new Error("Expected metadata rename publication"));
+        }, 5000);
+        const unsubscribe = runtime.bus.subscribe((event) => {
+          if (event.type === "library.updated" && event.ids.includes("thread-1")) {
+            clearTimeout(timeout);
+            unsubscribe();
+            resolve();
+          }
+        });
+      });
+      const writer = new DatabaseSync(statePath);
+      writer.exec("UPDATE threads SET name='Renamed current title', updated_at_ms=9001");
+      writer.close();
+      await changed;
+      expect((await runtime.repository.listSessions({ scope: "active" })).items[0]?.title).toBe(
+        "Renamed current title",
+      );
+      await expect(runtime.repository.getSession("thread-1")).resolves.toMatchObject({
+        title: "Renamed current title",
+        createdAt: "1970-01-01T00:00:01.001Z",
+        updatedAt: "1970-01-01T00:00:09.001Z",
+      });
+      expect(readJsonl).toHaveBeenCalledOnce();
+    } finally {
+      await runtime.close();
+    }
+    const outputRoot = join(root, "output");
+    const result = await runStaticExport({
+      cwd: root,
+      codexHome,
+      generatedRoot: join(root, "generated"),
+      outputRoot,
+      paths,
+      offline: true,
+      index: false,
+      async generate({ outputRoot: destination }) {
+        await mkdir(destination, { recursive: true });
+        await writeFile(join(destination, "index.html"), "metadata fixture");
+      },
+    });
+    expect(result).toMatchObject({ transformed: 0, reused: 1 });
+    const exported = JSON.parse(
+      await readFile(join(outputRoot, "payloads", "sessions", "thread-1", "summary.json"), "utf8"),
+    );
+    expect(exported.summary).toMatchObject({
+      title: "Renamed current title",
+      createdAt: "1970-01-01T00:00:01.001Z",
+      updatedAt: "1970-01-01T00:00:09.001Z",
+    });
+  });
+
   it("publishes only structurally visible chats and retains unmatched helper reviews beside their parent", async () => {
     const root = await temporaryRoot();
     const codexHome = join(root, "codex-home");

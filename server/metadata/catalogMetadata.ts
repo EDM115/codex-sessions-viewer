@@ -24,6 +24,7 @@ export interface CatalogMetadataSnapshot {
   sources: DiscoveredMetadataSources;
   stateAuthority: "root" | "legacy" | "unavailable";
   threads: StateThreadMetadata[];
+  threadsComplete: boolean;
   projects: StateProjectMetadata[];
   sections: StateSectionMetadata[];
   spawnEdges: StateSpawnEdgeMetadata[];
@@ -124,6 +125,7 @@ export async function readCatalogMetadata(
     sources,
     stateAuthority,
     threads: state.metadata?.threads ?? [],
+    threadsComplete: state.metadata?.threadsComplete === true,
     projects: state.metadata?.projects ?? [],
     sections: state.metadata?.sections ?? [],
     spawnEdges: state.metadata?.spawnEdges ?? [],

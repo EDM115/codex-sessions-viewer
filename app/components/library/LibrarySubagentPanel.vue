@@ -4,7 +4,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } f
 
 import { recentChunkCursor } from "#shared/timeline/conversation.ts";
 import type { ConversationSummary, TurnNavigatorItem } from "#shared/types/conversation.ts";
-import type { ConversationListItem } from "#shared/types/library.ts";
+import type { LibraryEntry } from "#shared/types/library.ts";
 import type { RepositoryMode, TurnChunk } from "#shared/types/repository.ts";
 
 import { createConversationRepository } from "../../repositories/index.ts";
@@ -27,7 +27,7 @@ const requestFetch = useRequestFetch() as unknown as (
 const requester: RepositoryRequester = (path, options = {}) =>
   requestFetch(path, { signal: options.signal }) as Promise<unknown>;
 const repository = computed(() => createConversationRepository(props.mode, requester));
-const items = shallowRef<ConversationListItem[]>([]);
+const items = shallowRef<LibraryEntry[]>([]);
 const nextCursor = ref<string | null>(null);
 const total = ref(0);
 const listLoading = ref(false);
@@ -48,10 +48,8 @@ let disposed = false;
 let stopSubscription: () => void = () => undefined;
 
 const selectedTitle = computed(() => {
-  const item = items.value.find((entry) => entry.summary.id === props.selectedId);
-  return (
-    item?.agentNickname ?? transcript.value?.summary.title ?? item?.summary.title ?? "Subagent"
-  );
+  const item = items.value.find((entry) => entry.id === props.selectedId);
+  return transcript.value?.summary.title ?? item?.title ?? "Subagent";
 });
 
 async function loadList(append = false): Promise<void> {
@@ -63,7 +61,7 @@ async function loadList(append = false): Promise<void> {
   try {
     const source = repository.value;
     const parentThreadId = props.parentId;
-    const refreshedItems: ConversationListItem[] = [];
+    const refreshedItems: LibraryEntry[] = [];
     let page;
     let pageCursor = cursor;
     // oxlint-disable no-await-in-loop -- Each refreshed page depends on the previous response's cursor.
@@ -88,11 +86,7 @@ async function loadList(append = false): Promise<void> {
       return;
     }
     items.value = append
-      ? [
-          ...new Map(
-            [...items.value, ...refreshedItems].map((item) => [item.summary.id, item]),
-          ).values(),
-        ]
+      ? [...new Map([...items.value, ...refreshedItems].map((item) => [item.id, item])).values()]
       : refreshedItems;
     if (append) {
       loadedPages++;
@@ -218,15 +212,13 @@ onBeforeUnmount(() => {
     <div v-if="selectedId === null" class="subagent-panel__list" :aria-busy="listLoading">
       <p v-if="!listLoading && !listError" role="status">{{ total }} subagents</p>
       <ul v-if="items.length">
-        <li v-for="item in items" :key="item.summary.id">
+        <li v-for="item in items" :key="item.id">
           <button
             class="subagent-panel__item interactive-control"
             type="button"
-            @click="emit('select', item.summary.id)"
+            @click="emit('select', item.id)"
           >
-            <strong>{{ item.agentNickname ?? item.summary.title }}</strong>
-            <span v-if="item.agentNickname">{{ item.summary.title }}</span>
-            <span v-if="item.summary.preview">{{ item.summary.preview }}</span>
+            <strong>{{ item.title }}</strong>
           </button>
         </li>
       </ul>

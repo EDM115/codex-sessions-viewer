@@ -69,6 +69,7 @@ interface StructuralFacet {
   unknown: boolean;
   agentPath: string | null;
   agentNickname: string | null;
+  agentRole: string | null;
   agentDepth: number | null;
 }
 function structuralFacet(
@@ -128,6 +129,7 @@ function structuralFacet(
     agentPath: metadata.agentPath ?? text(spawn?.["agent_path"] ?? spawn?.["agentPath"]),
     agentNickname:
       metadata.agentNickname ?? text(spawn?.["agent_nickname"] ?? spawn?.["agentNickname"]),
+    agentRole: metadata.agentRole ?? text(spawn?.["agent_role"] ?? spawn?.["agentRole"]),
     agentDepth:
       typeof depth === "number" && Number.isSafeInteger(depth) && depth >= 0 ? depth : null,
   };
@@ -232,7 +234,7 @@ function classifyFacets(
       facets.find((facet) => facet.attachedParent !== null)?.attachedParent ?? null,
     agentPath: facets.find((facet) => facet.agentPath !== null)?.agentPath ?? null,
     agentNickname: facets.find((facet) => facet.agentNickname !== null)?.agentNickname ?? null,
-    agentRole: facets.find((facet) => facet.metadata.agentRole != null)?.metadata.agentRole ?? null,
+    agentRole: facets.find((facet) => facet.agentRole !== null)?.agentRole ?? null,
     agentDepth: facets.find((facet) => facet.agentDepth !== null)?.agentDepth ?? null,
     reasons,
     declarations,

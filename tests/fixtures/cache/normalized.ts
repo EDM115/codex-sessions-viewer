@@ -15,9 +15,13 @@ export async function normalizedRolloutFixture(options: {
   sourcePath: string;
   scope: ConversationScope;
   revision: string;
+  root?: boolean;
 }): Promise<NormalizedSession> {
   const path = join(process.cwd(), "tests", "fixtures", "rollouts", options.name);
-  const bytes = await readFile(path);
+  const original = await readFile(path);
+  const bytes = options.root
+    ? Buffer.from(original.toString("utf8").replace(/"parent_thread_id":"[^"]*",/u, ""))
+    : original;
   const records: JsonlRecord[] = [];
   const parser = new JsonlStreamParser({ onRecord: (record) => records.push(record) });
   parser.write(bytes, 0);

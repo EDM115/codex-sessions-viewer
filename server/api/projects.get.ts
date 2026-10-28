@@ -1,7 +1,7 @@
 import { defineEventHandler } from "h3";
 
-import { useLiveViewerRuntime } from "../live/requestContext.ts";
+import { useCatalogReadyLiveViewerRuntime } from "../live/requestContext.ts";
 
-export default defineEventHandler((event) => {
-  return useLiveViewerRuntime(event).repository.listProjects();
+export default defineEventHandler(async (event) => {
+  return (await useCatalogReadyLiveViewerRuntime(event)).repository.listProjects();
 });

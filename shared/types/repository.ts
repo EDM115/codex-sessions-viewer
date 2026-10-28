@@ -16,9 +16,9 @@ import {
 } from "./conversation.ts";
 import { viewerDiagnosticSchema, type ViewerDiagnostic } from "./diagnostics.ts";
 import {
-  conversationListItemSchema,
-  type ConversationListItem,
-  type ConversationProject,
+  libraryEntrySchema,
+  type LibraryEntry,
+  type CatalogProjectGroup,
   type DeepSearchJob,
   type PreparationResult,
 } from "./library.ts";
@@ -45,7 +45,8 @@ export interface SessionListQuery {
   cwd?: string;
   tool?: string;
   hasMedia?: boolean;
-  projectId?: string;
+  projectId?: string | null;
+  groupId?: string;
   parentThreadId?: string;
 }
 
@@ -56,6 +57,30 @@ export interface SearchQuery extends SessionListQuery {
 export interface RepositoryRequestOptions {
   signal?: AbortSignal;
 }
+
+const historyCursorAnchorSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("before"), cursor: z.string().min(1).max(8192) }),
+  z.strictObject({ kind: z.literal("after"), cursor: z.string().min(1).max(8192) }),
+]);
+export const historyPageQuerySchema = z.strictObject({
+  anchor: z.union([
+    z.strictObject({ kind: z.literal("latest") }),
+    historyCursorAnchorSchema,
+    z.strictObject({ kind: z.literal("turn"), turnId: z.string().min(1) }),
+  ]),
+  limit: z.int().min(1).max(20).optional(),
+});
+export const historyItemQuerySchema = z.strictObject({
+  turnId: z.string().min(1),
+  anchor: z.union([
+    z.strictObject({ kind: z.literal("latest") }),
+    z.strictObject({ kind: z.literal("opening") }),
+    historyCursorAnchorSchema,
+  ]),
+  limit: z.int().min(1).max(100).optional(),
+});
+export type HistoryPageQuery = z.infer<typeof historyPageQuerySchema>;
+export type HistoryItemQuery = z.infer<typeof historyItemQuerySchema>;
 
 export const preparationRequestSchema = z.strictObject({
   ids: z
@@ -145,6 +170,8 @@ export interface ViewerInvalidation {
 export interface ViewerRuntimeStatus {
   state: "preparing" | "ready" | "error";
   message: string | null;
+  catalogSource?: "fresh" | "partial" | "retained" | "recovery";
+  recoveryState?: "idle" | "running" | "complete" | "failed";
 }
 
 export interface ConversationRepository {
@@ -152,8 +179,8 @@ export interface ConversationRepository {
   listSessions(
     query: SessionListQuery,
     options?: RepositoryRequestOptions,
-  ): Promise<CursorPage<ConversationListItem>>;
-  listProjects(options?: RepositoryRequestOptions): Promise<ConversationProject[]>;
+  ): Promise<CursorPage<LibraryEntry>>;
+  listProjects(options?: RepositoryRequestOptions): Promise<CatalogProjectGroup[]>;
   prepareSessions(ids: string[], options?: RepositoryRequestOptions): Promise<PreparationResult[]>;
   startDeepSearch(query: SearchQuery, options?: RepositoryRequestOptions): Promise<DeepSearchJob>;
   getDeepSearch(id: string, options?: RepositoryRequestOptions): Promise<DeepSearchJob>;
@@ -177,6 +204,8 @@ export const repositoryCapabilitiesSchema = z.strictObject({
 export const viewerRuntimeStatusSchema = z.strictObject({
   state: z.enum(["preparing", "ready", "error"]),
   message: z.string().nullable(),
+  catalogSource: z.enum(["fresh", "partial", "retained", "recovery"]).optional(),
+  recoveryState: z.enum(["idle", "running", "complete", "failed"]).optional(),
 });
 
 export function repositoryCapabilitiesForMode(mode: RepositoryMode): RepositoryCapabilities {
@@ -208,7 +237,8 @@ export const sessionListQuerySchema = z.strictObject({
   cwd: z.string().optional(),
   tool: z.string().optional(),
   hasMedia: z.boolean().optional(),
-  projectId: z.string().min(1).optional(),
+  projectId: z.string().min(1).nullable().optional(),
+  groupId: z.string().min(1).optional(),
   parentThreadId: z.string().min(1).optional(),
 });
 
@@ -229,7 +259,7 @@ export const searchHitSchema = z.strictObject({
   score: z.number().nonnegative(),
 });
 
-export const sessionListResponseSchema = cursorPageSchema(conversationListItemSchema);
+export const sessionListResponseSchema = cursorPageSchema(libraryEntrySchema);
 export const searchResponseSchema = cursorPageSchema(searchHitSchema);
 export const turnNavigatorResponseSchema = z.array(turnNavigatorItemSchema);
 

@@ -20,7 +20,7 @@ export interface GenerationValidationOptions {
   parserVersion?: number;
   decoderVersion?: string;
 }
-export const SOURCE_GENERATION_PARSER_VERSION = 6;
+export const SOURCE_GENERATION_PARSER_VERSION = 7;
 function newSemanticEpoch(): string {
   return randomUUID();
 }

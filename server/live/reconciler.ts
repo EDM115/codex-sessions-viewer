@@ -1,16 +1,28 @@
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
-import { conversationActivitySchema } from "../../shared/types/conversation.ts";
+import {
+  conversationActivitySchema,
+  type SourceGeneration,
+} from "../../shared/types/conversation.ts";
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import type { DeepSearchJob, PreparationResult } from "../../shared/types/library.ts";
-import type { SearchQuery, ViewerInvalidation, TurnChunk } from "../../shared/types/repository.ts";
+import type {
+  SearchQuery,
+  ViewerInvalidation,
+  TurnChunk,
+  HistoryPageQuery,
+  HistoryItemQuery,
+  RepositoryRequestOptions,
+} from "../../shared/types/repository.ts";
 import {
   catalogSession,
   listCatalogAuxiliaryChildren,
   listCatalogChildren,
   setCatalogMaterialization,
+  storeValidatedCatalogClassification,
 } from "../cache/catalogStore.ts";
 import { hasCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
 import { getCachedSessionSummary, getCachedTurnsInRange } from "../cache/repositoryStore.ts";
@@ -19,19 +31,24 @@ import {
   CACHE_PARSER_VERSION,
   SessionCacheUpdater,
   refreshUnchangedSourceManifest,
+  getSourceManifestEntry,
   type StableJsonlReader,
 } from "../cache/sourceManifest.ts";
 import { prepareConversationForExport } from "../export/prepareConversation.ts";
+import { NativeHistoryService, unavailableNativeHistory } from "../history/nativeHistoryService.ts";
 import {
-  discoverSources,
   type DiscoveredRolloutSource,
   type SourceDiscoveryResult,
 } from "../ingestion/discoverSources.ts";
 import { readStableJsonl } from "../ingestion/jsonlStream.ts";
+import { recoverCatalogSources } from "../ingestion/recoverCatalogSources.ts";
 import { rolloutRefFromSource } from "../ingestion/rolloutIdentity.ts";
+import type { ResolvedRolloutLineage } from "../ingestion/rolloutLineage.ts";
 import {
   observeSessionMetaSource,
   readSessionMetaPrefix,
+  parseSessionMetaBytes,
+  CATALOG_EVIDENCE_VERSION,
   type SessionMetaPrefixObservation,
 } from "../ingestion/sessionMetaPrefix.ts";
 import {
@@ -41,14 +58,16 @@ import {
   type SourceWatcher,
   type WatchSourcesOptions,
 } from "../ingestion/watchSources.ts";
-import { readGlobalState, type GlobalStateMetadata } from "../metadata/globalState.ts";
-import { readSessionIndex, type SessionIndexEntry } from "../metadata/sessionIndex.ts";
+import { readCatalogMetadata, type CatalogMetadataSnapshot } from "../metadata/catalogMetadata.ts";
+import type { GlobalStateMetadata } from "../metadata/globalState.ts";
+import { HistorySnapshotManager } from "../metadata/historySnapshot.ts";
+import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
+import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
 import {
-  readRetainedStateSnapshot,
-  snapshotStateDatabase,
-  type StateMetadataSnapshot,
-} from "../metadata/stateSnapshot.ts";
-import { catalogVisibilitySql } from "../metadata/threadClassification.ts";
+  catalogVisibilitySql,
+  classifyThreadMetadata,
+  rawThreadMetadata,
+} from "../metadata/threadClassification.ts";
 import {
   attachGuardianEvidence,
   associateApprovalReviews,
@@ -97,141 +116,15 @@ export interface LiveReconcilerOptions {
   debounceMs?: number | undefined;
   reconciliationIntervalMs?: number | undefined;
   readJsonl?: StableJsonlReader | undefined;
-  discover?: typeof discoverSources | undefined;
   readPrefix?: typeof readSessionMetaPrefix | undefined;
   observeSource?: ((path: string) => Promise<SessionMetaPrefixObservation>) | undefined;
-  readSessionIndex?: typeof readSessionIndex | undefined;
-  readGlobalState?: typeof readGlobalState | undefined;
-  snapshotStateDatabase?: typeof snapshotStateDatabase | undefined;
-  readRetainedStateSnapshot?: typeof readRetainedStateSnapshot | undefined;
   countSearchResults?: typeof countCachedSearchResults | undefined;
   fetchFavicons?: boolean | undefined;
   trustedMediaRoots?: readonly string[] | undefined;
   watch?: ((options: WatchSourcesOptions) => SourceWatcher) | undefined;
   onError?: ((error: unknown) => void) | undefined;
-}
-
-interface LiveMetadataReaders {
-  readSessionIndex: typeof readSessionIndex;
-  readGlobalState: typeof readGlobalState;
-  snapshotStateDatabase: typeof snapshotStateDatabase;
-  readRetainedStateSnapshot: typeof readRetainedStateSnapshot;
-}
-
-async function loadMetadata(
-  discovery: SourceDiscoveryResult,
-  cacheDir: string,
-  freshStateSnapshot: boolean,
-  readers: LiveMetadataReaders,
-): Promise<LiveMetadata> {
-  const diagnostics: ViewerDiagnostic[] = [];
-  let sessionIndexEntries: SessionIndexEntry[] = [];
-  let globalState: GlobalStateMetadata = { projects: [], pinnedThreadIds: [] };
-  let stateSnapshot: StateMetadataSnapshot | null = null;
-  if (discovery.metadata.sessionIndex !== null) {
-    const result = await readers.readSessionIndex(discovery.metadata.sessionIndex);
-    sessionIndexEntries = result.entries;
-    diagnostics.push(...result.diagnostics);
-  }
-  if (discovery.metadata.globalState !== null) {
-    const result = await readers.readGlobalState(discovery.metadata.globalState);
-    globalState = result.metadata;
-    diagnostics.push(...result.diagnostics);
-  }
-  if (discovery.metadata.stateDatabase !== null) {
-    const snapshotRoot = join(cacheDir, "state-snapshots");
-    const result = freshStateSnapshot
-      ? await readers.snapshotStateDatabase({
-          sourceDatabase: discovery.metadata.stateDatabase,
-          sourceWal: discovery.metadata.stateWal ?? `${discovery.metadata.stateDatabase}-wal`,
-          snapshotRoot,
-        })
-      : await readers.readRetainedStateSnapshot(snapshotRoot);
-    stateSnapshot = result.metadata;
-    diagnostics.push(...result.diagnostics);
-  }
-  return { sessionIndexEntries, globalState, stateSnapshot, diagnostics };
-}
-
-async function loadChangedMetadata(
-  discovery: SourceDiscoveryResult,
-  cacheDir: string,
-  previous: LiveMetadata,
-  changedSources: ReadonlySet<SourceChange["source"]>,
-  readers: LiveMetadataReaders,
-): Promise<LiveMetadata> {
-  let sessionIndexEntries = previous.sessionIndexEntries;
-  let globalState = previous.globalState;
-  let stateSnapshot = previous.stateSnapshot;
-  const diagnostics: ViewerDiagnostic[] = [];
-  if (changedSources.has("session-index")) {
-    if (discovery.metadata.sessionIndex === null) {
-      sessionIndexEntries = [];
-    } else {
-      const result = await readers.readSessionIndex(discovery.metadata.sessionIndex);
-      sessionIndexEntries = result.entries;
-      diagnostics.push(...result.diagnostics);
-    }
-  }
-  if (changedSources.has("global-state")) {
-    if (discovery.metadata.globalState === null) {
-      globalState = { projects: [], pinnedThreadIds: [] };
-    } else {
-      const result = await readers.readGlobalState(discovery.metadata.globalState);
-      globalState = result.metadata;
-      diagnostics.push(...result.diagnostics);
-    }
-  }
-  if (changedSources.has("state-database") || changedSources.has("state-wal")) {
-    if (discovery.metadata.stateDatabase === null) {
-      stateSnapshot = null;
-    } else {
-      const result = await readers.snapshotStateDatabase({
-        sourceDatabase: discovery.metadata.stateDatabase,
-        sourceWal: discovery.metadata.stateWal ?? `${discovery.metadata.stateDatabase}-wal`,
-        snapshotRoot: join(cacheDir, "state-snapshots"),
-      });
-      stateSnapshot = result.metadata;
-      diagnostics.push(...result.diagnostics);
-    }
-  }
-  return { sessionIndexEntries, globalState, stateSnapshot, diagnostics };
-}
-
-function sourcePathKey(path: string): string {
-  const normalized = resolve(path);
-  return process.platform === "win32" ? normalized.toLocaleLowerCase("en-US") : normalized;
-}
-
-function discoveryAfterBatch(
-  previous: SourceDiscoveryResult,
-  batch: SourceWatchBatch,
-): SourceDiscoveryResult {
-  const rollouts = new Map(previous.rollouts.map((source) => [sourcePathKey(source.path), source]));
-  const metadata = { ...previous.metadata };
-  const metadataKeys = {
-    "global-state": "globalState",
-    "session-index": "sessionIndex",
-    "state-database": "stateDatabase",
-    "state-wal": "stateWal",
-  } as const;
-  for (const change of batch.changes) {
-    if (change.source === "rollout") {
-      const key = sourcePathKey(change.path);
-      if (change.kind === "removed") {
-        rollouts.delete(key);
-      } else {
-        rollouts.set(key, { path: resolve(change.path), scope: change.scope });
-      }
-      continue;
-    }
-    metadata[metadataKeys[change.source]] = change.kind === "removed" ? null : resolve(change.path);
-  }
-  return {
-    rollouts: [...rollouts.values()].toSorted((left, right) => left.path.localeCompare(right.path)),
-    metadata,
-    diagnostics: previous.diagnostics,
-  };
+  readMetadata?: typeof readCatalogMetadata;
+  recoverSources?: typeof recoverCatalogSources;
 }
 
 export class LiveReconciler {
@@ -239,6 +132,7 @@ export class LiveReconciler {
   readonly #cacheDir: string;
   readonly #codexHome: string;
   readonly #database: DatabaseSync;
+  readonly #nativeHistory: NativeHistoryService;
   readonly #debounceMs: number | undefined;
   readonly #reconciliationIntervalMs: number;
   readonly #fetchFavicons: boolean;
@@ -247,11 +141,15 @@ export class LiveReconciler {
   readonly #onError: ((error: unknown) => void) | undefined;
   readonly #updater: SessionCacheUpdater;
   readonly #readJsonl: StableJsonlReader;
-  readonly #discover: typeof discoverSources;
   readonly #readPrefix: typeof readSessionMetaPrefix;
   readonly #observeSource: (path: string) => Promise<SessionMetaPrefixObservation>;
-  readonly #metadataReaders: LiveMetadataReaders;
   readonly #countSearchResults: typeof countCachedSearchResults;
+  readonly #readMetadata: typeof readCatalogMetadata;
+  readonly #recoverSources: typeof recoverCatalogSources;
+  #catalogMetadata: CatalogMetadataSnapshot | undefined;
+  #recoveryController: AbortController | null = null;
+  #recovery: Promise<void> = Promise.resolve();
+  #recoveryState: "idle" | "running" | "complete" | "failed" = "idle";
   readonly #materializationQueue: MaterializationQueue;
   readonly #knownFaviconOrigins = new Map<string, string>();
   readonly #richPreparations = new Map<string, Promise<void>>();
@@ -262,7 +160,6 @@ export class LiveReconciler {
     stateSnapshot: null,
     diagnostics: [],
   };
-  #discovery: SourceDiscoveryResult | null = null;
   #watcher: SourceWatcher | null = null;
   #interval: NodeJS.Timeout | null = null;
   #queue = Promise.resolve();
@@ -281,6 +178,14 @@ export class LiveReconciler {
     this.#cacheDir = options.cacheDir;
     this.#codexHome = resolve(options.codexHome);
     this.#database = options.database;
+    this.#nativeHistory = new NativeHistoryService(
+      options.database,
+      new HistorySnapshotManager({
+        sourceDatabase: join(this.#codexHome, "thread_history_1.sqlite"),
+        sourceWal: join(this.#codexHome, "thread_history_1.sqlite-wal"),
+        snapshotRoot: join(options.cacheDir, "history-snapshots"),
+      }),
+    );
     this.#debounceMs = options.debounceMs;
     this.#reconciliationIntervalMs = interval;
     this.#fetchFavicons = options.fetchFavicons ?? true;
@@ -288,16 +193,11 @@ export class LiveReconciler {
     this.#watch = options.watch ?? watchSources;
     this.#onError = options.onError;
     this.#readJsonl = options.readJsonl ?? readStableJsonl;
-    this.#discover = options.discover ?? discoverSources;
     this.#readPrefix = options.readPrefix ?? readSessionMetaPrefix;
     this.#observeSource = options.observeSource ?? observeSessionMetaSource;
-    this.#metadataReaders = {
-      readSessionIndex: options.readSessionIndex ?? readSessionIndex,
-      readGlobalState: options.readGlobalState ?? readGlobalState,
-      snapshotStateDatabase: options.snapshotStateDatabase ?? snapshotStateDatabase,
-      readRetainedStateSnapshot: options.readRetainedStateSnapshot ?? readRetainedStateSnapshot,
-    };
     this.#countSearchResults = options.countSearchResults ?? countCachedSearchResults;
+    this.#readMetadata = options.readMetadata ?? readCatalogMetadata;
+    this.#recoverSources = options.recoverSources ?? recoverCatalogSources;
     this.#updater = new SessionCacheUpdater(this.#database, {
       maxRetainedSources: 4,
       maxRetainedBytes: 64 * 1024 * 1024,
@@ -315,6 +215,22 @@ export class LiveReconciler {
 
   get codexHome(): string {
     return this.#codexHome;
+  }
+
+  get catalogStatus() {
+    const catalogSource =
+      this.#catalogMetadata?.freshness.state === "fresh"
+        ? this.#catalogMetadata.threadsComplete
+          ? ("fresh" as const)
+          : ("partial" as const)
+        : this.#catalogMetadata?.freshness.state === "retained"
+          ? ("retained" as const)
+          : ("recovery" as const);
+    return { catalogSource, recoveryState: this.#recoveryState };
+  }
+
+  whenRecoverySettled(): Promise<void> {
+    return this.#recovery;
   }
 
   faviconOrigin(key: string): string | null {
@@ -385,6 +301,9 @@ export class LiveReconciler {
   async #guardianReviews(parentThreadId: string): Promise<GuardianReview[]> {
     const reviews: GuardianReview[] = [];
     for (const guardian of listCatalogAuxiliaryChildren(this.#database, parentThreadId)) {
+      if (guardian.summary.sourcePath === null) {
+        continue;
+      }
       // oxlint-disable-next-line no-await-in-loop -- Guardian evidence is bounded to auxiliary children of the opened conversation.
       const result = await this.#readJsonl(guardian.summary.sourcePath, { start: 0 });
       if (result.read.status !== "stable") {
@@ -577,6 +496,14 @@ export class LiveReconciler {
       ) {
         return { id, state: "failed", error: "Conversation not found." };
       }
+      if (catalog.summary.sourcePath === null) {
+        return {
+          id,
+          state: "failed",
+          error:
+            "The conversation exists in metadata but its rollout source has not been resolved.",
+        };
+      }
       if (
         catalog.materialization === "ready" &&
         hasCachedSession(this.#database, id, CACHE_PARSER_VERSION) &&
@@ -588,6 +515,9 @@ export class LiveReconciler {
           current?.sourceRevision === catalog.sourceRevision &&
           current.summary.sourcePath === catalog.summary.sourcePath
         ) {
+          if (!this.#reconcileValidatedStructure(id)) {
+            return { id, state: "failed", error: "The selected source is an internal helper." };
+          }
           return { id, state: "ready", error: null };
         }
         continue;
@@ -618,6 +548,11 @@ export class LiveReconciler {
         latest.summary.sourcePath !== catalog.summary.sourcePath
       ) {
         continue;
+      }
+      if (result.state === "ready") {
+        if (!this.#reconcileValidatedStructure(id)) {
+          return { id, state: "failed", error: "The selected source is an internal helper." };
+        }
       }
       if (latest.materialization !== result.state) {
         setCatalogMaterialization(
@@ -655,6 +590,67 @@ export class LiveReconciler {
     };
   }
 
+  #reconcileValidatedStructure(id: string): boolean {
+    const catalog = catalogSession(this.#database, id);
+    if (!catalog?.summary.sourcePath) {
+      return false;
+    }
+    const manifest = getSourceManifestEntry(this.#database, catalog.summary.sourcePath);
+    if (!manifest || manifest.sessionId !== id) {
+      return false;
+    }
+    const row = this.#database
+      .prepare(
+        "SELECT payload_json FROM raw_events WHERE session_id = ? AND type = 'session_meta' AND json_valid(payload_json) AND coalesce(json_extract(payload_json, '$.payload.id'), json_extract(payload_json, '$.id')) = ? ORDER BY source_order DESC LIMIT 1",
+      )
+      .get(id, id);
+    const envelope: unknown =
+      typeof row?.["payload_json"] === "string" ? JSON.parse(row["payload_json"]) : null;
+    const payload =
+      envelope && typeof envelope === "object" && "payload" in envelope
+        ? envelope.payload
+        : envelope;
+    const raw = rawThreadMetadata(payload);
+    const native = this.#metadata.stateSnapshot?.threads.find((thread) => thread.id === id);
+    const classification = classifyThreadMetadata(raw, native, {
+      spawnParentThreadIds: (this.#metadata.stateSnapshot?.spawnEdges ?? [])
+        .filter((edge) => edge.childThreadId === id)
+        .map((edge) => edge.parentThreadId),
+    });
+    if (raw.status === "missing" && native === undefined) {
+      classification.visibility = "unresolved";
+      classification.reasons.push("selected-structure-missing");
+    }
+    const prefix = parseSessionMetaBytes(
+      catalog.summary.sourcePath,
+      Buffer.from(JSON.stringify({ type: "session_meta", payload }) + "\n"),
+    );
+    const changed = storeValidatedCatalogClassification(
+      this.#database,
+      id,
+      {
+        version: CATALOG_EVIDENCE_VERSION,
+        origin: "materialized",
+        status: raw.status === "invalid" ? "invalid" : prefix.meta === null ? "missing" : "found",
+        meta: prefix.meta,
+        parentThreadIdHint: classification.parentThreadId,
+        classification,
+        freshness: "verified",
+        validatedSha256: manifest.fingerprint.sha256,
+      },
+      { sourceRevision: catalog.sourceRevision, sourcePath: catalog.summary.sourcePath },
+    );
+    if (changed.length) {
+      this.#publish({
+        type: "library.updated",
+        ids: changed,
+        groupsChanged: true,
+        revision: this.#nextRevision(),
+      });
+    }
+    return classification.visibility !== "internal";
+  }
+
   async prepareSessions(
     ids: readonly string[],
     priority: MaterializationPriority = "visible",
@@ -677,7 +673,11 @@ export class LiveReconciler {
       ) {
         immediate.set(id, { id, state: "ready", error: null });
       } else {
-        if (catalog.materialization !== "queued" && catalog.materialization !== "loading") {
+        if (
+          catalog.materialization !== "ready" &&
+          catalog.materialization !== "queued" &&
+          catalog.materialization !== "loading"
+        ) {
           setCatalogMaterialization(this.#database, id, "queued", null);
         }
         pending.push(id);
@@ -806,7 +806,7 @@ export class LiveReconciler {
     ];
     if (query.projectId !== undefined) {
       filters.push("project_id = ?");
-      values.push(query.projectId);
+      values.push(query.projectId ?? "none");
     }
     const sessionIds = this.#database
       .prepare(
@@ -940,6 +940,8 @@ export class LiveReconciler {
     metadata: LiveMetadata,
     announce: boolean,
     changedSourcePaths?: readonly string[],
+    catalogMetadata?: CatalogMetadataSnapshot,
+    recoverySignal?: AbortSignal,
   ): Promise<void> {
     const readyBefore = new Map(
       this.#database
@@ -961,7 +963,6 @@ export class LiveReconciler {
         .all()
         .map((row) => [String(row["id"]), String(row["parent_thread_id"])]),
     );
-    this.#discovery = discovery;
     this.#metadata = metadata;
     const refreshed = await refreshLiveCatalog({
       database: this.#database,
@@ -973,6 +974,8 @@ export class LiveReconciler {
       readJsonl: this.#readJsonl,
       observeSource: this.#observeSource,
       changedSourcePaths,
+      ...(catalogMetadata ? { catalogMetadata } : {}),
+      ...(recoverySignal ? { recoveryBatch: true, signal: recoverySignal } : {}),
     });
     if (
       announce &&
@@ -1008,22 +1011,6 @@ export class LiveReconciler {
         this.#publish({ type: "session.updated", ids: [parentId], revision: this.#nextRevision() });
       }
     }
-    const hotIds = announce
-      ? refreshed.rows
-          .filter(
-            (row) =>
-              row.kind !== "auxiliary" &&
-              changedIds.has(row.summary.id) &&
-              readyBefore.has(row.summary.id) &&
-              readyBefore.get(row.summary.id) !== row.sourceRevision,
-          )
-          .map(({ summary }) => summary.id)
-      : [];
-    if (hotIds.length > 0) {
-      void this.prepareSessions(hotIds, "visible", "watcher:hot").catch((error: unknown) => {
-        this.#onError?.(error);
-      });
-    }
     const diagnostics = [...metadata.diagnostics, ...refreshed.diagnostics];
     if (announce && diagnostics.length > 0) {
       this.#publish({
@@ -1034,37 +1021,112 @@ export class LiveReconciler {
     }
   }
 
-  async #reconcileAll(announce: boolean, freshStateSnapshot = true): Promise<void> {
-    const discovery = await this.#discover(this.#codexHome);
-    const metadata = await loadMetadata(
-      discovery,
-      this.#cacheDir,
-      freshStateSnapshot,
-      this.#metadataReaders,
+  async #reconcileAll(announce: boolean): Promise<void> {
+    const current = await this.#readMetadata(
+      this.#codexHome,
+      join(this.#cacheDir, "catalog-snapshots"),
     );
-    await this.#refreshCatalog(discovery, metadata, announce);
+    if (this.#closed) {
+      return;
+    }
+    const usableNative =
+      current.freshness.state !== "unavailable" &&
+      (current.threadsComplete || current.threads.length > 0);
+    if (usableNative) {
+      this.#recoveryController?.abort();
+    }
+    this.#catalogMetadata = current;
+    if (usableNative) {
+      this.#recoveryState = "idle";
+    }
+    const metadata: LiveMetadata = {
+      sessionIndexEntries: current.sessionIndex,
+      globalState: current.globalState,
+      stateSnapshot:
+        current.stateAuthority === "unavailable"
+          ? null
+          : {
+              threads: current.threads.map((thread) => ({
+                ...thread,
+                rolloutPath: thread.rolloutPath ? resolve(this.#codexHome, thread.rolloutPath) : "",
+              })),
+              threadsComplete: current.threadsComplete,
+              projects: current.projects,
+              sections: current.sections,
+              spawnEdges: current.spawnEdges,
+              attachments: current.attachments,
+              readReceipts: current.readReceipts,
+              ...(current.capabilities ? { capabilities: current.capabilities } : {}),
+            },
+      diagnostics: current.diagnostics,
+    };
+    await this.#refreshCatalog(
+      { rollouts: [], metadata: current.sources, diagnostics: [] },
+      metadata,
+      announce,
+      [],
+      current,
+    );
+    if (
+      !usableNative &&
+      this.#recoveryState !== "complete" &&
+      (this.#recoveryState !== "running" || this.#recoveryController?.signal.aborted)
+    ) {
+      this.#startRecovery();
+    }
   }
 
   async #processBatch(batch: SourceWatchBatch): Promise<void> {
-    if (this.#discovery === null) {
+    if (batch.changes.some((change) => change.source !== "rollout")) {
       await this.#reconcileAll(true);
-      return;
     }
-    const discovery = discoveryAfterBatch(this.#discovery, batch);
-    const changedSources = new Set(batch.changes.map(({ source }) => source));
-    const metadata = await loadChangedMetadata(
-      discovery,
-      this.#cacheDir,
-      this.#metadata,
-      changedSources,
-      this.#metadataReaders,
-    );
-    await this.#refreshCatalog(
-      discovery,
-      metadata,
-      true,
-      batch.changes.filter(({ source }) => source === "rollout").map(({ path }) => path),
-    );
+  }
+
+  #startRecovery(): void {
+    const controller = new AbortController();
+    this.#recoveryController = controller;
+    const { signal } = controller;
+    this.#recoveryState = "running";
+    this.#recovery = (async () => {
+      await yieldToEventLoop();
+      for await (const rollouts of this.#recoverSources(this.#codexHome, signal)) {
+        signal.throwIfAborted();
+        await this.#enqueue(async () => {
+          if (signal.aborted) {
+            return;
+          }
+          try {
+            await this.#refreshCatalog(
+              { rollouts, metadata: this.#catalogMetadata!.sources, diagnostics: [] },
+              this.#metadata,
+              true,
+              rollouts.map(({ path }) => path),
+              undefined,
+              signal,
+            );
+          } catch (error) {
+            if (!signal.aborted) {
+              throw error;
+            }
+          }
+        });
+        await yieldToEventLoop();
+      }
+      signal.throwIfAborted();
+      this.#recoveryState = "complete";
+      this.#publish({
+        type: "library.updated",
+        ids: [],
+        groupsChanged: true,
+        revision: this.#nextRevision(),
+      });
+    })().catch((error: unknown) => {
+      if (signal.aborted) {
+        return;
+      }
+      this.#recoveryState = "failed";
+      this.#onError?.(error);
+    });
   }
 
   #enqueue(operation: () => Promise<void>): Promise<void> {
@@ -1112,6 +1174,23 @@ export class LiveReconciler {
     return this.#enqueue(() => this.#reconcileAll(this.#started));
   }
 
+  readNativeHistory(
+    lineage: ResolvedRolloutLineage,
+    source: SourceGeneration,
+    query: HistoryPageQuery | HistoryItemQuery,
+    options: RepositoryRequestOptions = {},
+  ) {
+    const ref = lineage.segments.at(-1)?.ref;
+    const current = ref ? catalogSession(this.#database, ref.stableThreadId) : null;
+    if (
+      current?.summary.sourcePath != null &&
+      resolve(current.summary.sourcePath) !== resolve(source.sourcePath)
+    ) {
+      return Promise.resolve(unavailableNativeHistory(source, "native.catalog_selection_changed"));
+    }
+    return this.#nativeHistory.read(lineage, source, query, options.signal);
+  }
+
   async start(): Promise<void> {
     if (this.#started || this.#watcher !== null) {
       throw new Error("The live reconciler has already been started.");
@@ -1121,8 +1200,33 @@ export class LiveReconciler {
     }
     this.#watcher = this.#watch({
       codexHome: this.#codexHome,
+      metadataOnly: true,
       debounceMs: this.#debounceMs,
       onBatch: (batch) => {
+        const historyChanged = batch.changes.some(
+          (change) => change.source === "history-database" || change.source === "history-wal",
+        );
+        if (batch.changes.length > 0) {
+          this.#nativeHistory.invalidate(historyChanged);
+        }
+        if (historyChanged) {
+          const ids = this.#nativeHistory.selectedThreadIds();
+          if (ids.length > 0) {
+            this.#publish({ type: "session.updated", ids, revision: this.#nextRevision() });
+          }
+        }
+        batch = {
+          ...batch,
+          changes: batch.changes.filter(
+            (change) => change.source !== "history-database" && change.source !== "history-wal",
+          ),
+        };
+        if (batch.changes.length === 0) {
+          return;
+        }
+        if (batch.changes.some((change) => change.source !== "rollout")) {
+          this.#recoveryController?.abort();
+        }
         this.#pendingBatches.push(batch);
         this.#scheduleBatchDrain();
       },
@@ -1134,17 +1238,13 @@ export class LiveReconciler {
       },
     });
     const watcherReady = this.#watcher.ready;
-    await this.#reconcileAll(false, false);
+    await this.#reconcileAll(false);
     if (this.#closed) {
       return;
     }
     this.#started = true;
     this.#scheduleBatchDrain();
-    void watcherReady
-      .then(() =>
-        this.#closed ? undefined : this.reconcileNow("watcher-ready-and-fresh-state-snapshot"),
-      )
-      .catch((error: unknown) => this.#onError?.(error));
+    void watcherReady.then(() => undefined).catch((error: unknown) => this.#onError?.(error));
     this.#interval = setInterval(() => {
       void this.reconcileNow("periodic").catch((error: unknown) => {
         this.#onError?.(error);
@@ -1158,6 +1258,8 @@ export class LiveReconciler {
       return;
     }
     this.#closed = true;
+    await this.#nativeHistory.close();
+    this.#recoveryController?.abort();
     const materializationClosing = this.#materializationQueue.close();
     if (this.#interval !== null) {
       clearInterval(this.#interval);
@@ -1165,6 +1267,7 @@ export class LiveReconciler {
     }
     await this.#watcher?.close();
     await this.#queue;
+    await this.#recovery;
     await materializationClosing;
     await Promise.allSettled(this.#richPreparations.values());
     this.#updater.clear();

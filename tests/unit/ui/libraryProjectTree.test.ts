@@ -9,48 +9,18 @@ import {
   provideLibraryWorkspace,
   type LibraryWorkspaceState,
 } from "../../../app/composables/useLibraryWorkspace.ts";
-import type { ConversationSummary } from "../../../shared/types/conversation.ts";
-import type { ConversationListItem } from "../../../shared/types/library.ts";
+import { catalogProjectGroupFromLegacy } from "../../../shared/types/library.ts";
+import type { LibraryEntry } from "../../../shared/types/library.ts";
 
-function summary(id: string): ConversationSummary {
+function item(id: string, overrides: Partial<LibraryEntry> = {}): LibraryEntry {
   return {
     id,
     title: `Conversation ${id}`,
     scope: "active",
-    sourcePath: `C:/codex/sessions/${id}.jsonl`,
-    createdAt: "2026-08-16T08:00:00.000Z",
-    updatedAt: "2026-08-16T09:00:00.000Z",
-    cwd: "C:/repo/viewer",
-    gitBranch: null,
-    gitSha: null,
-    gitOriginUrl: null,
-    models: [],
-    reasoningEfforts: [],
-    turnCount: 0,
-    assistantMessageCount: 0,
-    toolCallCount: 0,
-    toolCounts: {},
-    preview: "Catalog metadata",
-    pinned: false,
-    sectionName: "Today",
-    parentThreadId: null,
-    childThreadIds: [],
-    hasMedia: false,
-    diagnosticCount: 0,
-    revision: "catalog:1",
-  };
-}
-
-function item(id: string, overrides: Partial<ConversationListItem> = {}): ConversationListItem {
-  return {
-    summary: summary(id),
+    orderKey: "2026-08-16T09:00:00.000Z",
     kind: "root",
-    materialization: "cold",
     projectId: "project-1",
     parentThreadId: null,
-    agentPath: null,
-    agentNickname: null,
-    agentDepth: null,
     childCount: 0,
     ...overrides,
   };
@@ -87,7 +57,7 @@ describe("project and preparation library tree", () => {
     stubWorkspaceGlobals(vi.fn());
     const workspace = createLibraryWorkspace();
     workspace.projects.value = [
-      {
+      catalogProjectGroupFromLegacy({
         id: "saved",
         name: "Saved empty",
         source: "codex",
@@ -95,8 +65,8 @@ describe("project and preparation library tree", () => {
         activeCount: 0,
         archivedCount: 0,
         sidebar: { kind: "project", sectionId: null, sectionName: null },
-      },
-      {
+      }),
+      catalogProjectGroupFromLegacy({
         id: "section",
         name: "Review",
         source: "none",
@@ -104,8 +74,8 @@ describe("project and preparation library tree", () => {
         activeCount: 1,
         archivedCount: 0,
         sidebar: { kind: "section", sectionId: "section", sectionName: "Review" },
-      },
-      {
+      }),
+      catalogProjectGroupFromLegacy({
         id: "in-section",
         name: "Section project",
         source: "codex",
@@ -113,8 +83,8 @@ describe("project and preparation library tree", () => {
         activeCount: 0,
         archivedCount: 0,
         sidebar: { kind: "project", sectionId: "section", sectionName: "Review" },
-      },
-      {
+      }),
+      catalogProjectGroupFromLegacy({
         id: "none",
         name: "Recents",
         source: "none",
@@ -122,7 +92,7 @@ describe("project and preparation library tree", () => {
         activeCount: 1,
         archivedCount: 0,
         sidebar: { kind: "recents", sectionId: null, sectionName: null },
-      },
+      }),
     ];
     const wrapper = mountWithWorkspace(workspace, () => h(LibraryProjectTree));
     expect(wrapper.findAll(".library-project-folder__label").map((label) => label.text())).toEqual([
@@ -142,10 +112,8 @@ describe("project and preparation library tree", () => {
     const child = item("child-1", {
       kind: "subagent",
       parentThreadId: "root-0",
-      agentDepth: 1,
-      agentNickname: "Fermat",
     });
-    child.summary.parentThreadId = "root-0";
+    child.parentThreadId = "root-0";
     const requestFetch = vi.fn(async (path: string) => {
       if (path === "/api/status") {
         return { state: "ready", message: null };
@@ -165,14 +133,14 @@ describe("project and preparation library tree", () => {
     stubWorkspaceGlobals(requestFetch);
     const workspace = createLibraryWorkspace();
     workspace.projects.value = [
-      {
+      catalogProjectGroupFromLegacy({
         id: "project-1",
         name: "Viewer",
         source: "cwd",
         hint: "C:/repo/viewer",
         activeCount: 21,
         archivedCount: 0,
-      },
+      }),
     ];
     const wrapper = mountWithWorkspace(workspace, () => h(LibraryProjectTree));
 
@@ -194,27 +162,10 @@ describe("project and preparation library tree", () => {
     wrapper.unmount();
   });
 
-  it("deduplicates intersecting cold rows into one bounded preparation batch", async () => {
-    let observerCallback!: IntersectionObserverCallback;
-    const observe = vi.fn();
-    const unobserve = vi.fn();
-    const disconnect = vi.fn();
-    class TestIntersectionObserver {
-      constructor(callback: IntersectionObserverCallback) {
-        observerCallback = callback;
-      }
-      observe = observe;
-      unobserve = unobserve;
-      disconnect = disconnect;
-    }
-    vi.stubGlobal("IntersectionObserver", TestIntersectionObserver);
-    const requestFetch = vi.fn(async (path: string, options: { body?: unknown } = {}) => {
-      if (path === "/api/sessions/prepare") {
-        const ids = (options.body as { ids: string[] }).ids;
-        return ids.map((id) => ({ id, state: "ready", error: null }));
-      }
-      throw new Error(`Unexpected request ${path}`);
-    });
+  it("mounts and scrolls library rows without creating preparation observers or requests", async () => {
+    const observer = vi.fn<() => void>();
+    vi.stubGlobal("IntersectionObserver", observer);
+    const requestFetch = vi.fn<(...args: unknown[]) => Promise<unknown>>();
     stubWorkspaceGlobals(requestFetch);
     const workspace = createLibraryWorkspace();
     const items = Array.from({ length: 5 }, (_, index) => item(`visible-${index}`));
@@ -225,23 +176,10 @@ describe("project and preparation library tree", () => {
         items.map((entry) => h(LibrarySessionItem, { item: entry, selected: false })),
       ),
     );
-    const rows = wrapper.findAll(".library-session-row").map(({ element }) => element);
-    const entries = rows.map(
-      (target) => ({ isIntersecting: true, target }) as IntersectionObserverEntry,
-    );
-    observerCallback(entries, {} as IntersectionObserver);
-    observerCallback(entries, {} as IntersectionObserver);
+    await wrapper.trigger("scroll");
     await flushPromises();
-
-    expect(requestFetch).toHaveBeenCalledOnce();
-    expect(requestFetch).toHaveBeenCalledWith(
-      "/api/sessions/prepare",
-      expect.objectContaining({
-        method: "POST",
-        body: { ids: items.map((item) => item.summary.id) },
-      }),
-    );
-    expect(items.every(({ materialization }) => materialization === "ready")).toBe(true);
+    expect(observer).not.toHaveBeenCalled();
+    expect(requestFetch).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 });

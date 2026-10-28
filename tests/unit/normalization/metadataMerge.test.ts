@@ -73,7 +73,7 @@ describe("session metadata merging", () => {
     });
   });
 
-  it("falls through index, snapshot title, prompt preview, and session ID without blank overrides", () => {
+  it("falls through index, snapshot title and stable ID without turning transcript previews into metadata titles", () => {
     const unnamedSnapshot: StateMetadataSnapshot = {
       ...snapshot,
       threads: [{ ...snapshot.threads[0]!, name: "  ", title: "Snapshot title" }],
@@ -125,7 +125,7 @@ describe("session metadata merging", () => {
     expect(fromIndex.models).toEqual(["snapshot-model"]);
     expect(fromIndex.reasoningEfforts).toEqual(["snapshot-effort"]);
     expect(fromSnapshot.title).toBe("Snapshot title");
-    expect(fromPrompt.title).toBe("Prompt title");
+    expect(fromPrompt.title).toBe("missing");
     expect(fromId.title).toBe("missing");
   });
 });

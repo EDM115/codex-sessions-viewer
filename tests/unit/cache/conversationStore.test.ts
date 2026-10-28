@@ -75,9 +75,9 @@ describe("cached conversations", () => {
       expect(
         listCatalogSessions(database, {
           scope: "active",
-          parentThreadId: "__root__",
-        }).items[0]?.summary,
-      ).toEqual({ ...session.summary, parentThreadId: null });
+          parentThreadId: "00000000-0000-4000-8000-000000000001",
+        }).items[0],
+      ).toMatchObject({ id: session.summary.id, title: session.summary.title, kind: "subagent" });
     } finally {
       database.close();
     }

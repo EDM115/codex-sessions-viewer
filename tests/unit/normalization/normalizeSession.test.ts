@@ -64,7 +64,7 @@ describe("session normalization", () => {
     expect(() => session.turns.map((turn) => conversationTurnSchema.parse(turn))).not.toThrow();
     expect(session.summary).toMatchObject({
       id: "11111111-1111-4111-8111-111111111111",
-      title: "Build the parser",
+      title: "11111111-1111-4111-8111-111111111111",
       scope: "active",
       sourcePath: "C:\\codex\\sessions\\modern.jsonl",
       cwd: "C:\\work\\viewer",
@@ -178,7 +178,7 @@ describe("session normalization", () => {
 
     expect(result.session?.summary).toMatchObject({
       id: "33333333-3333-4333-8333-333333333333",
-      title: "Legacy prompt",
+      title: "33333333-3333-4333-8333-333333333333",
       scope: "archived",
       cwd: "/workspace/legacy",
       turnCount: 1,

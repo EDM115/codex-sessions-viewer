@@ -10,6 +10,64 @@ import {
 
 export type MaterializationState = "cold" | "queued" | "loading" | "ready" | "failed";
 
+// Catalog metadata never asserts transcript statistics or source availability
+export const catalogSessionMetadataSchema = z.object({
+  ...conversationSummarySchema.omit({
+    models: true,
+    reasoningEfforts: true,
+    turnCount: true,
+    assistantMessageCount: true,
+    toolCallCount: true,
+    toolCounts: true,
+    preview: true,
+    hasMedia: true,
+    diagnosticCount: true,
+  }).shape,
+  sourcePath: z.string().nullable(),
+  createdAt: isoTimestampSchema.nullable(),
+  updatedAt: isoTimestampSchema.nullable(),
+  recencyAt: isoTimestampSchema.nullable().optional(),
+  metadataRevision: z.string().min(1).optional(),
+  fieldSources: z
+    .strictObject({
+      title: z.string(),
+      createdAt: z.string().nullable(),
+      updatedAt: z.string().nullable(),
+      recencyAt: z.string().nullable(),
+    })
+    .optional(),
+  metadataConflicts: z.array(z.enum(["title", "updatedAt"])).optional(),
+});
+export type CatalogSessionMetadata = z.infer<typeof catalogSessionMetadataSchema>;
+
+export const libraryEntrySchema = z.strictObject({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  scope: conversationScopeSchema,
+  projectId: z.string().nullable(),
+  orderKey: z.string(),
+  kind: z.enum(["root", "subagent"]),
+  parentThreadId: z.string().nullable(),
+  childCount: z.number().int().nonnegative(),
+});
+export type LibraryEntry = z.infer<typeof libraryEntrySchema>;
+
+export function libraryEntryFromSummary(
+  item: ConversationListItem,
+  projectId: string | null = item.projectId,
+): LibraryEntry {
+  return libraryEntrySchema.parse({
+    id: item.summary.id,
+    title: item.summary.title,
+    scope: item.summary.scope,
+    projectId,
+    orderKey: item.summary.updatedAt,
+    kind: item.kind,
+    parentThreadId: item.parentThreadId,
+    childCount: item.childCount,
+  });
+}
+
 export const threadClassificationSchema = z.strictObject({
   visibility: z.enum(["user-root", "delegated-child", "internal", "unresolved"]),
   transportSource: z.string().nullable(),
@@ -72,6 +130,8 @@ export const catalogSidebarThreadSchema = z.strictObject({
   hostId: z.string().nullable(),
   sectionId: z.string().nullable(),
   sectionPosition: z.number().nullable(),
+  membershipFreshness: z.enum(["fresh", "retained-unvalidated"]).optional(),
+  sectionFreshness: z.enum(["fresh", "retained-unvalidated"]).optional(),
   pinned: z.boolean(),
   recencyAt: z.number().nullable(),
   classification: threadClassificationSchema,
@@ -194,6 +254,43 @@ export const conversationProjectSchema = z.strictObject({
 });
 
 export const conversationProjectsSchema = z.array(conversationProjectSchema);
+
+export const catalogProjectGroupSchema = catalogProjectSchema.extend({
+  groupId: z.string().min(1),
+  activeCount: z.int().nonnegative(),
+  archivedCount: z.int().nonnegative(),
+  sidebar: conversationProjectSchema.shape.sidebar,
+  diagnostics: z.array(z.string()).optional(),
+});
+export type CatalogProjectGroup = z.infer<typeof catalogProjectGroupSchema>;
+export const catalogProjectGroupsSchema = z.array(catalogProjectGroupSchema);
+
+export function sidebarGroupKey(group: Pick<SidebarGroup, "id" | "kind">): string {
+  return `${group.kind}:${encodeURIComponent(group.id)}`;
+}
+
+export function catalogProjectGroupFromLegacy(project: ConversationProject): CatalogProjectGroup {
+  return {
+    groupId: sidebarGroupKey({
+      id: project.id,
+      kind: project.sidebar?.kind ?? (project.source === "none" ? "recents" : "project"),
+    }),
+    id: project.id,
+    name: project.name,
+    rootPaths: project.hint ? [project.hint] : [],
+    hostId: null,
+    source: "legacy",
+    position: null,
+    recencyAt: null,
+    activeCount: project.activeCount,
+    archivedCount: project.archivedCount,
+    sidebar: project.sidebar ?? {
+      kind: project.source === "none" ? "recents" : "project",
+      sectionId: null,
+      sectionName: null,
+    },
+  };
+}
 
 export const preparationResultSchema = z.strictObject({
   id: z.string().min(1),

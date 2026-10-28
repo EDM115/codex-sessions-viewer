@@ -9,8 +9,14 @@ import {
   listCatalogProjects,
   listCatalogSessions,
   markCatalogSessionReady,
+  readCatalogLibrary,
 } from "../../../server/cache/catalogStore.ts";
+import { replaceCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
+import {
+  countCachedSearchResults,
+  searchCachedSessions,
+} from "../../../server/cache/searchStore.ts";
 import type { SourceDiscoveryResult } from "../../../server/ingestion/discoverSources.ts";
 import {
   observeSessionMetaSource,
@@ -27,7 +33,12 @@ import type {
 } from "../../../server/metadata/stateSnapshot.ts";
 import type { CatalogThreadMetadata } from "../../../server/metadata/threadClassification.ts";
 import type { JsonObject } from "../../../shared/types/conversation.ts";
-import { thread as nativeThread } from "../library/membershipFixtures.ts";
+import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
+import { completeSummaryFixture } from "../../fixtures/cache/summary.ts";
+import {
+  metadata as nativeMetadata,
+  thread as nativeThread,
+} from "../library/membershipFixtures.ts";
 
 const fixtureRoot = join(process.cwd(), "tests", "fixtures", "catalog");
 const temporaryRoots: string[] = [];
@@ -57,6 +68,374 @@ const globalState: GlobalStateMetadata = {
 const emptyStateSnapshot: StateMetadataSnapshot = { threads: [], sections: [], spawnEdges: [] };
 
 describe("refreshLiveCatalog", () => {
+  it.each([false, true])(
+    "retains unsupported Section membership while resolving supported siblings (mixed=%s)",
+    async (mixed) => {
+      const database = openCacheDatabase(":memory:");
+      const identity = "a".repeat(64);
+      const memberKey = "codex:thread:local:member";
+      const siblingKey = "codex:thread:local:sibling";
+      const siblingThread = nativeThread("sibling", { threadSource: "user" });
+      const state = {
+        threadHostIds: { member: "local", sibling: "local" },
+        sections: [{ id: "focus", name: "Focus", itemKeys: [memberKey] }],
+      };
+      const snapshot = nativeMetadata({
+        threads: [
+          nativeThread("member", { threadSource: "user", projectId: "work" }),
+          siblingThread,
+        ],
+        projects: [{ id: "work", name: "Work", roots: [] }],
+        globalState: {
+          projects: [],
+          pinnedThreadIds: [],
+          sectionsByIdentity: { [identity]: state },
+        },
+      });
+      const publish = (value: typeof snapshot) =>
+        refreshLiveCatalog({
+          database,
+          discovery: discovery([]),
+          sessionIndexEntries: [],
+          globalState: value.globalState,
+          stateSnapshot: { ...value, capabilities: value.capabilities ?? undefined },
+          catalogMetadata: value,
+          sidebarIdentityScopeKey: identity,
+        });
+      try {
+        await publish(snapshot);
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds).toEqual(["member"]);
+        const unsupported = {
+          ...snapshot,
+          threads: [siblingThread],
+          threadsComplete: false,
+          globalState: {
+            ...snapshot.globalState,
+            sectionsByIdentity: {
+              [identity]: {
+                ...state,
+                sections: [
+                  {
+                    id: "focus",
+                    name: "Focus",
+                    itemKeys: ["codex:thread-v2:local:member", ...(mixed ? [siblingKey] : [])],
+                  },
+                ],
+              },
+            },
+          },
+        };
+        await publish(unsupported);
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds.toSorted()).toEqual(
+          mixed ? ["member", "sibling"] : ["member"],
+        );
+        expect(readCatalogLibrary(database)?.diagnostics).toContain("unsupported-section-item-key");
+        expect(listCatalogSessions(database, { scope: "active" }).total).toBe(2);
+        await publish({
+          ...unsupported,
+          globalState: {
+            ...unsupported.globalState,
+            sectionsByIdentity: {
+              [identity]: {
+                ...state,
+                sections: [
+                  {
+                    id: "focus",
+                    name: "Focus",
+                    itemKeys: ["codex:thread-v2:local:member", siblingKey],
+                    pendingDeletionHostIdsByItemKey: { [memberKey]: ["local"] },
+                  },
+                ],
+              },
+            },
+          },
+        });
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds).toEqual(["sibling"]);
+        expect(readCatalogLibrary(database)?.diagnostics).toContain("unsupported-section-item-key");
+        await publish(snapshot);
+        await publish({
+          ...unsupported,
+          globalState: {
+            ...unsupported.globalState,
+            sectionsByIdentity: {
+              [identity]: {
+                ...state,
+                sections: [{ id: "focus", name: "Focus", itemKeys: [siblingKey] }],
+              },
+            },
+          },
+        });
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds).toEqual(["sibling"]);
+      } finally {
+        database.close();
+      }
+    },
+  );
+
+  it.each([
+    "host-deletion",
+    "host-deletion-only",
+    "section-removal",
+    "empty-itemKeys",
+    "empty-items",
+  ] as const)(
+    "honors fresh qualified JSON %s over omitted native Section membership",
+    async (removal) => {
+      const database = openCacheDatabase(":memory:");
+      const identity = "a".repeat(64);
+      const key = "codex:thread:local:member";
+      const section = { id: "focus", name: "Focus", itemKeys: [key] };
+      const sections = [section];
+      const state = { threadHostIds: { member: "local" }, sections };
+      const snapshot = nativeMetadata({
+        threads: [nativeThread("member", { threadSource: "user", projectId: "work" })],
+        projects: [{ id: "work", name: "Work", roots: [] }],
+        globalState: {
+          projects: [],
+          pinnedThreadIds: [],
+          sectionsByIdentity: { [identity]: state },
+        },
+      });
+      const publish = (value: typeof snapshot) =>
+        refreshLiveCatalog({
+          database,
+          discovery: discovery([]),
+          sessionIndexEntries: [],
+          globalState: value.globalState,
+          stateSnapshot: { ...value, capabilities: value.capabilities ?? undefined },
+          catalogMetadata: value,
+          sidebarIdentityScopeKey: identity,
+        });
+      const removedSections =
+        removal === "section-removal"
+          ? []
+          : removal === "host-deletion"
+            ? [{ ...section, pendingDeletionHostIdsByItemKey: { [key]: ["local"] } }]
+            : removal === "host-deletion-only"
+              ? [
+                  {
+                    id: "focus",
+                    name: "Focus",
+                    pendingDeletionHostIdsByItemKey: { [key]: ["local"] },
+                  },
+                ]
+              : removal === "empty-items"
+                ? [{ id: "focus", name: "Focus", items: [] }]
+                : [{ id: "focus", name: "Focus", itemKeys: [] }];
+      const removedGlobal: GlobalStateMetadata = {
+        ...snapshot.globalState,
+        sectionsByIdentity: { [identity]: { ...state, sections: removedSections } },
+      };
+      try {
+        await publish(snapshot);
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds).toEqual(["member"]);
+        await publish({
+          ...snapshot,
+          threads: [],
+          threadsComplete: false,
+          globalState: {
+            ...snapshot.globalState,
+            sectionsByIdentity: { [identity]: { sections, threadHostIds: {} } },
+          },
+        });
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds).toEqual(["member"]);
+        await publish({
+          ...snapshot,
+          threads: [],
+          threadsComplete: false,
+          globalState: {
+            ...snapshot.globalState,
+            sectionsByIdentity: { ["b".repeat(64)]: { ...state, sections: removedSections } },
+          },
+        });
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds).toEqual(["member"]);
+        await publish({
+          ...snapshot,
+          threads: [],
+          threadsComplete: false,
+          globalState: {
+            ...snapshot.globalState,
+            sectionsByIdentity: { [identity]: { threadHostIds: state.threadHostIds } },
+          },
+        });
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds).toEqual(["member"]);
+        await publish({
+          ...snapshot,
+          threads: [],
+          threadsComplete: false,
+          globalState: removedGlobal,
+          freshness: { ...snapshot.freshness, globalState: "unavailable" },
+        });
+        expect(readCatalogLibrary(database)?.sections[0]?.threadIds).toEqual(["member"]);
+        await publish({
+          ...snapshot,
+          threads: [],
+          threadsComplete: false,
+          globalState: removedGlobal,
+        });
+        expect(
+          listCatalogSessions(database, { scope: "active" }).items.map((entry) => entry.id),
+        ).toEqual(["member"]);
+        expect(readCatalogLibrary(database)?.sections).toEqual([]);
+        expect(readCatalogLibrary(database)?.threads[0]?.projectId).toBe("work");
+      } finally {
+        database.close();
+      }
+    },
+  );
+
+  it("retains rejected native membership and Sections until an accepted row changes them", async () => {
+    const database = openCacheDatabase(":memory:");
+    const snapshot = nativeMetadata({
+      threads: [
+        nativeThread("member", { projectId: "work", sectionId: "section", threadSource: "user" }),
+      ],
+      projects: [{ id: "work", name: "Work", roots: [] }],
+      sections: [{ id: "section", name: "Focus" }],
+    });
+    const publish = (value: typeof snapshot) =>
+      refreshLiveCatalog({
+        database,
+        discovery: discovery([]),
+        sessionIndexEntries: [],
+        globalState: value.globalState,
+        stateSnapshot: { ...value, capabilities: value.capabilities ?? undefined },
+        catalogMetadata: value,
+      });
+    try {
+      await publish(snapshot);
+      await publish({ ...snapshot, threads: [], threadsComplete: false });
+      expect(listCatalogSessions(database, { scope: "active" }).items[0]?.projectId).toBe("work");
+      expect(readCatalogLibrary(database)?.threads[0]).toMatchObject({
+        projectId: "work",
+        sectionId: "section",
+        membershipFreshness: "retained-unvalidated",
+        sectionFreshness: "retained-unvalidated",
+      });
+      expect(listCatalogProjects(database).some((project) => project.name === "Focus")).toBe(true);
+      await publish({
+        ...snapshot,
+        threads: [],
+        projects: [],
+        sections: [],
+        threadsComplete: false,
+        stateAuthority: "unavailable",
+        freshness: { ...snapshot.freshness, state: "unavailable" },
+      });
+      expect(listCatalogSessions(database, { scope: "active" }).items[0]?.projectId).toBe("work");
+      expect(listCatalogProjects(database).some((project) => project.name === "Focus")).toBe(true);
+      await publish({
+        ...snapshot,
+        threads: [],
+        threadsComplete: false,
+        globalState: { ...snapshot.globalState, projectlessThreadIds: ["member"] },
+      });
+      expect(readCatalogLibrary(database)?.threads[0]).toMatchObject({
+        projectId: null,
+        membershipFreshness: "fresh",
+        sectionId: "section",
+      });
+      await publish({
+        ...snapshot,
+        threads: [
+          nativeThread("member", { projectId: null, sectionId: null, threadSource: "user" }),
+        ],
+      });
+      expect(listCatalogSessions(database, { scope: "active" }).items[0]?.projectId).toBeNull();
+      expect(readCatalogLibrary(database)?.threads[0]).toMatchObject({
+        projectId: null,
+        sectionId: null,
+        membershipFreshness: "fresh",
+        sectionFreshness: "fresh",
+      });
+      expect(listCatalogProjects(database).some((project) => project.name === "Focus")).toBe(false);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("excludes authoritatively removed native sessions from search and counts until they reappear", async () => {
+    const database = openCacheDatabase(":memory:");
+    const recoveryRoot = await mkdtemp(join(tmpdir(), "catalog-search-reappearance-"));
+    temporaryRoots.push(recoveryRoot);
+    const sourcePath = join(recoveryRoot, "reappeared.jsonl");
+    const session = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      root: true,
+      sourcePath,
+      scope: "active",
+      revision: "sha256:review",
+    });
+    replaceCachedSession(database, { session, source: cachedSource(session), diagnostics: [] });
+    const snapshot = nativeMetadata({
+      threads: [nativeThread(session.summary.id, { threadSource: "user" })],
+    });
+    const publish = (value: typeof snapshot) =>
+      refreshLiveCatalog({
+        database,
+        discovery: discovery([]),
+        sessionIndexEntries: [],
+        globalState: value.globalState,
+        stateSnapshot: { ...value, capabilities: value.capabilities ?? undefined },
+        catalogMetadata: value,
+      });
+    const query = { scope: "active" as const, query: "parser" };
+    try {
+      expect(searchCachedSessions(database, query).total).toBe(1);
+      await publish(snapshot);
+      await publish({ ...snapshot, threads: [] });
+      expect(listCatalogSessions(database, { scope: "active" }).total).toBe(0);
+      expect(searchCachedSessions(database, query)).toMatchObject({ total: 0, items: [] });
+      expect(countCachedSearchResults(database, query)).toBe(0);
+      const sparse = [
+        { id: session.summary.id, threadName: "Old index row", updatedAt: "2026-01-01T00:00:00Z" },
+      ];
+      await refreshLiveCatalog({
+        database,
+        discovery: discovery([]),
+        sessionIndexEntries: sparse,
+        globalState: snapshot.globalState,
+        stateSnapshot: null,
+        catalogMetadata: {
+          ...snapshot,
+          threads: [],
+          threadsComplete: false,
+          stateAuthority: "unavailable",
+          sessionIndex: sparse,
+          freshness: { ...snapshot.freshness, state: "unavailable" },
+        },
+      });
+      expect(listCatalogSessions(database, { scope: "active" }).total).toBe(0);
+      expect(countCachedSearchResults(database, query)).toBe(0);
+      await publish(snapshot);
+      expect(searchCachedSessions(database, query).total).toBe(1);
+      expect(countCachedSearchResults(database, query)).toBe(1);
+      await publish({ ...snapshot, threads: [] });
+      await writeFile(
+        sourcePath,
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: session.summary.id, source: "cli", thread_source: "user" },
+        }) + "\n",
+      );
+      await refreshLiveCatalog({
+        database,
+        discovery: { ...discovery([]), rollouts: [{ path: sourcePath, scope: "active" }] },
+        sessionIndexEntries: [],
+        globalState: snapshot.globalState,
+        stateSnapshot: null,
+        recoveryBatch: true,
+        signal: new AbortController().signal,
+      });
+      expect(listCatalogSessions(database, { scope: "active" }).items[0]?.id).toBe(
+        session.summary.id,
+      );
+      expect(searchCachedSessions(database, query).total).toBe(1);
+      expect(countCachedSearchResults(database, query)).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
   it("keeps native archive scope, recency and custom section placement independent from project membership", async () => {
     const identityScopeKey = "a".repeat(64);
     const root = await mkdtemp(join(tmpdir(), "catalog-native-membership-"));
@@ -124,19 +503,19 @@ describe("refreshLiveCatalog", () => {
       const result = await refreshLiveCatalog(options);
       expect(catalogSession(database, "first")?.project.id).toBe("native");
       expect(
-        listCatalogSessions(database, { scope: "active", projectId: "native" }).items.map(
-          (item) => item.summary.id,
+        listCatalogSessions(database, { scope: "active", groupId: "project:native" }).items.map(
+          (item) => item.id,
         ),
       ).toEqual(["second"]);
       expect(
         listCatalogSessions(database, {
           scope: "active",
-          projectId: `custom:${identityScopeKey}:review`,
-        }).items.map((item) => item.summary.id),
+          groupId: `section:${encodeURIComponent(`custom:${identityScopeKey}:review`)}`,
+        }).items.map((item) => item.id),
       ).toEqual(["first"]);
       expect(
         listCatalogSessions(database, { scope: "archived", projectId: "native" }).items.map(
-          (item) => item.summary.id,
+          (item) => item.id,
         ),
       ).toEqual(["archived"]);
       expect(
@@ -155,7 +534,7 @@ describe("refreshLiveCatalog", () => {
       expect(changed.groupsChanged).toBe(true);
       expect(
         listCatalogSessions(database, { scope: "active", projectId: "native", limit: 1 }).items.map(
-          (item) => item.summary.id,
+          (item) => item.id,
         ),
       ).toEqual(["second"]);
       expect(
@@ -164,7 +543,7 @@ describe("refreshLiveCatalog", () => {
           projectId: "native",
           limit: 1,
           cursor: "1",
-        }).items.map((item) => item.summary.id),
+        }).items.map((item) => item.id),
       ).toEqual(["first"]);
     } finally {
       database.close();
@@ -210,15 +589,15 @@ describe("refreshLiveCatalog", () => {
         ["saved", "Saved", 1],
         ["none", "Recents", 1],
       ]);
-      expect(catalogSession(database, "root")?.project.id).toBe("none");
+      expect(catalogSession(database, "root")!?.project.id).toBe("none");
       expect(
         listCatalogSessions(database, { scope: "active", projectId: "saved", limit: 1 }).items.map(
-          (item) => item.summary.id,
+          (item) => item.id,
         ),
       ).toEqual(["sibling"]);
       expect(
-        listCatalogSessions(database, { scope: "active", projectId: "none", limit: 1 }).items.map(
-          (item) => item.summary.id,
+        listCatalogSessions(database, { scope: "active", projectId: null, limit: 1 }).items.map(
+          (item) => item.id,
         ),
       ).toEqual(["root"]);
       expect(listCatalogProjects(database).map((project) => project.id)).toEqual([
@@ -323,13 +702,13 @@ describe("refreshLiveCatalog", () => {
       });
       expect(
         listCatalogSessions(database, { scope: "active" })
-          .items.map((entry) => entry.summary.id)
+          .items.map((entry) => entry.id)
           .toSorted(),
       ).toEqual(["native-attached", "native-fork", "owner", "raw-attached", "raw-fork"]);
       expect(result.projects.reduce((sum, project) => sum + project.activeCount, 0)).toBe(5);
       expect(
         listCatalogSessions(database, { scope: "active", parentThreadId: "owner" })
-          .items.map((entry) => entry.summary.id)
+          .items.map((entry) => entry.id)
           .toSorted(),
       ).toEqual(["edge-spawn", "native-spawn", "raw-spawn"]);
     } finally {
@@ -372,9 +751,9 @@ describe("refreshLiveCatalog", () => {
     try {
       await refreshLiveCatalog({ ...options, stateSnapshot: null });
       await refreshLiveCatalog(options);
-      expect(
-        listCatalogSessions(database, { scope: "active" }).items.map((row) => row.summary.id),
-      ).toEqual(["guardian"]);
+      expect(listCatalogSessions(database, { scope: "active" }).items.map((row) => row.id)).toEqual(
+        ["guardian"],
+      );
       expect(
         catalogSession(database, "guardian")?.structuralEvidence?.classification,
       ).toMatchObject({
@@ -403,7 +782,7 @@ describe("refreshLiveCatalog", () => {
         discovery: discovery(["root.jsonl"]),
         stateSnapshot: { ...emptyStateSnapshot, threads: [nativeHelper] },
       });
-      expect(catalogSession(database, "root")?.structuralEvidence?.classification).toMatchObject({
+      expect(catalogSession(database, "root")!?.structuralEvidence?.classification).toMatchObject({
         visibility: "internal",
         transportSource: "cli",
         parentThreadId: "owner",
@@ -427,7 +806,7 @@ describe("refreshLiveCatalog", () => {
           ],
         },
       });
-      expect(catalogSession(database, "child")?.structuralEvidence?.classification).toMatchObject({
+      expect(catalogSession(database, "child")!?.structuralEvidence?.classification).toMatchObject({
         visibility: "unresolved",
         parentThreadId: null,
         declarations: expect.arrayContaining([
@@ -436,7 +815,7 @@ describe("refreshLiveCatalog", () => {
           expect.objectContaining({ origin: "spawn-edge", parentThreadIds: ["edge-parent"] }),
         ]),
       });
-      expect(catalogSession(database, "child")?.parentThreadId).toBeNull();
+      expect(catalogSession(database, "child")!?.parentThreadId).toBeNull();
     } finally {
       database.close();
     }
@@ -496,12 +875,12 @@ describe("refreshLiveCatalog", () => {
       });
       expect(
         listCatalogSessions(database, { scope: "active" })
-          .items.map((row) => row.summary.id)
+          .items.map((row) => row.id)
           .toSorted(),
       ).toEqual(["attached", "user"]);
       expect(
         listCatalogSessions(database, { scope: "active", parentThreadId: "user" }).items.map(
-          (row) => row.summary.id,
+          (row) => row.id,
         ),
       ).toEqual(["child"]);
       expect(result.projects.reduce((sum, project) => sum + project.activeCount, 0)).toBe(2);
@@ -519,7 +898,7 @@ describe("refreshLiveCatalog", () => {
       database.close();
     }
   });
-  it("preserves newly materialized metrics when metadata refresh was already awaiting source I/O", async () => {
+  it("preserves selected materialization state without copying metrics into the metadata catalog", async () => {
     const database = openCacheDatabase(":memory:");
     const options = {
       database,
@@ -535,26 +914,25 @@ describe("refreshLiveCatalog", () => {
         globalState: { projects: [], pinnedThreadIds: ["root"] },
         observeSource: async (path) => {
           const cold = catalogSession(database, "root")!;
-          markCatalogSessionReady(database, {
-            ...cold.summary,
-            turnCount: 99,
-            models: ["materialized-model"],
-            toolCounts: { exec: 7 },
-            hasMedia: true,
-          });
+          markCatalogSessionReady(
+            database,
+            completeSummaryFixture(cold.summary, {
+              turnCount: 99,
+              models: ["materialized-model"],
+              toolCounts: { exec: 7 },
+              hasMedia: true,
+            }),
+          );
           return observeSessionMetaSource(path);
         },
       });
-      expect(catalogSession(database, "root")).toMatchObject({
+      expect(catalogSession(database, "root")!).toMatchObject({
         materialization: "ready",
         summary: {
-          turnCount: 99,
-          models: ["materialized-model"],
-          toolCounts: { exec: 7 },
-          hasMedia: true,
           pinned: true,
         },
       });
+      expect(catalogSession(database, "root")!?.summary).not.toHaveProperty("turnCount");
     } finally {
       database.close();
     }
@@ -572,7 +950,7 @@ describe("refreshLiveCatalog", () => {
     };
     try {
       await refreshLiveCatalog({ ...options, discovery: discovery(["subagent.jsonl"]) });
-      expect(catalogSession(database, "child")).toMatchObject({
+      expect(catalogSession(database, "child")!).toMatchObject({
         kind: "subagent",
         parentThreadId: "root",
         structuralEvidence: {
@@ -585,24 +963,24 @@ describe("refreshLiveCatalog", () => {
         changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
       });
       expect(attached.changedIds).toEqual(["root"]);
-      expect(catalogSession(database, "child")).toMatchObject({
+      expect(catalogSession(database, "child")!).toMatchObject({
         kind: "subagent",
         parentThreadId: "root",
       });
-      expect(catalogSession(database, "root")?.childCount).toBe(1);
+      expect(catalogSession(database, "root")!?.childCount).toBe(1);
       expect(readPrefix).toHaveBeenCalledTimes(2);
       await refreshLiveCatalog({
         ...options,
         discovery: discovery(["subagent.jsonl"]),
         changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
       });
-      expect(catalogSession(database, "child")?.kind).toBe("subagent");
+      expect(catalogSession(database, "child")!?.kind).toBe("subagent");
       await refreshLiveCatalog({
         ...options,
         discovery: discovery(["root.jsonl", "subagent.jsonl"]),
         changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
       });
-      expect(catalogSession(database, "child")?.parentThreadId).toBe("root");
+      expect(catalogSession(database, "child")!?.parentThreadId).toBe("root");
       database
         .prepare(
           "UPDATE session_catalog SET structural_evidence_json = NULL, session_kind = 'root', parent_thread_id = NULL WHERE id = 'child'",
@@ -614,7 +992,7 @@ describe("refreshLiveCatalog", () => {
         changedSourcePaths: [],
       });
       expect(repaired.changedIds).toContain("child");
-      expect(catalogSession(database, "child")?.parentThreadId).toBe("root");
+      expect(catalogSession(database, "child")!?.parentThreadId).toBe("root");
       expect(readPrefix).toHaveBeenCalledTimes(3);
       expect(
         (
@@ -697,7 +1075,7 @@ describe("refreshLiveCatalog", () => {
         hasMedia: true,
         query: "not present",
       });
-      expect(children.items.map((item) => item.summary.id)).toEqual(["large-child"]);
+      expect(children.items.map((item) => item.id)).toEqual(["large-child"]);
       expect(children.total).toBe(parent.childCount);
     } finally {
       database.close();
@@ -835,11 +1213,11 @@ describe("refreshLiveCatalog", () => {
       await refreshLiveCatalog(options);
       const cold = catalogSession(database, "child")!;
       expect(cold.structuralEvidence?.status).toBe("exhausted");
-      const summary = { ...cold.summary, parentThreadId: "root" };
+      const summary = completeSummaryFixture(cold.summary, { parentThreadId: "root" });
       expect(
         markCatalogSessionReady(database, summary, { sourceRevision: "stale", sourcePath: path }),
       ).toBe(false);
-      expect(catalogSession(database, "child")?.parentThreadId).toBeNull();
+      expect(catalogSession(database, "child")!?.parentThreadId).toBeNull();
       await refreshLiveCatalog({
         ...options,
         observeSource: async (observedPath) => {
@@ -854,14 +1232,14 @@ describe("refreshLiveCatalog", () => {
           return observeSessionMetaSource(observedPath);
         },
       });
-      expect(catalogSession(database, "child")).toMatchObject({
+      expect(catalogSession(database, "child")!).toMatchObject({
         kind: "subagent",
         parentThreadId: "root",
         structuralEvidence: { origin: "materialized", meta: { parentThreadId: "root" } },
       });
-      expect(catalogSession(database, "root")?.summary.childThreadIds).toEqual(["child"]);
+      expect(catalogSession(database, "root")!?.summary.childThreadIds).toEqual(["child"]);
       await refreshLiveCatalog({ ...options, changedSourcePaths: [] });
-      expect(catalogSession(database, "child")).toMatchObject({
+      expect(catalogSession(database, "child")!).toMatchObject({
         kind: "subagent",
         parentThreadId: "root",
         materialization: "ready",
@@ -971,7 +1349,7 @@ describe("refreshLiveCatalog", () => {
         stateSnapshot: emptyStateSnapshot,
       });
       expect(metadataOnly.changedIds).toEqual(["root"]);
-      expect(catalogSession(database, "root")?.summary.title).toBe("Renamed root");
+      expect(catalogSession(database, "root")!?.summary.title).toBe("Renamed root");
 
       const topology = await refreshLiveCatalog({
         database,
@@ -988,7 +1366,7 @@ describe("refreshLiveCatalog", () => {
         },
       });
       expect(topology.changedIds).toEqual(["missing-meta", "root"]);
-      expect(catalogSession(database, "root")?.summary.childThreadIds).toEqual(["missing-meta"]);
+      expect(catalogSession(database, "root")!?.summary.childThreadIds).toEqual(["missing-meta"]);
       expect(catalogSession(database, "missing-meta")).toMatchObject({
         kind: "subagent",
         parentThreadId: "root",
@@ -1035,7 +1413,7 @@ describe("refreshLiveCatalog", () => {
 
       expect(changed.changedIds).toEqual(["root"]);
       expect(readPrefix).toHaveBeenCalledTimes(2);
-      expect(catalogSession(database, "root")?.materialization).toBe("cold");
+      expect(catalogSession(database, "root")!?.materialization).toBe("cold");
     } finally {
       database.close();
     }
@@ -1199,7 +1577,7 @@ describe("refreshLiveCatalog", () => {
           scope: "active",
           projectId: "viewer",
           parentThreadId: "__root__",
-        }).items.map(({ summary }) => summary.id),
+        }).items.map((item) => item.id),
       ).toEqual(["root"]);
       expect(result.projects).toEqual(
         expect.arrayContaining([
@@ -1239,7 +1617,7 @@ describe("refreshLiveCatalog", () => {
         kind: "root",
       });
       expect(result.diagnostics.some(({ message }) => message.includes("cycle"))).toBe(true);
-      expect(catalogSession(database, "root")).toMatchObject({
+      expect(catalogSession(database, "root")!).toMatchObject({
         materialization: "cold",
         error: "Rollout source is temporarily unavailable, awaiting a stable representation.",
       });
@@ -1343,7 +1721,6 @@ describe("refreshLiveCatalog", () => {
           kind: "auxiliary",
           parentThreadId: "root",
           summary: expect.objectContaining({
-            models: ["codex-auto-review"],
             parentThreadId: "root",
           }),
         }),

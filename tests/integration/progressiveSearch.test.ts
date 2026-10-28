@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { catalogSession } from "../../server/cache/catalogStore.ts";
 import { openCacheDatabase } from "../../server/cache/database.ts";
 import type { StableJsonlReader } from "../../server/cache/sourceManifest.ts";
 import type { LoadedServerViewerConfig } from "../../server/core/config.ts";
@@ -95,11 +96,13 @@ async function startRuntime(
     onboardingRequired: false,
     diagnostics: [],
   };
-  return LiveViewerRuntime.start(config, {
+  const runtime = await LiveViewerRuntime.start(config, {
     readJsonl,
     reconciliationIntervalMs: 60_000,
     onError: options.onError,
   });
+  await runtime.whenRecoverySettled();
+  return runtime;
 }
 
 describe("progressive live search", () => {
@@ -183,7 +186,7 @@ describe("progressive live search", () => {
       expect(catalog.total).toBe(3);
       expect(readJsonl).not.toHaveBeenCalled();
 
-      const readyId = catalog.items[0]?.summary.id;
+      const readyId = catalog.items[0]?.id;
       if (readyId === undefined) {
         throw new Error("Expected the first catalog page to contain a session.");
       }
@@ -319,7 +322,7 @@ describe("progressive live search", () => {
 
     try {
       const catalog = await runtime.repository.listSessions({ scope: "active", limit: 20 });
-      const id = catalog.items[0]?.summary.id;
+      const id = catalog.items[0]?.id;
       if (id === undefined) {
         throw new Error("Expected one catalog session.");
       }
@@ -357,7 +360,7 @@ describe("progressive live search", () => {
 
     try {
       const catalog = await runtime.repository.listSessions({ scope: "active", limit: 20 });
-      const id = catalog.items[0]?.summary.id;
+      const id = catalog.items[0]?.id;
       if (id === undefined) {
         throw new Error("Expected one catalog session.");
       }
@@ -399,16 +402,16 @@ describe("progressive live search", () => {
         throw new Error("Expected one catalog session.");
       }
       const replacementId = "22222222-2222-4222-8222-222222222222";
-      const fixture = await readFile(selected.summary.sourcePath, "utf8");
-      await writeFile(
-        selected.summary.sourcePath,
-        fixture.replaceAll(selected.summary.id, replacementId),
-        "utf8",
-      );
+      const sourcePath = catalogSession(runtime.database, selected.id)?.summary.sourcePath;
+      if (!sourcePath) {
+        throw new Error("Expected a recovered source path");
+      }
+      const fixture = await readFile(sourcePath, "utf8");
+      await writeFile(sourcePath, fixture.replaceAll(selected.id, replacementId), "utf8");
 
-      await expect(runtime.repository.prepareSessions([selected.summary.id])).resolves.toEqual([
+      await expect(runtime.repository.prepareSessions([selected.id])).resolves.toEqual([
         {
-          id: selected.summary.id,
+          id: selected.id,
           state: "failed",
           error:
             "The viewer could not update this session cache; the last good cached revision was retained.",

@@ -9,8 +9,9 @@ import {
   type LibraryWorkspaceState,
 } from "../../../app/composables/useLibraryWorkspace.ts";
 import type { ConversationSummary } from "../../../shared/types/conversation.ts";
+import { catalogProjectGroupFromLegacy } from "../../../shared/types/library.ts";
 import type {
-  ConversationListItem,
+  LibraryEntry,
   ConversationProject,
   DeepSearchJob,
 } from "../../../shared/types/library.ts";
@@ -47,23 +48,22 @@ function session(id: string, scope: "active" | "archived"): ConversationSummary 
 function item(
   id: string,
   scope: "active" | "archived" = "active",
-  materialization: ConversationListItem["materialization"] = "ready",
+  _materialization: string = "ready",
   parentThreadId: string | null = null,
-): ConversationListItem {
+): LibraryEntry {
   return {
-    summary: { ...session(id, scope), parentThreadId },
+    id,
+    title: id,
+    scope,
+    orderKey: "2026-08-16T09:00:00.000Z",
     kind: parentThreadId === null ? "root" : "subagent",
-    materialization,
     projectId: "project-1",
     parentThreadId,
-    agentPath: parentThreadId === null ? null : "agent-1",
-    agentNickname: parentThreadId === null ? null : "Worker",
-    agentDepth: parentThreadId === null ? null : 1,
     childCount: parentThreadId === null ? 1 : 0,
   };
 }
 
-const project: ConversationProject = {
+const legacyProject: ConversationProject = {
   id: "project-1",
   name: "Viewer",
   source: "cwd",
@@ -71,6 +71,7 @@ const project: ConversationProject = {
   activeCount: 2,
   archivedCount: 1,
 };
+const project = { ...catalogProjectGroupFromLegacy(legacyProject), groupId: "project-1" };
 
 type RequestFetch = (path: string, options?: Record<string, unknown>) => Promise<unknown>;
 
@@ -149,6 +150,7 @@ describe("persistent library workspace state", () => {
       {
         ...project,
         id: "a",
+        groupId: "a",
         sidebar: {
           kind: "project",
           sectionId: null,
@@ -159,6 +161,7 @@ describe("persistent library workspace state", () => {
       {
         ...project,
         id: "b",
+        groupId: "b",
         sidebar: {
           kind: "project",
           sectionId: null,
@@ -181,8 +184,8 @@ describe("persistent library workspace state", () => {
     vi.useFakeTimers();
     let changed = false;
     const projects = [
-      { ...project, id: "a", activeCount: 1 },
-      { ...project, id: "b", activeCount: 2 },
+      { ...project, id: "a", groupId: "a", activeCount: 1 },
+      { ...project, id: "b", groupId: "b", activeCount: 2 },
     ];
     stubWorkspaceGlobals(reactive({ path: "/", query: {} }), async (path) => {
       if (path === "/api/projects") {
@@ -191,15 +194,12 @@ describe("persistent library workspace state", () => {
       if (path === "/api/status") {
         return { state: "ready", message: null };
       }
-      const id = new URL(path, "http://localhost").searchParams.get("projectId");
+      const id = new URL(path, "http://localhost").searchParams.get("groupId");
       const ids = id === "a" ? ["row-a"] : changed ? ["row-c", "row-b"] : ["row-b", "row-c"];
       return {
         items: ids.map((id) => ({
           ...item(id),
-          summary: {
-            ...session(id, "active"),
-            title: changed && id === "row-a" ? "Renamed A" : id,
-          },
+          title: changed && id === "row-a" ? "Renamed A" : id,
         })),
         nextCursor: null,
         total: ids.length,
@@ -229,8 +229,8 @@ describe("persistent library workspace state", () => {
     listener({ type: "library.updated", ids: ["row-a"], groupsChanged: true, revision: "mixed" });
     await vi.advanceTimersByTimeAsync(0);
     await flushPromises();
-    expect(workspace.projectPages.get("a")?.items[0]?.summary.title).toBe("Renamed A");
-    expect(workspace.projectPages.get("b")?.items.map((item) => item.summary.id)).toEqual([
+    expect(workspace.projectPages.get("a")?.items[0]?.title).toBe("Renamed A");
+    expect(workspace.projectPages.get("b")?.items.map((item) => item.id)).toEqual([
       "row-c",
       "row-b",
     ]);
@@ -301,10 +301,10 @@ describe("persistent library workspace state", () => {
           ? workspace.projectPages.get("project-1")
           : workspace.childPages.get("parent");
       expect(oldSignal?.aborted).toBe(true);
-      expect(page()?.items.map(({ summary }) => summary.id)).toEqual(["fresh"]);
+      expect(page()?.items.map(({ id }) => id)).toEqual(["fresh"]);
       releaseOld();
       await oldRequest;
-      expect(page()?.items.map(({ summary }) => summary.id)).toEqual(["fresh"]);
+      expect(page()?.items.map(({ id }) => id)).toEqual(["fresh"]);
       expect(page()?.loading).toBe(false);
       workspace.stop();
       scope.stop();
@@ -337,10 +337,10 @@ describe("persistent library workspace state", () => {
     route.query.model = "new";
     await nextTick();
     await vi.advanceTimersByTimeAsync(0);
-    expect(workspace.projectPages.get("project-1")?.items[0]?.summary.id).toBe("new");
+    expect(workspace.projectPages.get("project-1")?.items[0]?.id).toBe("new");
     releaseOld();
     await oldRequest;
-    expect(workspace.projectPages.get("project-1")?.items[0]?.summary.id).toBe("new");
+    expect(workspace.projectPages.get("project-1")?.items[0]?.id).toBe("new");
     workspace.stop();
     scope.stop();
   });
@@ -353,7 +353,7 @@ describe("persistent library workspace state", () => {
     const child = item("child", "active", "ready", "parent");
     stubWorkspaceGlobals(reactive({ path: "/", query: {} }), async (path) => {
       if (path === "/api/projects") {
-        return [project, { ...project, id: "other-project" }];
+        return [project, { ...project, id: "other-project", groupId: "other-project" }];
       }
       if (path === "/api/status") {
         return { state: "ready", message: null };
@@ -363,7 +363,7 @@ describe("persistent library workspace state", () => {
       const parentId = params.get("parentThreadId");
       if (parentId === "__root__") {
         return {
-          items: params.get("projectId") === "other-project" ? [item("unrelated")] : roots,
+          items: params.get("groupId") === "other-project" ? [item("unrelated")] : roots,
           nextCursor: null,
           total: 2,
         };
@@ -373,7 +373,7 @@ describe("persistent library workspace state", () => {
         parentId === "parent"
           ? item(next ? "second-child" : "child", "active", "ready", "parent")
           : item(`${parentId}-descendant`, "active", "ready", parentId);
-      result.summary.title = revision;
+      result.title = revision;
       return {
         items: [result],
         nextCursor: parentId === "parent" && !next ? "second" : null,
@@ -393,18 +393,16 @@ describe("persistent library workspace state", () => {
     revision = "fresh";
     invalidate(["child", "closed-parent-descendant"]);
     await vi.advanceTimersByTimeAsync(0);
-    expect(
-      workspace.childPages.get("parent")?.items.map(({ summary }) => [summary.id, summary.title]),
-    ).toEqual([
+    expect(workspace.childPages.get("parent")?.items.map(({ id, title }) => [id, title])).toEqual([
       ["child", "fresh"],
       ["second-child", "fresh"],
     ]);
-    expect(workspace.childPages.get("child")?.items[0]?.summary.title).toBe("fresh");
-    expect(requests.some((path) => path.includes("projectId=other-project"))).toBe(false);
+    expect(workspace.childPages.get("child")?.items[0]?.title).toBe("fresh");
+    expect(requests.some((path) => path.includes("groupId=other-project"))).toBe(false);
     expect(requests.some((path) => path.includes("parentThreadId=closed-parent"))).toBe(false);
     expect(workspace.expandedSessionIds.value).toEqual(new Set(["parent", "child"]));
     await workspace.toggleSession(roots[1]);
-    expect(workspace.childPages.get("closed-parent")?.items[0]?.summary.title).toBe("fresh");
+    expect(workspace.childPages.get("closed-parent")?.items[0]?.title).toBe("fresh");
     await workspace.toggleProject("project-1");
     requests.length = 0;
     revision = "reopened";
@@ -412,8 +410,8 @@ describe("persistent library workspace state", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(requests).toEqual([]);
     await workspace.toggleProject("project-1");
-    expect(workspace.childPages.get("parent")?.items[0]?.summary.title).toBe("reopened");
-    expect(workspace.childPages.get("child")?.items[0]?.summary.title).toBe("reopened");
+    expect(workspace.childPages.get("parent")?.items[0]?.title).toBe("reopened");
+    expect(workspace.childPages.get("child")?.items[0]?.title).toBe("reopened");
     workspace.stop();
     scope.stop();
   });
@@ -423,12 +421,12 @@ describe("persistent library workspace state", () => {
     let moved = false;
     const requestFetch = vi.fn<RequestFetch>(async (path) => {
       if (path === "/api/projects") {
-        return [project, { ...project, id: "other-project" }];
+        return [project, { ...project, id: "other-project", groupId: "other-project" }];
       }
       if (path === "/api/status") {
         return { state: "ready", message: null };
       }
-      const targetProject = new URL(path, "http://localhost").searchParams.get("projectId");
+      const targetProject = new URL(path, "http://localhost").searchParams.get("groupId");
       const hasParent = (targetProject === "project-1") !== moved;
       return {
         items: [{ ...item(hasParent ? "parent" : "other"), projectId: targetProject }],
@@ -445,8 +443,8 @@ describe("persistent library workspace state", () => {
     moved = true;
     invalidate(["parent"]);
     await vi.advanceTimersByTimeAsync(0);
-    expect(workspace.projectPages.get("project-1")?.items[0]?.summary.id).toBe("other");
-    expect(workspace.projectPages.get("other-project")?.items[0]?.summary.id).toBe("parent");
+    expect(workspace.projectPages.get("project-1")?.items[0]?.id).toBe("other");
+    expect(workspace.projectPages.get("other-project")?.items[0]?.id).toBe("parent");
     workspace.stop();
     scope.stop();
   });
@@ -489,7 +487,7 @@ describe("persistent library workspace state", () => {
   it("expands immediately and retains independent expansions when requests finish out of order", async () => {
     const releases = new Map<string, () => void>();
     stubWorkspaceGlobals(reactive({ path: "/", query: {} }), async (path) => {
-      const id = new URL(path, "http://localhost").searchParams.get("projectId")!;
+      const id = new URL(path, "http://localhost").searchParams.get("groupId")!;
       await new Promise<void>((resolve) => releases.set(id, resolve));
       return { items: [item(id)], nextCursor: null, total: 1 };
     });
@@ -531,7 +529,7 @@ describe("persistent library workspace state", () => {
     await workspace.loadChildren(parent);
     await workspace.loadChildren(parent, true);
     await workspace.loadChildren(parent);
-    expect(workspace.childPages.get("parent")?.items.map(({ summary }) => summary.id)).toEqual([
+    expect(workspace.childPages.get("parent")?.items.map(({ id }) => id)).toEqual([
       "first",
       "second",
     ]);
@@ -696,7 +694,7 @@ describe("persistent library workspace state", () => {
       if (path === "/payloads/projects.json") {
         return {
           version: 1,
-          projects: [project],
+          projects: [legacyProject],
           entries: {
             "active-1": {
               kind: "root",
@@ -723,7 +721,7 @@ describe("persistent library workspace state", () => {
 
     expect(payload.hits).toEqual([]);
     expect(payload.items).toEqual([
-      expect.objectContaining({ summary: session("active-1", "active") }),
+      expect.objectContaining({ id: "active-1", title: "active-1", scope: "active" }),
     ]);
     expect(workspace.searchExactTurns).toBe(false);
     expect(workspace.hasSettledContent.value).toBe(false);
@@ -744,7 +742,7 @@ describe("persistent library workspace state", () => {
       if (!path.startsWith("/api/sessions?")) {
         throw new Error(`Unexpected request ${path}`);
       }
-      if (path.includes("projectId=broken")) {
+      if (path.includes("groupId=broken")) {
         if (failProject) {
           throw "non-error failure";
         }
@@ -874,27 +872,9 @@ describe("persistent library workspace state", () => {
     scope.stop();
   });
 
-  it("prepares observed sessions, retries failures, and controls deep search", async () => {
+  it("controls explicit deep search without preparing sidebar rows", async () => {
     const route = reactive({ path: "/", query: { q: "needle" } });
-    let preparationFails = false;
     const requestFetch = vi.fn<RequestFetch>(async (path, options) => {
-      if (path === "/api/sessions/prepare") {
-        const body = options?.["body"];
-        if (
-          typeof body !== "object" ||
-          body === null ||
-          !("ids" in body) ||
-          !Array.isArray(body.ids) ||
-          !body.ids.every((id) => typeof id === "string")
-        ) {
-          throw new Error("Expected a preparation request body.");
-        }
-        const ids = body.ids;
-        if (preparationFails) {
-          throw new Error("preparation failed");
-        }
-        return ids.map((id) => ({ id, state: "ready", error: null }));
-      }
       if (path === "/api/search/materialize" && options?.["method"] === "POST") {
         return deepSearchJob();
       }
@@ -904,97 +884,14 @@ describe("persistent library workspace state", () => {
       throw new Error(`Unexpected request ${path}`);
     });
     stubWorkspaceGlobals(route, requestFetch);
-    let observerCallback!: IntersectionObserverCallback;
-    const observe = vi.fn<(target: Element) => void>();
-    const unobserve = vi.fn<(target: Element) => void>();
-    const disconnect = vi.fn<() => void>();
-    vi.stubGlobal(
-      "IntersectionObserver",
-      class {
-        constructor(callback: IntersectionObserverCallback) {
-          observerCallback = callback;
-        }
-        observe = observe;
-        unobserve = unobserve;
-        disconnect = disconnect;
-      },
-    );
+    const observer = vi.fn<() => void>();
+    vi.stubGlobal("IntersectionObserver", observer);
     const scope = effectScope();
-    const workspace = scope.run(() => createLibraryWorkspace());
-    if (workspace === undefined) {
-      throw new Error("Expected a workspace state.");
-    }
-    const coldItems = Array.from({ length: 21 }, (_, index) =>
-      item(`cold-${index + 1}`, "active", "cold"),
-    );
-    const cold = coldItems[0];
-    if (cold === undefined) {
-      throw new Error("Expected one cold session.");
-    }
-    workspace.hydrate({
-      counts: { active: 21, archived: 0 },
-      hits: [],
-      items: coldItems,
-      nextCursor: null,
-      projects: [project],
-      runtimeStatus: { state: "ready", message: null },
-      total: 21,
-    });
-    const elements = coldItems.map(() => document.createElement("article"));
-    const firstElement = elements[0];
-    if (firstElement === undefined) {
-      throw new Error("Expected one observed element.");
-    }
-    const stopObserving = workspace.observeSession(firstElement, cold);
-    coldItems.slice(1).forEach((candidate, index) => {
-      const element = elements[index + 1];
-      if (element !== undefined) {
-        workspace.observeSession(element, candidate);
-      }
-    });
-    expect(observe).toHaveBeenCalledTimes(21);
-    const unknownElement = document.createElement("article");
-    const intersectionEntry = (
-      target: Element,
-      isIntersecting: boolean,
-    ): IntersectionObserverEntry => ({
-      boundingClientRect: target.getBoundingClientRect(),
-      intersectionRatio: isIntersecting ? 1 : 0,
-      intersectionRect: target.getBoundingClientRect(),
-      isIntersecting,
-      rootBounds: null,
-      target,
-      time: 0,
-    });
-    const observer: IntersectionObserver = {
-      disconnect,
-      observe,
-      root: null,
-      rootMargin: "",
-      takeRecords: () => [],
-      thresholds: [],
-      unobserve,
-    };
-    observerCallback(
-      [
-        intersectionEntry(unknownElement, false),
-        intersectionEntry(unknownElement, true),
-        ...elements.map((target) => intersectionEntry(target, true)),
-      ],
-      observer,
-    );
-    await vi.waitFor(() =>
-      expect(coldItems.every(({ materialization }) => materialization === "ready")).toBe(true),
-    );
-    expect(unobserve).toHaveBeenCalledWith(firstElement);
-    stopObserving();
-    expect(workspace.observeSession(firstElement, cold)).toEqual(expect.any(Function));
-
-    preparationFails = true;
-    await workspace.retryPreparation("cold-1");
-    expect(cold.materialization).toBe("failed");
-    preparationFails = false;
-    await workspace.retryPreparation("missing-item");
+    const workspace = scope.run(createLibraryWorkspace)!;
+    workspace.items.value = Array.from({ length: 21 }, (_, index) => item(`metadata-${index}`));
+    await flushPromises();
+    expect(requestFetch).not.toHaveBeenCalled();
+    expect(observer).not.toHaveBeenCalled();
     await workspace.cancelDeepSearch();
     await workspace.startDeepSearch();
     expect(workspace.deepSearchJob.value?.state).toBe("queued");
@@ -1005,8 +902,10 @@ describe("persistent library workspace state", () => {
     await workspace.startDeepSearch();
     expect(workspace.deepSearchJob.value).toBeNull();
     workspace.stop();
-    expect(disconnect).toHaveBeenCalledOnce();
     scope.stop();
+    expect(requestFetch.mock.calls.every(([path]) => !path.includes("/sessions/prepare"))).toBe(
+      true,
+    );
   });
 
   it("updates route filters, restores focus, and reports missing injection", async () => {

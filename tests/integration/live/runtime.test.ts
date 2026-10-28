@@ -21,7 +21,10 @@ async function createHome(root: string, fixture: "legacy.jsonl" | "modern.jsonl"
   ]);
   await writeFile(
     join(sessions, fixture),
-    await readFile(join(process.cwd(), "tests", "fixtures", "rollouts", fixture)),
+    (await readFile(join(process.cwd(), "tests", "fixtures", "rollouts", fixture), "utf8")).replace(
+      /"parent_thread_id":"[^"]*",/u,
+      "",
+    ),
   );
   return home;
 }
@@ -63,7 +66,8 @@ describe("live Codex-home switching", () => {
         runtime.repository.listSessions({ scope: "active", limit: 10 }),
       ).resolves.toMatchObject({ items: [], total: 0 });
       await runtime.startInitialReconciliation();
-      expect(runtime.status).toEqual({ state: "ready", message: null });
+      await runtime.whenRecoverySettled();
+      expect(runtime.status).toMatchObject({ state: "ready", message: null });
       await expect(
         runtime.repository.listSessions({ scope: "active", limit: 10 }),
       ).resolves.toMatchObject({ total: 1 });
@@ -98,6 +102,7 @@ describe("live Codex-home switching", () => {
     const readyRuntime = async () => {
       if (runtime.status.state === "preparing") {
         await runtime.startInitialReconciliation();
+        await runtime.whenRecoverySettled();
       }
       return runtime;
     };
@@ -150,7 +155,8 @@ describe("live Codex-home switching", () => {
       ).resolves.toMatchObject({ items: expect.any(Array), total: expect.any(Number) });
 
       await runtime.whenReady();
-      expect(runtime.status).toEqual({ state: "ready", message: null });
+      await runtime.whenRecoverySettled();
+      expect(runtime.status).toMatchObject({ state: "ready", message: null });
       expect(readJsonl).not.toHaveBeenCalled();
       await expect(
         runtime.repository.listSessions({ scope: "active", limit: 10 }),
@@ -182,6 +188,7 @@ describe("live Codex-home switching", () => {
     const firstRuntime = await LiveViewerRuntime.start(config, {
       reconciliationIntervalMs: 60_000,
     });
+    await firstRuntime.whenRecoverySettled();
     try {
       await firstRuntime.repository.getSession("11111111-1111-4111-8111-111111111111");
       expect(firstRuntime.database.prepare("SELECT COUNT(*) AS count FROM turns").get()).toEqual({
@@ -205,7 +212,7 @@ describe("live Codex-home switching", () => {
 
     try {
       await expect(runtime.startInitialReconciliation()).resolves.toBeUndefined();
-      expect(runtime.status).toEqual({ state: "ready", message: null });
+      expect(runtime.status).toMatchObject({ state: "ready", message: null });
       expect(readJsonl).not.toHaveBeenCalled();
       expect(
         runtime.database.prepare("SELECT payload_json FROM turns ORDER BY turn_index").all(),
@@ -241,6 +248,7 @@ describe("live Codex-home switching", () => {
     const firstRuntime = await LiveViewerRuntime.start(config, {
       reconciliationIntervalMs: 60_000,
     });
+    await firstRuntime.whenRecoverySettled();
     try {
       await expect(firstRuntime.repository.getSession(sessionId)).resolves.toMatchObject({
         id: sessionId,
@@ -268,6 +276,7 @@ describe("live Codex-home switching", () => {
     });
     try {
       await runtime.startInitialReconciliation();
+      await runtime.whenRecoverySettled();
       expect(
         runtime.database
           .prepare(
@@ -314,6 +323,7 @@ describe("live Codex-home switching", () => {
       diagnostics: [],
     };
     const runtime = await LiveViewerRuntime.start(config, { reconciliationIntervalMs: 60_000 });
+    await runtime.whenRecoverySettled();
 
     try {
       const firstIds = runtime.database.prepare("SELECT id FROM session_catalog").all();
@@ -323,6 +333,7 @@ describe("live Codex-home switching", () => {
         port: 3_000,
         fetchFavicons: false,
       });
+      await runtime.whenRecoverySettled();
       expect(runtime.settings.codexHome).toBe(secondHome);
       expect(runtime.database.prepare("SELECT id FROM session_catalog").all()).toEqual([
         { id: "33333333-3333-4333-8333-333333333333" },

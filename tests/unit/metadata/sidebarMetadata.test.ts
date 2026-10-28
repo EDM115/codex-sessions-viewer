@@ -4,6 +4,66 @@ import { resolveSidebarMetadata } from "../../../server/metadata/sidebarMetadata
 import { metadata, thread } from "../library/membershipFixtures.ts";
 
 describe("scoped sidebar metadata", () => {
+  it("qualifies item-list coverage per Section through the shared key and host resolver", () => {
+    const identityScopeKey = "a".repeat(64);
+    const prefix = `custom:${identityScopeKey}:`;
+    const source = metadata({
+      globalState: {
+        projects: [],
+        pinnedThreadIds: [],
+        sectionsByIdentity: {
+          [identityScopeKey]: {
+            threadHostIds: { known: "local" },
+            sections: [
+              { id: "empty", name: "Empty", itemKeys: [] },
+              { id: "absent", name: "Absent" },
+              { id: "supported", name: "Supported", itemKeys: ["codex:thread:local:known"] },
+              {
+                id: "unsupported",
+                name: "Unsupported",
+                itemKeys: ["codex:thread-v2:local:unknown"],
+              },
+              {
+                id: "mixed",
+                name: "Mixed",
+                itemKeys: ["codex:thread-v2:local:unknown", "codex:thread:local:known"],
+              },
+              {
+                id: "unknown-host",
+                name: "Unknown host",
+                itemKeys: ["codex:thread:local:unknown"],
+              },
+              {
+                id: "mismatched-host",
+                name: "Mismatched host",
+                itemKeys: ["codex:thread:remote:known"],
+              },
+            ],
+          },
+        },
+      },
+    });
+    const result = resolveSidebarMetadata(source, { identityScopeKey });
+    expect(result.sectionItemCoverage).toEqual({
+      [`${prefix}empty`]: "complete",
+      [`${prefix}supported`]: "complete",
+      [`${prefix}unsupported`]: "partial",
+      [`${prefix}mixed`]: "partial",
+      [`${prefix}unknown-host`]: "partial",
+      [`${prefix}mismatched-host`]: "partial",
+    });
+    expect(result.sections.find((section) => section.id === `${prefix}mixed`)?.threadIds).toEqual([
+      "known",
+    ]);
+    expect(result.diagnostics).toEqual(
+      expect.arrayContaining([
+        "unsupported-section-item-key",
+        "unknown-section-host",
+        "section-host-mismatch",
+      ]),
+    );
+  });
+
   it("retains native fallback for members not covered by a qualified custom translation", () => {
     const source = metadata({
       threads: [

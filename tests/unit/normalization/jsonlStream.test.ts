@@ -28,6 +28,29 @@ afterEach(async () => {
 });
 
 describe("JSONL byte streaming", () => {
+  it("rejects invalid UTF-8 inside a JSON string instead of inventing replacement text", () => {
+    const records: JsonlRecord[] = [];
+    let errors = 0;
+    const parser = new JsonlStreamParser({
+      onRecord: (record) => records.push(record),
+      onError: () => {
+        errors += 1;
+      },
+    });
+    parser.write(Buffer.from([123, 34, 120, 34, 58, 34, 255, 34, 125, 10]), 0);
+    expect(records).toEqual([]);
+    expect(errors).toBe(1);
+  });
+  it("bounds an unfinished record and propagates consumer failures", () => {
+    const limited = new JsonlStreamParser({ maxRecordBytes: 8 });
+    expect(() => limited.write(Buffer.from('{"large":"abc'), 0)).toThrow("record_budget");
+    const consumer = new JsonlStreamParser({
+      onRecord() {
+        throw new Error("consumer failed");
+      },
+    });
+    expect(() => consumer.write(Buffer.from('{"x":1}\n'), 0)).toThrow("consumer failed");
+  });
   it("decodes LF and CRLF records when UTF-8 code points are split across chunks", () => {
     const records: JsonlRecord[] = [];
     const parser = new JsonlStreamParser({ onRecord: (record) => records.push(record) });

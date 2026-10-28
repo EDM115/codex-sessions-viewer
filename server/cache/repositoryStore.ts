@@ -12,7 +12,7 @@ import {
   type TurnNavigatorItem,
 } from "../../shared/types/conversation.ts";
 import { viewerDiagnosticSchema, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { ConversationListItem } from "../../shared/types/library.ts";
+import type { LibraryEntry } from "../../shared/types/library.ts";
 import {
   inspectorRecordSchema,
   inspectorTargetSchema,
@@ -78,7 +78,7 @@ function cursorIndex(cursor: string | undefined): number {
 export function listCachedSessions(
   database: DatabaseSync,
   input: SessionListQuery,
-): CursorPage<ConversationListItem> {
+): CursorPage<LibraryEntry> {
   const query = sessionListQuerySchema.parse(input);
   cursorIndex(query.cursor);
   return listCatalogSessions(database, query);

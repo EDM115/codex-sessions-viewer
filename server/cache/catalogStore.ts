@@ -11,14 +11,20 @@ import {
   type ConversationSummary,
 } from "../../shared/types/conversation.ts";
 import {
-  conversationListItemSchema,
+  libraryEntrySchema,
+  catalogSessionMetadataSchema,
+  catalogProjectGroupFromLegacy,
+  sidebarGroupKey,
   catalogLibrarySchema,
   conversationProjectSchema,
   materializationStateSchema,
-  type ConversationListItem,
+  type LibraryEntry,
+  type CatalogSessionMetadata,
+  type CatalogProjectGroup,
   type CatalogLibrary,
   type ConversationProject,
   type MaterializationState,
+  type ThreadClassification,
 } from "../../shared/types/library.ts";
 import type { CursorPage, SessionListQuery } from "../../shared/types/repository.ts";
 import {
@@ -34,6 +40,7 @@ import {
   classificationKind,
   normalizedSessionMeta,
 } from "../metadata/threadClassification.ts";
+import { catalogMetadataRevision } from "../metadata/threadFields.ts";
 import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 import { withCacheTransaction } from "./database.ts";
 import { SEED_CATALOG_FROM_SESSIONS_SQL } from "./schema.ts";
@@ -41,7 +48,7 @@ import { SEED_CATALOG_FROM_SESSIONS_SQL } from "./schema.ts";
 export type CatalogSessionKind = "root" | "subagent" | "auxiliary";
 
 export interface CatalogSessionInput {
-  summary: ConversationSummary;
+  summary: CatalogSessionMetadata;
   kind: CatalogSessionKind;
   materialization: MaterializationState;
   project: ResolvedConversationProject;
@@ -60,7 +67,7 @@ export interface CatalogSessionInput {
 }
 
 export interface CatalogSessionRecord extends Omit<CatalogSessionInput, "summary" | "project"> {
-  summary: ConversationSummary;
+  summary: CatalogSessionMetadata;
   project: ResolvedConversationProject;
 }
 
@@ -142,7 +149,7 @@ function catalogRecord(row: Record<string, SQLOutputValue>): CatalogSessionRecor
             classification: cachedThreadClassification(rawEvidence, kind),
           };
   return {
-    summary: conversationSummarySchema.parse(parsedJson(row["summary_json"])),
+    summary: catalogSessionMetadataSchema.parse(parsedJson(row["summary_json"])),
     kind,
     materialization: materializationStateSchema.parse(row["materialization_state"]),
     project: {
@@ -219,7 +226,7 @@ function writeCatalogSession(
   statement: ReturnType<DatabaseSync["prepare"]>,
   input: CatalogSessionInput,
 ): void {
-  const summary = conversationSummarySchema.parse(input.summary);
+  const summary = catalogSessionMetadataSchema.parse(input.summary);
   const materialization = materializationStateSchema.parse(input.materialization);
   statement.run(
     summary.id,
@@ -280,17 +287,7 @@ export function upsertCatalogSessions(
               ...input,
               materialization: existing.materialization,
               error: existing.materialization === "failed" ? existing.error : input.error,
-              summary: {
-                ...(existing.materialization === "ready" ? existing.summary : input.summary),
-                title: input.summary.title,
-                scope: input.summary.scope,
-                sourcePath: input.summary.sourcePath,
-                updatedAt: input.summary.updatedAt,
-                pinned: input.summary.pinned,
-                sectionName: input.summary.sectionName,
-                parentThreadId: input.summary.parentThreadId,
-                childThreadIds: input.summary.childThreadIds,
-              },
+              summary: input.summary,
             }
           : input;
       if (existing !== undefined && isDeepStrictEqual(existing, effectiveInput)) {
@@ -321,7 +318,7 @@ export function writeCatalogLibrary(database: DatabaseSync, library: CatalogLibr
   );
 }
 
-function readCatalogLibrary(database: DatabaseSync): CatalogLibrary | null {
+export function readCatalogLibrary(database: DatabaseSync): CatalogLibrary | null {
   if (
     !database
       .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'catalog_sidebar'")
@@ -392,7 +389,7 @@ function listConditions(query: SessionListQuery): { sql: string; values: Array<s
   const values: Array<string | number> = [query.scope];
   if (query.projectId !== undefined) {
     conditions.push("c.project_id = ?");
-    values.push(query.projectId);
+    values.push(query.projectId ?? "none");
   }
   if (query.parentThreadId === ROOT_PARENT_SENTINEL || query.parentThreadId === undefined) {
     conditions.push(catalogVisibilitySql("root", "c"), "c.parent_thread_id IS NULL");
@@ -402,14 +399,14 @@ function listConditions(query: SessionListQuery): { sql: string; values: Array<s
   }
   if (query.query?.trim()) {
     conditions.push(
-      "(lower(c.title) LIKE ? ESCAPE '\\' OR lower(json_extract(c.summary_json, '$.preview')) LIKE ? ESCAPE '\\')",
+      "(lower(c.title) LIKE ? ESCAPE '\\' OR lower((SELECT s.preview FROM sessions s WHERE s.id = c.id)) LIKE ? ESCAPE '\\')",
     );
     const pattern = likeValue(query.query.trim().toLocaleLowerCase("en-US"));
     values.push(pattern, pattern);
   }
   if (query.model !== undefined) {
     conditions.push(
-      "EXISTS (SELECT 1 FROM json_each(json_extract(c.summary_json, '$.models')) WHERE value = ?)",
+      "EXISTS (SELECT 1 FROM json_each((SELECT s.models_json FROM sessions s WHERE s.id = c.id)) WHERE value = ?)",
     );
     values.push(query.model);
   }
@@ -419,12 +416,12 @@ function listConditions(query: SessionListQuery): { sql: string; values: Array<s
   }
   if (query.tool !== undefined) {
     conditions.push(
-      "EXISTS (SELECT 1 FROM json_each(json_extract(c.summary_json, '$.toolCounts')) WHERE key = ? AND value > 0)",
+      "EXISTS (SELECT 1 FROM json_each((SELECT s.tool_counts_json FROM sessions s WHERE s.id = c.id)) WHERE key = ? AND value > 0)",
     );
     values.push(query.tool);
   }
   if (query.hasMedia !== undefined) {
-    conditions.push("json_extract(c.summary_json, '$.hasMedia') = ?");
+    conditions.push("(SELECT s.has_media FROM sessions s WHERE s.id = c.id) = ?");
     values.push(query.hasMedia ? 1 : 0);
   }
   return { sql: conditions.join(" AND "), values };
@@ -433,25 +430,60 @@ function listConditions(query: SessionListQuery): { sql: string; values: Array<s
 export function listCatalogSessions(
   database: DatabaseSync,
   query: SessionListQuery,
-): CursorPage<ConversationListItem> {
+): CursorPage<LibraryEntry> {
   const offset = queryOffset(query.cursor);
   const limit = Math.min(Math.max(query.limit ?? 20, 1), 200);
-  const library =
-    query.projectId === undefined ||
-    (query.parentThreadId !== undefined && query.parentThreadId !== ROOT_PARENT_SENTINEL)
-      ? null
-      : readCatalogLibrary(database);
-  const group = library
-    ? buildSidebarGroups(library, { ...library.preferences, scope: query.scope }).find(
-        (candidate) => candidate.id === query.projectId,
-      )
-    : null;
-  const { projectId: _projectId, ...groupQuery } = query;
-  const conditions = listConditions(library ? groupQuery : query);
-  if (library) {
+  const library = readCatalogLibrary(database);
+  const expandingChild =
+    query.parentThreadId !== undefined && query.parentThreadId !== ROOT_PARENT_SENTINEL;
+  const group =
+    library && query.groupId !== undefined && !expandingChild
+      ? buildSidebarGroups(library, { ...library.preferences, scope: query.scope }).find(
+          (candidate) => sidebarGroupKey(candidate) === query.groupId,
+        )
+      : null;
+  const { projectId: _projectId, ...withoutMembership } = query;
+  const conditions = listConditions(library ? withoutMembership : query);
+  if (library && query.projectId !== undefined && !expandingChild) {
+    conditions.sql += " AND c.id IN (SELECT value FROM json_each(?))";
+    conditions.values.push(
+      json(
+        library.threads
+          .filter((thread) => thread.projectId === query.projectId)
+          .map((thread) => thread.id),
+      ),
+    );
+  }
+  if (!library && query.groupId !== undefined && query.projectId === undefined) {
+    conditions.sql += " AND c.project_id = ?";
+    conditions.values.push(decodeURIComponent(query.groupId.slice(query.groupId.indexOf(":") + 1)));
+  }
+  if (query.groupId !== undefined && library && !expandingChild) {
     conditions.sql += " AND c.id IN (SELECT value FROM json_each(?))";
     conditions.values.push(json(group?.threadIds ?? []));
   }
+  const membershipGroup =
+    library && query.projectId !== undefined && !expandingChild
+      ? buildSidebarGroups(library, { ...library.preferences, scope: query.scope }).find(
+          (candidate) =>
+            query.projectId === null
+              ? candidate.kind === "recents"
+              : candidate.kind === "project" && candidate.projectId === query.projectId,
+        )
+      : undefined;
+  const recencyIds = library?.threads
+    .toSorted(
+      (a, b) => (b.recencyAt ?? -Infinity) - (a.recencyAt ?? -Infinity) || a.id.localeCompare(b.id),
+    )
+    .map((thread) => thread.id);
+  const orderedIds =
+    group?.threadIds ??
+    (membershipGroup
+      ? [
+          ...membershipGroup.threadIds,
+          ...(recencyIds ?? []).filter((id) => !membershipGroup.threadIds.includes(id)),
+        ]
+      : recencyIds);
   const totalRow = database
     .prepare(`SELECT count(*) AS count FROM session_catalog c WHERE ${conditions.sql}`)
     .get(...conditions.values);
@@ -461,24 +493,31 @@ export function listCatalogSessions(
       SELECT c.*
       FROM session_catalog c
       WHERE ${conditions.sql}
-      ORDER BY ${library ? "(SELECT key FROM json_each(?) WHERE value = c.id)," : ""} c.updated_at DESC, c.id
+      ORDER BY ${orderedIds ? "(SELECT key FROM json_each(?) WHERE value = c.id)," : ""} c.updated_at DESC, c.id
       LIMIT ? OFFSET ?
     `)
-    .all(...conditions.values, ...(library ? [json(group?.threadIds ?? [])] : []), limit, offset);
+    .all(...conditions.values, ...(orderedIds ? [json(orderedIds)] : []), limit, offset);
   const items = rows.map((row) => {
     const record = catalogRecord(row);
     if (record.kind === "auxiliary") {
       throw new Error("An auxiliary session crossed the public catalog boundary.");
     }
-    return conversationListItemSchema.parse({
-      summary: record.summary,
+    const metadata = library?.threads.find((thread) => thread.id === record.summary.id);
+    return libraryEntrySchema.parse({
+      id: record.summary.id,
+      title: record.summary.title,
+      scope: record.summary.scope,
+      orderKey:
+        metadata?.recencyAt == null
+          ? (record.summary.updatedAt ?? "")
+          : new Date(metadata.recencyAt).toISOString(),
       kind: record.kind,
-      materialization: record.materialization,
-      projectId: record.project.id,
+      projectId: metadata
+        ? metadata.projectId
+        : record.project.id === "none"
+          ? null
+          : record.project.id,
       parentThreadId: record.parentThreadId,
-      agentPath: record.agentPath,
-      agentNickname: record.agentNickname,
-      agentDepth: record.agentDepth,
       childCount: record.childCount,
     });
   });
@@ -562,6 +601,53 @@ export function listCatalogProjects(database: DatabaseSync): ConversationProject
     );
 }
 
+export function listCatalogProjectGroups(database: DatabaseSync): CatalogProjectGroup[] {
+  const library = readCatalogLibrary(database);
+  if (!library) {
+    return listCatalogProjects(database).map(catalogProjectGroupFromLegacy);
+  }
+  const active = buildSidebarGroups(library, { ...library.preferences, scope: "active" });
+  const archived = buildSidebarGroups(library, { ...library.preferences, scope: "archived" });
+  const groups = [
+    ...active,
+    ...archived.filter(
+      (group) => !active.some((other) => sidebarGroupKey(other) === sidebarGroupKey(group)),
+    ),
+  ];
+  return groups.map((group) => {
+    const groupId = sidebarGroupKey(group);
+    const project =
+      group.kind === "project"
+        ? library.projects.find((candidate) => candidate.id === group.projectId)
+        : undefined;
+    return {
+      id: group.id,
+      name: group.name,
+      rootPaths: project?.rootPaths ?? [],
+      hostId: project?.hostId ?? null,
+      source: project?.source ?? "legacy",
+      position: project?.position ?? null,
+      recencyAt: project?.recencyAt ?? null,
+      groupId,
+      activeCount:
+        active.find((candidate) => sidebarGroupKey(candidate) === groupId)?.threadIds.length ?? 0,
+      archivedCount:
+        archived.find((candidate) => sidebarGroupKey(candidate) === groupId)?.threadIds.length ?? 0,
+      sidebar: {
+        order: {
+          active: active.findIndex((candidate) => sidebarGroupKey(candidate) === groupId),
+          archived: archived.findIndex((candidate) => sidebarGroupKey(candidate) === groupId),
+        },
+        kind: group.kind,
+        sectionId: group.sectionId,
+        sectionName: group.sectionId
+          ? (library.sections.find((section) => section.id === group.sectionId)?.name ?? null)
+          : null,
+      },
+    };
+  });
+}
+
 export function listCatalogAuxiliaryChildren(
   database: DatabaseSync,
   parentThreadId: string,
@@ -627,9 +713,99 @@ export function storeMaterializedClassification(
       classificationKind(classification),
       parentThreadId,
       json(evidence),
-      json(summary),
+      json(catalogSessionMetadataSchema.parse(summary)),
       summary.id,
     );
+}
+
+export function storeValidatedCatalogClassification(
+  database: DatabaseSync,
+  id: string,
+  evidence: SessionMetaEvidence & { classification: ThreadClassification; validatedSha256: string },
+  expected: CatalogReadyFence,
+): string[] {
+  return withCacheTransaction(database, () => {
+    const existing = catalogSession(database, id);
+    const source = database
+      .prepare("SELECT sha256 FROM source_files WHERE path = ? AND session_id = ?")
+      .get(expected.sourcePath, id);
+    if (
+      !existing ||
+      existing.sourceRevision !== expected.sourceRevision ||
+      existing.summary.sourcePath !== expected.sourcePath ||
+      source?.["sha256"] !== evidence.validatedSha256
+    ) {
+      return [];
+    }
+    const classification = {
+      ...evidence.classification,
+      reasons: [...evidence.classification.reasons],
+    };
+    let parentThreadId =
+      classification.relationship === "spawn" || classification.visibility === "internal"
+        ? classification.parentThreadId
+        : null;
+    const seen = new Set([id]);
+    let ancestor = parentThreadId;
+    while (ancestor !== null) {
+      if (seen.has(ancestor)) {
+        classification.visibility = "unresolved";
+        classification.reasons.push("parent-cycle");
+        parentThreadId = null;
+        break;
+      }
+      seen.add(ancestor);
+      ancestor = catalogSession(database, ancestor)?.parentThreadId ?? null;
+    }
+    const validated = sessionMetaEvidenceSchema.parse({ ...evidence, classification });
+    const kind = classificationKind(classification);
+    const changed = new Set<string>();
+    if (existing.kind !== kind || existing.parentThreadId !== parentThreadId) {
+      changed.add(id);
+    }
+    if (
+      !isDeepStrictEqual(existing.structuralEvidence, validated) ||
+      existing.parentThreadId !== parentThreadId
+    ) {
+      const summary = { ...existing.summary, parentThreadId };
+      summary.metadataRevision = catalogMetadataRevision(summary);
+      database
+        .prepare(
+          "UPDATE session_catalog SET session_kind = ?, parent_thread_id = ?, agent_path = ?, agent_nickname = ?, agent_depth = ?, structural_evidence_json = ?, summary_json = ? WHERE id = ?",
+        )
+        .run(
+          kind,
+          parentThreadId,
+          classification.agentPath,
+          classification.agentNickname,
+          classification.agentDepth,
+          json(validated),
+          json(summary),
+          id,
+        );
+    }
+    for (const parent of new Set([existing.parentThreadId, parentThreadId])) {
+      if (parent === null) {
+        continue;
+      }
+      const record = catalogSession(database, parent);
+      if (!record) {
+        continue;
+      }
+      const children = listCatalogChildren(database, parent)
+        .map((child) => child.summary.id)
+        .toSorted();
+      if (!isDeepStrictEqual(record.summary.childThreadIds, children)) {
+        const summary = { ...record.summary, childThreadIds: children };
+        summary.metadataRevision = catalogMetadataRevision(summary);
+        database
+          .prepare("UPDATE session_catalog SET child_count = ?, summary_json = ? WHERE id = ?")
+          .run(children.length, json(summary), parent);
+        changed.add(parent);
+      }
+    }
+    return [...changed];
+  });
 }
 
 export function setCatalogMaterialization(
@@ -749,12 +925,32 @@ export function markCatalogSessionReady(
     }
     summary = {
       ...summary,
+      title: existing.summary.title,
+      createdAt: existing.summary.createdAt ?? summary.createdAt,
+      updatedAt:
+        existing.summary.fieldSources?.updatedAt?.startsWith("native.") ||
+        existing.summary.fieldSources?.updatedAt === "session-index.updatedAt"
+          ? (existing.summary.updatedAt ?? summary.updatedAt)
+          : summary.updatedAt,
       scope: existing.summary.scope,
       pinned: existing.summary.pinned,
       sectionName: existing.summary.sectionName,
       parentThreadId: existing.parentThreadId,
       childThreadIds: existing.summary.childThreadIds,
     };
+    const catalogMetadata = catalogSessionMetadataSchema.parse({ ...existing.summary, ...summary });
+    const authoritative = (source: string | null | undefined) =>
+      source?.startsWith("native.") || source?.startsWith("session-index.");
+    if (!authoritative(existing.summary.fieldSources?.updatedAt) && catalogMetadata.fieldSources) {
+      catalogMetadata.fieldSources.updatedAt = "rollout.events";
+    }
+    if (!authoritative(existing.summary.fieldSources?.recencyAt)) {
+      catalogMetadata.recencyAt = summary.updatedAt;
+      if (catalogMetadata.fieldSources) {
+        catalogMetadata.fieldSources.recencyAt = "rollout.events";
+      }
+    }
+    catalogMetadata.metadataRevision = catalogMetadataRevision(catalogMetadata);
     const values = [
       summary.title,
       summary.createdAt,
@@ -763,7 +959,7 @@ export function markCatalogSessionReady(
       summary.gitOriginUrl,
       summary.parentThreadId,
       summary.childThreadIds.length,
-      json(summary),
+      json(catalogMetadata),
       summary.id,
     ];
     const result =

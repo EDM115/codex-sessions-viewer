@@ -16,7 +16,13 @@ function itemKey(value: string): SidebarItemKey | null {
 export function resolveSidebarMetadata(
   metadata: Pick<CatalogMetadataSnapshot, "threads" | "projects" | "sections" | "globalState">,
   options: { identityScopeKey?: string | undefined } = {},
-): { sections: SidebarSection[]; preferences: SidebarPreferences; diagnostics: string[] } {
+): {
+  sections: SidebarSection[];
+  preferences: SidebarPreferences;
+  diagnostics: string[];
+  qualifiedSectionIdentity: string | null;
+  sectionItemCoverage: Record<string, "complete" | "partial">;
+} {
   const global = metadata.globalState;
   const diagnostics: string[] = [];
   const availableIdentities = Object.entries(global.sectionsByIdentity ?? {});
@@ -163,6 +169,7 @@ export function resolveSidebarMetadata(
     pinnedProjectOrder,
   };
   const sections: SidebarSection[] = [];
+  const sectionItemCoverage: Record<string, "complete" | "partial"> = {};
   const mappedNativeThreads = new Set<string>();
   if (qualified.length === 1) {
     const [identity, state] = qualified[0]!;
@@ -170,9 +177,12 @@ export function resolveSidebarMetadata(
       const id = `custom:${identity}:${section.id}`;
       const threadIds = new Set<string>();
       const projects = new Set<string>();
-      for (const value of section.itemKeys ?? section.items ?? []) {
+      const itemList = section.itemKeys ?? section.items;
+      let completeItems = itemList !== undefined;
+      for (const value of itemList ?? []) {
         const key = itemKey(value);
         if (!key) {
+          completeItems = false;
           diagnostics.push("unsupported-section-item-key");
           continue;
         }
@@ -187,6 +197,7 @@ export function resolveSidebarMetadata(
           ) {
             projects.add(mapped);
           } else {
+            completeItems = false;
             diagnostics.push("unknown-section-project-host");
           }
         } else {
@@ -195,9 +206,13 @@ export function resolveSidebarMetadata(
           if (host === key.hostId) {
             threadIds.add(key.id);
           } else {
+            completeItems = false;
             diagnostics.push(host ? "section-host-mismatch" : "unknown-section-host");
           }
         }
+      }
+      if (itemList !== undefined) {
+        sectionItemCoverage[id] = completeItems ? "complete" : "partial";
       }
       for (const thread of metadata.threads) {
         if (!thread.sectionId) {
@@ -240,6 +255,8 @@ export function resolveSidebarMetadata(
     });
   }
   return {
+    qualifiedSectionIdentity: qualified[0]?.[0] ?? null,
+    sectionItemCoverage,
     sections: sections.filter((section) => section.threadIds.length || section.projectIds.length),
     preferences,
     diagnostics: [...new Set(diagnostics)],

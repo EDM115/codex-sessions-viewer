@@ -86,7 +86,12 @@ export const sessionMetaEvidenceSchema = z
   .strictObject({
     version: z.union([z.literal(1), z.literal(2)]),
     classification: threadClassificationSchema.optional(),
-    origin: z.enum(["rollout-prefix", "materialized"]),
+    origin: z.enum(["rollout-prefix", "materialized", "native-metadata", "session-index"]),
+    freshness: z.enum(["verified", "retained-unvalidated"]).optional(),
+    validatedSha256: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/u)
+      .optional(),
     status: z.enum(["found", "missing", "changed", "exhausted", "incomplete", "invalid"]),
     parentThreadIdHint: z.string().nullable(),
     meta: z

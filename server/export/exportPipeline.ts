@@ -7,6 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { CustomRecord } from "pagefind";
 
 import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import { catalogSession } from "../cache/catalogStore.ts";
 import { getCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
 import { openCacheDatabase } from "../cache/database.ts";
 import { SessionCacheUpdater } from "../cache/sourceManifest.ts";
@@ -18,6 +19,7 @@ import { readGlobalState } from "../metadata/globalState.ts";
 import { readSessionIndex, type SessionIndexEntry } from "../metadata/sessionIndex.ts";
 import { snapshotStateDatabase, type StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
 import { classifyNormalizedSession, isThreadVisible } from "../metadata/threadClassification.ts";
+import { resolveThreadFields } from "../metadata/threadFields.ts";
 import {
   attachGuardianEvidence,
   parseGuardianConversations,
@@ -240,6 +242,7 @@ async function prepareConversations(
   database: DatabaseSync,
   sessionIds: ReadonlySet<string>,
   stateSnapshot: StateMetadataSnapshot | null,
+  sessionIndexEntries: readonly SessionIndexEntry[],
   paths: ViewerPaths,
   offline: boolean,
   trustedMediaRoots: readonly string[],
@@ -257,6 +260,7 @@ async function prepareConversations(
   const assetIds = new Set<string>();
   const faviconOrigins = new Set<string>();
   const native = new Map((stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread]));
+  const indexNames = new Map(sessionIndexEntries.map((entry) => [entry.id, entry]));
   const classifications = new Map(
     [...sessionIds].flatMap((id) => {
       const session = getCachedSession(database, id);
@@ -324,8 +328,20 @@ async function prepareConversations(
     }
     let conversation = cached;
     conversation.classification = classifications.get(sessionId)!;
+    const fields = resolveThreadFields({
+      id: sessionId,
+      thread: native.get(sessionId),
+      index: indexNames.get(sessionId),
+      knownTitle: catalogSession(database, sessionId)?.summary.title ?? cached.summary.title,
+      createdAt: cached.summary.createdAt,
+      updatedAt: cached.summary.updatedAt,
+      historyMode: conversation.classification.historyMode,
+    });
     conversation.summary = {
       ...conversation.summary,
+      title: fields.title,
+      createdAt: fields.createdAt ?? conversation.summary.createdAt,
+      updatedAt: fields.updatedAt ?? conversation.summary.updatedAt,
       parentThreadId: isThreadVisible(conversation.classification, "child")
         ? conversation.classification.parentThreadId
         : null,
@@ -518,6 +534,7 @@ export async function runStaticExport(
       database,
       sessionIds,
       metadata.stateSnapshot,
+      metadata.sessionIndexEntries,
       config.paths,
       options.offline === true || !config.settings.fetchFavicons,
       resolvedTrustedMediaRoots(config.settings),

@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
+import type { SourceGeneration } from "../../shared/types/conversation.ts";
 import type { DeepSearchJob } from "../../shared/types/library.ts";
 import {
   repositoryCapabilitiesForMode,
@@ -9,9 +10,16 @@ import {
   type SessionListQuery,
   type TurnChunkQuery,
   type TurnChunk,
+  type HistoryPageQuery,
+  type HistoryItemQuery,
+  type RepositoryRequestOptions,
 } from "../../shared/types/repository.ts";
 import { getCachedAsset } from "../cache/assetStore.ts";
-import { catalogSession, listCatalogProjects, listCatalogSessions } from "../cache/catalogStore.ts";
+import {
+  catalogSession,
+  listCatalogProjectGroups,
+  listCatalogSessions,
+} from "../cache/catalogStore.ts";
 import {
   getCachedInspector,
   getCachedSessionSummary,
@@ -19,11 +27,20 @@ import {
   getCachedTurnNavigator,
 } from "../cache/repositoryStore.ts";
 import { searchCachedSessions } from "../cache/searchStore.ts";
+import { unavailableNativeHistory } from "../history/nativeHistoryService.ts";
+import type { NativeProjectionQualification } from "../history/nativeProjectionQualification.ts";
+import type { ResolvedRolloutLineage } from "../ingestion/rolloutLineage.ts";
 import { cachedThreadClassification } from "../metadata/threadClassification.ts";
 import type { ApprovalEvidenceResult } from "../normalization/guardianEvidence.ts";
 import { InvalidationBus } from "./invalidationBus.ts";
 
 export interface LiveRepositoryMaterializer {
+  readNativeHistory?(
+    lineage: ResolvedRolloutLineage,
+    source: SourceGeneration,
+    query: HistoryPageQuery | HistoryItemQuery,
+    options?: RepositoryRequestOptions,
+  ): Promise<NativeProjectionQualification>;
   getApprovalEvidence?(sessionId: string): Promise<ApprovalEvidenceResult>;
   prepareSessions(ids: readonly string[]): ReturnType<ConversationRepository["prepareSessions"]>;
   ensureMaterialized(id: string): Promise<void>;
@@ -72,12 +89,25 @@ export class LiveConversationRepository implements ConversationRepository {
     return repositoryCapabilitiesForMode("live");
   }
 
+  readNativeHistory(
+    lineage: ResolvedRolloutLineage,
+    source: SourceGeneration,
+    query: HistoryPageQuery | HistoryItemQuery,
+    options: RepositoryRequestOptions = {},
+  ): Promise<NativeProjectionQualification> {
+    options.signal?.throwIfAborted();
+    return (
+      this.#materializer.readNativeHistory?.(lineage, source, query, options) ??
+      Promise.resolve(unavailableNativeHistory(source, "native.reader_unavailable"))
+    );
+  }
+
   async listSessions(query: SessionListQuery) {
     return listCatalogSessions(this.#database, query);
   }
 
   async listProjects() {
-    return listCatalogProjects(this.#database);
+    return listCatalogProjectGroups(this.#database);
   }
 
   async prepareSessions(ids: string[]) {
@@ -117,6 +147,9 @@ export class LiveConversationRepository implements ConversationRepository {
       ? summary
       : {
           ...summary,
+          title: catalog.summary.title,
+          createdAt: catalog.summary.createdAt ?? summary.createdAt,
+          updatedAt: catalog.summary.updatedAt ?? summary.updatedAt,
           parentThreadId: catalog.parentThreadId,
           childThreadIds: catalog.summary.childThreadIds,
         };

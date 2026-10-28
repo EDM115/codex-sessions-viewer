@@ -10,6 +10,9 @@ import {
   type RolloutRef,
 } from "../../shared/types/conversation.ts";
 import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import type { HistoryPage } from "../../shared/types/history.ts";
+import type { HistoryPageQuery } from "../../shared/types/repository.ts";
+import { RolloutHistoryReader } from "../history/rolloutHistoryReader.ts";
 import type { DiscoveredRolloutSource } from "../ingestion/discoverSources.ts";
 import {
   readStableJsonl,
@@ -24,6 +27,7 @@ import {
   filesystemRolloutResolver,
   readPlainRolloutLineage,
   type RolloutSourceResolver,
+  type ResolvedRolloutLineage,
 } from "../ingestion/rolloutLineage.ts";
 import { parseSessionMetaBytes } from "../ingestion/sessionMetaPrefix.ts";
 import { SourceGenerationFence, validateSourceGeneration } from "../ingestion/sourceGeneration.ts";
@@ -38,6 +42,7 @@ import {
   type NormalizeSessionResult,
   type NormalizedSession,
 } from "../normalization/normalizeSession.ts";
+import { catalogSession } from "./catalogStore.ts";
 import { hasCachedSession, replaceCachedSession } from "./conversationStore.ts";
 
 export const CACHE_PARSER_VERSION = NORMALIZATION_PARSER_VERSION;
@@ -58,6 +63,7 @@ export type StableJsonlReader = (
 ) => Promise<StableJsonlResult>;
 
 export interface SessionCacheUpdaterOptions {
+  historyReader?: RolloutHistoryReader;
   rolloutSources?: RolloutSourceResolver;
   parserVersion?: number | undefined;
   retainLiveSources?: boolean | undefined;
@@ -399,6 +405,7 @@ function clearSourceFailureDiagnostics(database: DatabaseSync, path: string): vo
 
 const generationFences = new WeakMap<DatabaseSync, SourceGenerationFence>();
 export class SessionCacheUpdater {
+  readonly #historyReader: RolloutHistoryReader;
   readonly #rolloutSources: RolloutSourceResolver | undefined;
   readonly #fence: SourceGenerationFence;
   readonly #database: DatabaseSync;
@@ -414,6 +421,7 @@ export class SessionCacheUpdater {
   readonly #turnBytes = new WeakMap<NormalizedSession["turns"][number], number>();
 
   constructor(database: DatabaseSync, options: SessionCacheUpdaterOptions = {}) {
+    this.#historyReader = options.historyReader ?? new RolloutHistoryReader();
     this.#database = database;
     this.#fence = generationFences.get(database) ?? new SourceGenerationFence();
     generationFences.set(database, this.#fence);
@@ -436,6 +444,15 @@ export class SessionCacheUpdater {
     if (!Number.isSafeInteger(this.#parserVersion) || this.#parserVersion <= 0) {
       throw new RangeError("The cache parser version must be a positive safe integer.");
     }
+  }
+
+  /** Selected paging never enters the full-normalization manifest updater */
+  readHistoryPage(
+    lineage: ResolvedRolloutLineage,
+    query: HistoryPageQuery,
+    signal?: AbortSignal,
+  ): Promise<HistoryPage> {
+    return this.#historyReader.read(lineage, query, signal);
   }
 
   async #readFull(source: DiscoveredRolloutSource): Promise<ReadCandidate | null> {
@@ -579,8 +596,19 @@ export class SessionCacheUpdater {
     mode: "full" | "append" | "memory",
     context: SessionCacheUpdateContext,
   ): SessionCacheUpdateResult {
+    const retainedId =
+      context.expectedCatalogSessionId ??
+      getSourceManifestEntry(this.#database, source.path)?.sessionId;
+    const retained = retainedId ? catalogSession(this.#database, retainedId) : null;
     const normalized = candidate.normalize({
       records: candidate.records,
+      knownTitle: retained
+        ? {
+            id: retained.summary.id,
+            title: retained.summary.title,
+            historyMode: retained.structuralEvidence?.classification?.historyMode,
+          }
+        : undefined,
       ...(candidate.rolloutRef === undefined ? {} : { rolloutRef: candidate.rolloutRef }),
       sourcePath: source.path,
       scope: source.scope,

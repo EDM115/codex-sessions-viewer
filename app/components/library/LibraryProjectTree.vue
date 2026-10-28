@@ -16,7 +16,7 @@ const workspace = useLibraryWorkspace();
       <h3 v-if="group.name">{{ group.name }}</h3>
       <LibraryProjectFolder
         v-for="project in group.projects"
-        :key="project.id"
+        :key="project.groupId"
         :project="project"
         :label="project.sidebar?.kind === 'section' ? 'Chats' : undefined"
       />

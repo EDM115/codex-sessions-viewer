@@ -6,6 +6,7 @@ import LibrarySearchResults from "../../../app/components/library/LibrarySearchR
 import LibrarySessionList from "../../../app/components/library/LibrarySessionList.vue";
 import LibrarySidebar from "../../../app/components/library/LibrarySidebar.vue";
 import LibrarySkeleton from "../../../app/components/library/LibrarySkeleton.vue";
+import { libraryEntryFromSummary } from "../../../shared/types/library.ts";
 
 const baseProps = {
   scope: "active" as const,
@@ -81,7 +82,7 @@ describe("LibrarySidebar", () => {
       hits: [],
       searchExactTurns: false,
       items: [
-        {
+        libraryEntryFromSummary({
           summary: {
             id: "session-1",
             title: "Session",
@@ -116,7 +117,7 @@ describe("LibrarySidebar", () => {
           agentNickname: null,
           agentDepth: null,
           childCount: 0,
-        },
+        }),
       ],
       nextCursor: "1",
     });

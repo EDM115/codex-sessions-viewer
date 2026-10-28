@@ -9,6 +9,10 @@ import type {
   PagefindSearchResponse,
 } from "../../../app/repositories/static.ts";
 import type { ConversationSummary } from "../../../shared/types/conversation.ts";
+import {
+  libraryEntryFromSummary,
+  catalogProjectGroupFromLegacy,
+} from "../../../shared/types/library.ts";
 import type {
   InspectorRecord,
   ResolvedAsset,
@@ -86,6 +90,153 @@ function turnChunk(): TurnChunk {
 }
 
 describe("conversation repository adapters", () => {
+  it("preserves a literal static project ID none and validates the full group kind", async () => {
+    const request: RepositoryRequester = async (path) =>
+      path.endsWith("projects.json")
+        ? {
+            version: 1,
+            projects: [
+              {
+                id: "none",
+                name: "Actual project",
+                source: "codex",
+                hint: null,
+                activeCount: 1,
+                archivedCount: 0,
+              },
+            ],
+            entries: {
+              "session-1": {
+                kind: "root",
+                projectId: "none",
+                parentThreadId: null,
+                agentPath: null,
+                agentNickname: null,
+                agentDepth: null,
+                childCount: 0,
+              },
+            },
+          }
+        : { version: 1, sessions: [summary()] };
+    const repository = new StaticConversationRepository(request);
+    expect((await repository.listSessions({ scope: "active" })).items[0]?.projectId).toBe("none");
+    expect((await repository.listSessions({ scope: "active", projectId: "none" })).total).toBe(1);
+    expect((await repository.listSessions({ scope: "active", projectId: null })).total).toBe(0);
+    expect(
+      (await repository.listSessions({ scope: "active", groupId: "project:none" })).total,
+    ).toBe(1);
+    expect(
+      (await repository.listSessions({ scope: "active", groupId: "recents:none" })).total,
+    ).toBe(0);
+    expect((await repository.listProjects())[0]?.groupId).toBe("project:none");
+  });
+
+  it("keeps v1 Section browsing separate from unresolved underlying membership", async () => {
+    const request: RepositoryRequester = async (path) =>
+      path.endsWith("projects.json")
+        ? {
+            version: 1,
+            projects: [
+              {
+                id: "review",
+                name: "Review",
+                source: "none",
+                hint: null,
+                activeCount: 1,
+                archivedCount: 0,
+                sidebar: { kind: "section", sectionId: "review", sectionName: "Review" },
+              },
+            ],
+            entries: {
+              "session-1": {
+                kind: "root",
+                projectId: "review",
+                parentThreadId: null,
+                agentPath: null,
+                agentNickname: null,
+                agentDepth: null,
+                childCount: 0,
+              },
+            },
+          }
+        : { version: 1, sessions: [summary()] };
+    const repository = new StaticConversationRepository(request);
+    expect(
+      (await repository.listSessions({ scope: "active", groupId: "section:review" })).total,
+    ).toBe(1);
+    expect(
+      (await repository.listSessions({ scope: "active", groupId: "project:review" })).total,
+    ).toBe(0);
+    expect((await repository.listSessions({ scope: "active", projectId: null })).total).toBe(0);
+    expect((await repository.listSessions({ scope: "active" })).items[0]?.projectId).toBeNull();
+    expect((await repository.listProjects())[0]?.diagnostics).toEqual([
+      expect.stringContaining("underlying project membership"),
+    ]);
+  });
+
+  it("retains ambiguous v1 native-none versus Recents entries in an explicit unresolved group", async () => {
+    const request: RepositoryRequester = async (path) =>
+      path.endsWith("projects.json")
+        ? {
+            version: 1,
+            projects: [
+              {
+                id: "none",
+                name: "Real project",
+                source: "codex",
+                hint: "C:/repo/viewer",
+                activeCount: 1,
+                archivedCount: 0,
+              },
+              {
+                id: "none",
+                name: "Recents",
+                source: "none",
+                hint: null,
+                activeCount: 1,
+                archivedCount: 0,
+              },
+            ],
+            entries: {
+              "session-1": {
+                kind: "root",
+                projectId: "none",
+                parentThreadId: null,
+                agentPath: null,
+                agentNickname: null,
+                agentDepth: null,
+                childCount: 0,
+              },
+            },
+          }
+        : { version: 1, sessions: [summary({ cwd: "C:/repo/viewer" })] };
+    const repository = new StaticConversationRepository(request);
+    expect((await repository.listSessions({ scope: "active" })).items[0]).toMatchObject({
+      id: "session-1",
+      projectId: null,
+    });
+    const emptyMembershipPages = await Promise.all(
+      [
+        { projectId: null },
+        { projectId: "none" },
+        { groupId: "project:none" },
+        { groupId: "recents:none" },
+      ].map((query) => repository.listSessions({ scope: "active", ...query })),
+    );
+    expect(emptyMembershipPages.every((page) => page.total === 0)).toBe(true);
+    const groups = await repository.listProjects();
+    const unresolved = groups.find((group) => group.id === "unresolved-static-v1")!;
+    expect(unresolved).toMatchObject({
+      activeCount: 1,
+      diagnostics: [expect.stringContaining("unknown")],
+    });
+    expect(groups.reduce((sum, group) => sum + group.activeCount, 0)).toBe(1);
+    expect(
+      (await repository.listSessions({ scope: "active", groupId: unresolved.groupId })).items.map(
+        (entry) => entry.id,
+      ),
+    ).toEqual(["session-1"]);
+  });
   it("rejects an absent exact-turn target consistently in static and live modes", async () => {
     const staticRequest = vi.fn<RepositoryRequester>(async (path) => {
       if (path.endsWith("/navigator.json")) {
@@ -151,12 +302,12 @@ describe("conversation repository adapters", () => {
     expect(first).toMatchObject({
       total: 2,
       nextCursor: "1",
-      items: [{ summary: { id: "session-1" } }],
+      items: [{ id: "session-1" }],
     });
     expect(second).toMatchObject({
       total: 2,
       nextCursor: null,
-      items: [{ summary: { id: "session-3" } }],
+      items: [{ id: "session-3" }],
     });
     expect(sessions).toEqual(originalSessions);
     expect(request).toHaveBeenCalledTimes(2);
@@ -201,7 +352,7 @@ describe("conversation repository adapters", () => {
       repository.listSessions({ scope: "active", query: "   ", cursor: "invalid", limit: 2 }),
     ).resolves.toMatchObject({
       total: 4,
-      items: [{ summary: { id: "session-1" } }, { summary: { id: "session-2" } }],
+      items: [{ id: "session-1" }, { id: "session-2" }],
       nextCursor: "2",
     });
     await expect(
@@ -214,7 +365,7 @@ describe("conversation repository adapters", () => {
         tool: "exec_command",
         hasMedia: false,
       }),
-    ).resolves.toMatchObject({ total: 1, items: [{ summary: { id: "session-1" } }] });
+    ).resolves.toMatchObject({ total: 1, items: [{ id: "session-1" }] });
     await expect(
       repository.listSessions({ scope: "active", cwd: "C:/repo/viewer", tool: "missing" }),
     ).resolves.toMatchObject({ total: 0 });
@@ -570,7 +721,7 @@ describe("conversation repository adapters", () => {
     );
     await expect(repository.listSessions({ scope: "active" })).resolves.toMatchObject({
       total: 1,
-      items: [{ summary: { id: "session-1" } }],
+      items: [{ id: "session-1" }],
     });
     expect(request).toHaveBeenCalledTimes(3);
   });
@@ -636,7 +787,7 @@ describe("conversation repository adapters", () => {
       if (path.startsWith("/api/sessions?")) {
         return {
           items: [
-            {
+            libraryEntryFromSummary({
               summary: summary(),
               kind: "root",
               materialization: "ready",
@@ -646,7 +797,7 @@ describe("conversation repository adapters", () => {
               agentNickname: null,
               agentDepth: 0,
               childCount: 0,
-            },
+            }),
           ],
           nextCursor: null,
           total: 1,
@@ -654,14 +805,14 @@ describe("conversation repository adapters", () => {
       }
       if (path === "/api/projects") {
         return [
-          {
+          catalogProjectGroupFromLegacy({
             id: "project-1",
             name: "viewer",
             hint: "C:/repo/viewer",
             source: "cwd",
             activeCount: 1,
             archivedCount: 0,
-          },
+          }),
         ];
       }
       if (path === "/api/sessions/prepare") {
@@ -720,6 +871,8 @@ describe("conversation repository adapters", () => {
     const repository = new LiveApiConversationRepository(request);
 
     await repository.listSessions({ scope: "active", limit: 2, hasMedia: false });
+    await repository.listSessions({ scope: "active", projectId: null });
+    await repository.listSessions({ scope: "active", groupId: "section:native%3Asection-1" });
     await expect(repository.listProjects()).resolves.toHaveLength(1);
     await expect(
       repository.prepareSessions(["session-1", "session-2", "session-1"]),
@@ -738,6 +891,8 @@ describe("conversation repository adapters", () => {
     expect(request.mock.calls.map(([path]) => path)).toEqual(
       expect.arrayContaining([
         "/api/sessions?scope=active&limit=2&hasMedia=false",
+        "/api/sessions?scope=active&projectId=",
+        "/api/sessions?scope=active&groupId=section%3Anative%253Asection-1",
         "/api/projects",
         "/api/sessions/prepare",
         "/api/search/materialize",

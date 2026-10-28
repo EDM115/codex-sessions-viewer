@@ -55,7 +55,28 @@ function isWithinRoot(root: string, candidate: string): boolean {
 }
 
 function cacheMatchesHome(database: DatabaseSync, codexHome: string): boolean {
-  return listCachedSourcePaths(database).every((path) => isWithinRoot(codexHome, path));
+  const saved = database
+    .prepare("SELECT payload_json FROM catalog_metadata_status WHERE id = 1")
+    .get();
+  if (typeof saved?.["payload_json"] === "string") {
+    const metadata: unknown = JSON.parse(saved["payload_json"]);
+    if (
+      metadata !== null &&
+      typeof metadata === "object" &&
+      "codexHome" in metadata &&
+      typeof metadata.codexHome === "string" &&
+      contextKey(metadata.codexHome) !== contextKey(codexHome)
+    ) {
+      return false;
+    }
+  }
+  const catalogPaths = database
+    .prepare("SELECT source_path FROM session_catalog WHERE source_path IS NOT NULL")
+    .all()
+    .map((row) => String(row["source_path"]));
+  return [...listCachedSourcePaths(database), ...catalogPaths].every((path) =>
+    isWithinRoot(codexHome, path),
+  );
 }
 
 export class LiveViewerRuntime {
@@ -210,7 +231,13 @@ export class LiveViewerRuntime {
   }
 
   get status(): ViewerRuntimeStatus {
-    return { ...this.#status };
+    return this.#status.state === "ready"
+      ? { ...this.#status, ...this.#context.reconciler.catalogStatus }
+      : { ...this.#status };
+  }
+
+  whenRecoverySettled(): Promise<void> {
+    return this.#context.reconciler.whenRecoverySettled();
   }
 
   whenReady(): Promise<void> {
