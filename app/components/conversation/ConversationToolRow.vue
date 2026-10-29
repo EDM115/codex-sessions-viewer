@@ -9,13 +9,9 @@ import {
   PhRobot,
   PhWrench,
 } from "@phosphor-icons/vue";
-import { computed, ref } from "vue";
 
-import type { ToolActivity } from "#shared/types/conversation.ts";
-
-import ConversationRaw from "./ConversationRaw.vue";
-import CopyIconButton from "./CopyIconButton.vue";
-import { formatDuration, formattedJson } from "./format.ts";
+import type { JsonValue, ToolActivity, DisclosureDefault } from "#shared/types/conversation.ts";
+import { formatDuration, formattedJson } from "~/components/conversation/format.ts";
 import {
   boundedJson,
   objectValue,
@@ -23,11 +19,42 @@ import {
   textField,
   toolOutput,
   toolPresentation,
-} from "./toolPresentation.ts";
-const props = defineProps<{ activity: ToolActivity }>();
+  activateChild,
+} from "~/components/conversation/toolPresentation.ts";
+const props = defineProps<{
+  activity: ToolActivity;
+  disclosureKey?: string;
+  toolCallsDefault?: DisclosureDefault;
+}>();
 const emit = defineEmits<{ inspect: [id: string]; openChild: [id: string] }>();
-const open = ref(false);
+const { open, toggle } = useWorkDisclosure(
+  () => `${props.disclosureKey ?? props.activity.id}:tool`,
+  () =>
+    props.activity.status === "failed"
+      ? "error"
+      : props.activity.status === "cancelled"
+        ? "cancelled"
+        : props.activity.status === "running"
+          ? "running"
+          : "unknown",
+  () => props.toolCallsDefault ?? "collapsed",
+);
+const attempts = computed(
+  () =>
+    props.activity.approvalAttempts ?? (props.activity.approval ? [props.activity.approval] : []),
+);
+const visibleAttempts = computed(() =>
+  attempts.value.filter((attempt) => attempt.outcome !== "allow"),
+);
 const presentation = computed(() => toolPresentation(props.activity));
+const childIds = computed(
+  () =>
+    props.activity.presentation?.childIds ??
+    (presentation.value.childId ? [presentation.value.childId] : []),
+);
+function observedChildStatus(id: string) {
+  return textField(objectValue(props.activity.output)?.[id], "status");
+}
 const icons = {
   shell: PhTerminal,
   read: PhFileText,
@@ -39,6 +66,15 @@ const icons = {
   other: PhWrench,
 };
 const duration = computed(() => formatDuration(props.activity.durationMs));
+const isScript = computed(
+  () =>
+    (props.activity.codeMode !== undefined &&
+      props.activity.presentation?.evidenceKind !== "host-attempt") ||
+    ["functions.exec", "functions.wait"].includes(
+      `${props.activity.namespace}.${props.activity.name}`,
+    ) ||
+    (props.activity.namespace === "functions" && ["exec", "wait"].includes(props.activity.name)),
+);
 const command = computed(
   () =>
     textField(props.activity.input, "cmd", "command") ??
@@ -59,11 +95,8 @@ const exitCode = computed(() => objectValue(props.activity.output)?.["exit_code"
     :data-status="activity.status"
     :data-entry-id="activity.id"
   >
-    <details
-      class="conversation-tool-row__details"
-      @toggle="open = ($event.currentTarget as HTMLDetailsElement).open"
-    >
-      <summary class="conversation-tool-row__header">
+    <details class="conversation-tool-row__details" :open="open" @toggle="toggle">
+      <summary class="conversation-tool-row__header" :aria-expanded="open">
         <component :is="icons[presentation.category]" :size="18" aria-hidden="true" />
         <strong>{{ presentation.label }}</strong>
         <span class="conversation-tool-row__subject">{{ presentation.subject }}</span>
@@ -78,15 +111,23 @@ const exitCode = computed(() => objectValue(props.activity.output)?.["exit_code"
           </button>
         </div>
         <p v-if="context"><strong>Location:</strong> {{ context }}</p>
-        <template v-if="command !== null">
+        <template v-if="command !== null && !isScript && presentation.category !== 'edit'">
           <div class="conversation-tool-row__payload-heading">
             <span>{{ presentation.category === "shell" ? "Command" : "Recorded input" }}</span
-            ><CopyIconButton label="Copy complete tool command" :text="() => command ?? ''" />
+            ><ConversationCopyIconButton
+              label="Copy complete tool command"
+              :text="() => command ?? ''"
+            />
           </div>
           <pre
             class="conversation-tool-row__command"
-          ><code>{{ command.length > 16_000 ? command.slice(0, 16_000) + '\n… Partial command preview; copy includes complete command.' : command }}</code></pre>
+          ><code :class="presentation.category === 'shell' || presentation.category === 'read' || presentation.category === 'search' ? 'language-shell' : undefined">{{ command.length > 16_000 ? command.slice(0, 16_000) + '\n… Partial command preview; copy includes complete command.' : command }}</code></pre>
         </template>
+        <ContentDiffBlock
+          v-if="presentation.category === 'edit' && typeof activity.input === 'string'"
+          :source="activity.input"
+          wrapped
+        />
         <p v-if="model"><strong>Model:</strong> {{ model }}</p>
         <p v-if="objective">
           <strong>Objective/message:</strong>
@@ -98,7 +139,7 @@ const exitCode = computed(() => objectValue(props.activity.output)?.["exit_code"
         </p>
         <div class="conversation-tool-row__payload-heading">
           <span>Result</span
-          ><CopyIconButton
+          ><ConversationCopyIconButton
             label="Copy complete tool output"
             :text="() => formattedJson(activity.output)"
           />
@@ -112,35 +153,38 @@ const exitCode = computed(() => objectValue(props.activity.output)?.["exit_code"
           {{ statusLabel(activity.status)
           }}<span v-if="typeof exitCode === 'number'"> · Exit code {{ exitCode }}</span>
         </p>
-        <p v-if="presentation.childId !== null">
+        <p v-for="childId in childIds" :key="childId">
           <a
-            :href="`/session/${encodeURIComponent(presentation.childId)}`"
-            @click.prevent="emit('openChild', presentation.childId)"
-            >Open {{ presentation.subject }} conversation</a
+            :href="`/session/${encodeURIComponent(childId)}`"
+            @click="activateChild($event, childId, (id) => emit('openChild', id))"
+            >Open {{ childIds.length === 1 ? presentation.subject : childId }} conversation</a
+          >
+          <span v-if="observedChildStatus(childId)">
+            · Recorded status: {{ observedChildStatus(childId) }}</span
           >
         </p>
-        <dl class="conversation-tool-row__identity">
-          <dt>Protocol tool</dt>
-          <dd>{{ presentation.rawName }}</dd>
-          <dt>Call ID</dt>
-          <dd>{{ activity.callId ?? "Unavailable" }}</dd>
-          <dt>Activity ID</dt>
-          <dd>{{ activity.id }}</dd>
-        </dl>
+        <ConversationRaw
+          label="Technical details · identity and reviews"
+          :value="
+            {
+              tool: presentation.rawName,
+              callId: activity.callId,
+              activityId: activity.id,
+              nativeItemId: activity.nativeItemId ?? null,
+              attempts,
+            } as unknown as JsonValue
+          "
+        />
         <ConversationRaw label="Technical details · input" :value="activity.input" />
         <ConversationRaw label="Technical details · output" :value="activity.output" />
       </div>
     </details>
-    <p
-      v-if="activity.approval"
-      class="conversation-tool-row__approval"
-      :class="activity.approval.outcome === 'deny' ? 'is-denied' : null"
-    >
-      <strong
-        >{{ activity.approval.outcome === "allow" ? "Approved" : "Denied" }} ·
-        {{ activity.approval.riskLevel }} risk</strong
-      ><span>{{ activity.approval.rationale }}</span>
-    </p>
+    <ConversationApprovalAttempt
+      v-for="(attempt, index) in visibleAttempts"
+      :key="`${attempt.reviewId ?? 'review'}:${index}`"
+      :disclosure-key="`${disclosureKey ?? activity.id}:${attempt.reviewId ?? 'review'}:${index}`"
+      :attempt="attempt"
+    />
     <p v-if="activity.error !== null" class="conversation-tool-row__error">{{ activity.error }}</p>
   </article>
 </template>
@@ -172,12 +216,5 @@ const exitCode = computed(() => objectValue(props.activity.output)?.["exit_code"
   max-height: 26rem;
   overflow: auto;
   white-space: pre;
-}
-.conversation-tool-row__identity {
-  font-size: 0.75rem;
-  overflow-wrap: anywhere;
-}
-.conversation-tool-row__identity dd {
-  margin: 0 0 0.3rem;
 }
 </style>

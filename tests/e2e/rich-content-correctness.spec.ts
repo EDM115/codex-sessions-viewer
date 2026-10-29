@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { expect, test } from "@nuxt/test-utils/playwright";
 
 import { parseRichText } from "../../server/content/parseRichText.ts";
@@ -6,6 +8,15 @@ import type {
   ConversationSummary,
   ConversationTurn,
 } from "../../shared/types/conversation.ts";
+
+test.use({
+  nuxt: {
+    rootDir: fileURLToPath(new URL("../fixtures/nuxt-viewport", import.meta.url)),
+    dev: false,
+    host: process.env["CODEX_VIEWER_TEST_URL"],
+    build: true,
+  },
+});
 
 const sessionId = "88888888-8888-4888-8888-888888888888";
 const timestamp = "2026-09-14T12:00:00.000Z";
@@ -202,9 +213,7 @@ test("renders complete reactive diffs, scoped footnotes, real token colors and l
     .locator("code span[style]")
     .first()
     .evaluate((token) => getComputedStyle(token).color);
-  await page.getByRole("link", { name: "Open Settings" }).click();
   await page.locator('[data-theme-choice="quiet-precision"]').click();
-  await page.goBack();
   await expect
     .poll(() =>
       codes

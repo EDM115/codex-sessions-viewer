@@ -5,6 +5,12 @@ import { zstdCompressSync } from "node:zlib";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { approvalEvidenceForHistoryPage } from "#server/normalization/guardianEvidence.ts";
+import {
+  historyWindowInspector,
+  historyWindowPresentation,
+} from "#shared/timeline/historyPresentation.ts";
+
 import { RolloutHistoryReader } from "../../../server/history/rolloutHistoryReader.ts";
 import * as lineageModule from "../../../server/ingestion/rolloutLineage.ts";
 import { RolloutStore } from "../../../server/ingestion/rolloutStream.ts";
@@ -15,6 +21,7 @@ import {
   fixtureLineage,
   fixtureRef,
 } from "../../fixtures/history/nativeHistory.ts";
+import { cutoffReviewRecords } from "../../fixtures/history/parentReviews.ts";
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -32,6 +39,308 @@ async function fixture(records: unknown[], finalNewline = true) {
   return { root, path, store, reader, lineage: fixtureLineage(fixtureRef(path)) };
 }
 describe("bounded raw history pages", () => {
+  it.each(["canonical-first", "echo-first"] as const)(
+    "I1 coalesces both final envelope orders without rewriting the selected source pointer: %s",
+    async (order) => {
+      const canonical = {
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: "canonical",
+          role: "assistant",
+          phase: "final_answer",
+          content: [{ type: "output_text", text: "Actual answer" }],
+        },
+      };
+      const echo = {
+        type: "event_msg",
+        payload: { type: "agent_message", phase: "final_answer", message: "Actual answer" },
+      };
+      const pair = order === "canonical-first" ? [canonical, echo] : [echo, canonical];
+      const records = [
+        { type: "session_meta", payload: { id: "stable", session_id: "root" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+        { type: "event_msg", payload: { type: "user_message", message: "Question" } },
+        ...pair,
+        { type: "event_msg", payload: { type: "task_complete", turn_id: "turn" } },
+      ];
+      const f = await fixture(records);
+      try {
+        const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+        const window = page.turns.at(0);
+        if (!window) {
+          throw new Error("Expected supplied paired final turn");
+        }
+        const originals = window.items.filter((entry) => entry.item?.type === "agentMessage");
+        const selected = originals.at(-1);
+        if (!selected) {
+          throw new Error("Expected original selected final envelope");
+        }
+        const sourcePointer = window.finalAnswerItemId;
+        expect(sourcePointer).toBe(selected.itemId);
+        const presented = historyWindowPresentation("stable", window);
+        expect(presented.assistantMessages.map((message) => message.id)).toEqual([sourcePointer]);
+        expect(presented.finalAssistantMessageId).toBe(sourcePointer);
+        expect(presented.messageAliases[selected.itemId]).toEqual(
+          originals.map((entry) => entry.itemId),
+        );
+        expect(window.finalAnswerItemId).toBe(sourcePointer);
+        expect(window.items.filter((entry) => entry.item?.type === "agentMessage")).toEqual(
+          originals,
+        );
+        const inspected = historyWindowInspector("stable", window, {
+          type: "message",
+          id: selected.itemId,
+        });
+        expect(inspected?.target).toEqual({ type: "message", id: selected.itemId });
+        expect(JSON.stringify(inspected?.rawRecords)).toContain(
+          order === "canonical-first" ? "agent_message" : "response_item",
+        );
+        expect(
+          historyWindowPresentation("stable", {
+            ...window,
+            itemIslands: window.items.map((entry) => [entry.itemId]),
+          }).assistantMessages,
+        ).toHaveLength(2);
+        const distinctEcho = { ...echo, payload: { ...echo.payload, id: "independent" } };
+        const distinct = await fixture(
+          records.map((record) => (record === echo ? distinctEcho : record)),
+        );
+        try {
+          const distinctPage = await distinct.reader.read(distinct.lineage, {
+            anchor: { kind: "latest" },
+          });
+          const distinctWindow = distinctPage.turns.at(0);
+          if (!distinctWindow) {
+            throw new Error("Expected conflicting ID turn");
+          }
+          expect(
+            historyWindowPresentation("stable", distinctWindow).assistantMessages,
+          ).toHaveLength(2);
+        } finally {
+          await distinct.store.close();
+        }
+      } finally {
+        await f.store.close();
+      }
+    },
+  );
+  it.each([
+    ["commentary-match", "commentary", "Actual answer", 2, "completion"],
+    ["null-phase-match", null, "Actual answer", 1, "message"],
+    ["explicit-final", "final_answer", "Actual answer", 1, "message"],
+    ["completion-only", "missing", "Actual answer", 1, "completion"],
+    ["whitespace", null, "   ", 1, null],
+    ["empty", null, "", 1, null],
+    ["absent", null, null, 1, null],
+  ] as const)(
+    "I2/I3 raw completion eligibility retains bounded source provenance: %s",
+    async (_name, phase, completion, count, finalSource) => {
+      const f = await fixture([
+        { type: "session_meta", payload: { id: "stable", session_id: "root" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+        { type: "event_msg", payload: { type: "user_message", message: "Question" } },
+        ...(phase === "missing"
+          ? []
+          : [
+              {
+                type: "event_msg",
+                payload: {
+                  type: "agent_message",
+                  id: "original",
+                  message: "Actual answer",
+                  ...(phase === null ? {} : { phase }),
+                },
+              },
+            ]),
+        {
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            id: "completion",
+            turn_id: "turn",
+            ...(completion === null ? {} : { last_agent_message: completion }),
+          },
+        },
+      ]);
+      try {
+        const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+        const window = page.turns.at(0);
+        if (!window) {
+          throw new Error("Expected completion qualification turn");
+        }
+        const messages = window.items.filter((entry) => entry.item?.type === "agentMessage");
+        expect(messages).toHaveLength(count);
+        const original = messages.find((entry) => entry.itemId === "original")?.item;
+        expect(original?.type === "agentMessage" ? original.phase : undefined).toBe(
+          phase === "missing" ? undefined : phase,
+        );
+        expect(window.finalAnswerItemId).toBe(finalSource === "message" ? "original" : finalSource);
+        const bounded = await f.reader.readItems(f.lineage, {
+          turnId: "turn",
+          anchor: { kind: "latest" },
+          limit: 1,
+        });
+        expect(bounded.items.length).toBeLessThanOrEqual(1);
+        expect(bounded.finalAnswerItemId).toBe(window.finalAnswerItemId);
+        expect(historyWindowPresentation("stable", bounded).finalAssistantMessageId).toBe(
+          window.finalAnswerItemId,
+        );
+        const selected = window.items.find((entry) => entry.itemId === window.finalAnswerItemId);
+        expect(selected?.item?.type === "agentMessage" ? selected.item.text : null).toBe(
+          finalSource === null ? null : "Actual answer",
+        );
+      } finally {
+        await f.store.close();
+      }
+    },
+  );
+  it.each(["matching", "body-only", "absent"] as const)(
+    "qualifies bounded task_complete final evidence: %s",
+    async (kind) => {
+      const records = [
+        { type: "session_meta", payload: { id: "stable", session_id: "root" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+        { type: "event_msg", payload: { type: "user_message", message: "Question" } },
+        ...(kind === "body-only"
+          ? []
+          : [{ type: "event_msg", payload: { type: "agent_message", message: "Actual answer" } }]),
+        {
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "turn",
+            ...(kind === "absent" ? {} : { last_agent_message: "Actual answer" }),
+          },
+        },
+      ];
+      const f = await fixture(records);
+      const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+      const window = page.turns[0];
+      if (!window) {
+        throw new Error("Expected completed fixture turn");
+      }
+      const selected = window.items.find(
+        (entry) => entry.itemId === window.finalAnswerItemId,
+      )?.item;
+      expect(selected?.type === "agentMessage" ? selected.text : null).toBe(
+        kind === "absent" ? null : "Actual answer",
+      );
+      const expectedEvidence = {
+        matching: expect.objectContaining({
+          phase: null,
+          evidence: expect.objectContaining({
+            finalAnswerEvidence: expect.objectContaining({
+              envelope: expect.objectContaining({
+                payload: expect.objectContaining({
+                  type: "task_complete",
+                  last_agent_message: "Actual answer",
+                }),
+              }),
+              identity: expect.objectContaining({ physicalRolloutId: "physical" }),
+            }),
+          }),
+        }),
+        "body-only": expect.objectContaining({
+          evidence: expect.objectContaining({
+            source: expect.objectContaining({
+              payload: expect.objectContaining({
+                type: "task_complete",
+                last_agent_message: "Actual answer",
+              }),
+            }),
+          }),
+        }),
+        absent: undefined,
+      };
+      expect(selected).toEqual(expectedEvidence[kind]);
+      expect(window.items.filter((entry) => entry.item?.type === "agentMessage")).toHaveLength(1);
+      await f.store.close();
+    },
+  );
+  it("keeps supplied raw reasoning body text when the summary array is empty", async () => {
+    const records = canonicalRecords();
+    records.splice(3, 0, {
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        summary: [],
+        content: [{ type: "reasoning_text", text: "Raw plaintext body" }],
+      },
+    });
+    const f = await fixture(records);
+    const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+    const window = page.turns.at(0);
+    if (!window) {
+      throw new Error("Expected reasoning fixture turn");
+    }
+    const presented = historyWindowPresentation("stable", window);
+    expect(
+      presented.activities
+        .filter((activity) => activity.kind === "reasoning")
+        .map((activity) => activity.summary),
+    ).toContain("Raw plaintext body");
+    await f.store.close();
+  });
+  it("qualifies the legacy final phase and coalesces its adjacent raw message representations", async () => {
+    const records = [
+      { type: "session_meta", payload: { id: "stable", session_id: "root" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+      { type: "event_msg", payload: { type: "user_message", message: "Question" } },
+      {
+        type: "event_msg",
+        payload: { type: "agent_message", phase: "final", message: "Actual answer" },
+      },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: "final-source",
+          role: "assistant",
+          phase: "final",
+          content: [{ type: "output_text", text: "Actual answer" }],
+        },
+      },
+      { type: "event_msg", payload: { type: "task_complete", turn_id: "turn" } },
+    ];
+    const f = await fixture(records);
+    const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+    expect(page.turns).toHaveLength(1);
+    const window = page.turns[0];
+    if (!window) {
+      throw new Error("Expected paired final fixture turn");
+    }
+    expect(window.finalAnswerItemId).toBe("final-source");
+    const presented = historyWindowPresentation("stable", window);
+    expect(presented.assistantMessages.map((message) => message.sourceMarkdown)).toEqual([
+      "Actual answer",
+    ]);
+    expect(presented.finalAssistantMessageId).toBe("final-source");
+    expect(window.items.filter((entry) => entry.item?.type === "agentMessage")).toHaveLength(2);
+    const separated = { ...window, itemIslands: window.items.map((entry) => [entry.itemId]) };
+    expect(historyWindowPresentation("stable", separated).assistantMessages).toHaveLength(2);
+    const distinctRecords = structuredClone(records);
+    const notification = distinctRecords.at(3);
+    if (!notification) {
+      throw new Error("Expected supplied final notification");
+    }
+    Object.assign(notification.payload, { id: "independent-final" });
+    const distinct = await fixture(distinctRecords);
+    const distinctPage = await distinct.reader.read(distinct.lineage, {
+      anchor: { kind: "latest" },
+    });
+    const distinctWindow = distinctPage.turns.at(0);
+    if (!distinctWindow) {
+      throw new Error("Expected distinct final fixture turn");
+    }
+    expect(
+      historyWindowPresentation("stable", distinctWindow).assistantMessages.map(
+        (message) => message.id,
+      ),
+    ).toEqual(["independent-final", "final-source"]);
+    await distinct.store.close();
+    await f.store.close();
+  });
   it("I3 applies context observed after the matching turn start", async () => {
     const records = canonicalRecords();
     records.splice(2, 0, {
@@ -734,20 +1043,11 @@ describe("bounded raw history pages", () => {
     expect(page.coverage.status).toBe("complete");
     await f.store.close();
   });
-  it("does not duplicate canonical tool completion with its legacy call/output representation", async () => {
-    const records = canonicalRecords();
-    records.splice(
-      3,
-      0,
-      {
-        type: "response_item",
-        payload: { type: "function_call", call_id: "call-1", name: "inspect", arguments: "{}" },
-      },
-      {
-        type: "response_item",
-        payload: { type: "function_call_output", call_id: "call-1", output: "result" },
-      },
-      {
+  it.each([false, true])(
+    "keeps native and direct executions distinct when only provider ID/name/arguments match (native first %s)",
+    async (nativeFirst) => {
+      const records = canonicalRecords();
+      const native = {
         type: "event_msg",
         payload: {
           type: "item_completed",
@@ -758,24 +1058,95 @@ describe("bounded raw history pages", () => {
             tool: "inspect",
             arguments: {},
             status: "completed",
-            content_items: [{ type: "input_text", text: "result" }],
+            content_items: [{ type: "input_text", text: "native result" }],
             success: true,
+          },
+        },
+      };
+      const direct = [
+        {
+          type: "response_item",
+          payload: { type: "function_call", call_id: "call-1", name: "inspect", arguments: "{}" },
+        },
+        {
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "call-1", output: "direct result" },
+        },
+      ];
+      records.splice(3, 0, ...(nativeFirst ? [native, ...direct] : [...direct, native]));
+      const f = await fixture(records);
+      const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+      const items = page.turns.at(0)!.items;
+      expect(items).toHaveLength(5);
+      expect(new Set(items.map((item) => item.itemId)).size).toBe(5);
+      expect(items.find((item) => item.itemId === "call-1")?.item).toMatchObject({
+        type: "dynamicToolCall",
+        status: "completed",
+        contentItems: [{ type: "input_text", text: "native result" }],
+      });
+      const rawCall = items.find(
+        (item) => item.item?.type === "dynamicToolCall" && item.itemId !== "call-1",
+      );
+      expect(rawCall?.item).toMatchObject({
+        status: "inProgress",
+        success: null,
+        evidence: { source: { payload: { call_id: "call-1", name: "inspect" } } },
+      });
+      expect(items.find((item) => item.item?.type === "functionCallOutput")?.item).toMatchObject({
+        output: "direct result",
+      });
+      await f.store.close();
+    },
+  );
+  it("coalesces source-proved command lifecycle updates with canonical items and retains original/update positions", async () => {
+    const records = canonicalRecords();
+    const command = {
+      call_id: "cmd",
+      command: ["node", "job"],
+      cwd: "/",
+      parsed_cmd: [],
+      source: "agent",
+    };
+    records.splice(
+      3,
+      0,
+      { type: "event_msg", payload: { type: "exec_command_begin", ...command } },
+      {
+        type: "event_msg",
+        payload: {
+          type: "exec_command_end",
+          ...command,
+          status: "completed",
+          exit_code: 0,
+          aggregated_output: "old",
+        },
+      },
+      {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          turn_id: "turn",
+          item: {
+            type: "CommandExecution",
+            id: "cmd",
+            ...command,
+            status: "failed",
+            exit_code: 7,
+            aggregated_output: "latest",
           },
         },
       },
     );
     const f = await fixture(records);
     const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
-    expect(page.turns.at(0)!.items.map((item) => item.itemId)).toEqual([
-      "user",
-      "call-1",
-      "answer",
-    ]);
-    expect(page.turns.at(0)!.items.at(1)!.item).toMatchObject({
-      type: "dynamicToolCall",
-      status: "completed",
-      success: true,
+    expect(page.turns.at(0)!.items.map((item) => item.itemId)).toEqual(["user", "cmd", "answer"]);
+    expect(page.turns.at(0)!.items.at(1)).toMatchObject({
+      ordinal: 3,
+      updatedAtOrdinal: 5,
+      item: { type: "commandExecution", status: "failed", output: "latest" },
     });
+    const item = page.turns.at(0)!.items.at(1)!;
+    expect(item.updatedAtDecodedByte).toBeGreaterThan(item.decodedByteStart!);
     await f.store.close();
   });
   it("publishes a giant-turn tail independently of its opening without full hash, lineage replay or discovery", async () => {
@@ -836,4 +1207,84 @@ describe("bounded raw history pages", () => {
     expect(next.historyEpoch).toBe(first.historyEpoch);
     await f.store.close();
   });
+});
+
+it("qualifies same-owner reviews on each side of the actual logical cutoff", async () => {
+  const f = await fixture(cutoffReviewRecords());
+  const segment = f.lineage.segments[0];
+  if (!segment) {
+    throw new Error("Missing fixture lineage segment");
+  }
+  segment.ref.subagentHistoryStartOrdinal = 10;
+  segment.displayStartOrdinal = 10;
+  try {
+    const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+    if (page.turns.length === 0) {
+      throw new Error(JSON.stringify(page.coverage));
+    }
+    expect(page.turns.flatMap((turn) => turn.items.map((item) => item.itemId))).toEqual([
+      "answer",
+      "visible-user",
+      "visible-command",
+    ]);
+    const evidence = approvalEvidenceForHistoryPage(page);
+    expect(
+      evidence.matched.map((match) => match.attempts.map((review) => review.reviewId)),
+    ).toEqual([["visible-review"]]);
+    expect(evidence.unattached).toEqual([]);
+    expect(
+      page.reviewEvidence?.records.map((record) => [
+        record.identity.ordinal,
+        record.logicalVisibility,
+      ]),
+    ).toEqual([
+      [5, "context-only"],
+      [6, "context-only"],
+      [7, "context-only"],
+      [8, "context-only"],
+      [9, "context-only"],
+      [15, "visible"],
+      [16, "visible"],
+    ]);
+  } finally {
+    await f.store.close();
+  }
+});
+
+it("does not qualify tail review ordinals across an unread cutoff gap", async () => {
+  const records = cutoffReviewRecords();
+  records.splice(
+    12,
+    0,
+    ...Array.from({ length: 6000 }, () => ({
+      type: "event_msg",
+      payload: { type: "token_count", padding: "x".repeat(1024) },
+    })),
+  );
+  const f = await fixture(records);
+  const segment = f.lineage.segments[0];
+  if (!segment) {
+    throw new Error("Missing fixture lineage segment");
+  }
+  segment.ref.subagentHistoryStartOrdinal = 10;
+  segment.displayStartOrdinal = 10;
+  try {
+    const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+    expect(page.reviewEvidence?.availability).toBe("unresolved");
+    expect(
+      page.reviewEvidence?.records
+        .filter((record) => record.identity.ordinal === null)
+        .map((record) => record.logicalVisibility),
+    ).toEqual(["unresolved", "unresolved"]);
+    expect(approvalEvidenceForHistoryPage(page)).toMatchObject({
+      matched: [],
+      unattached: [],
+      parentSource: { availability: "unresolved" },
+    });
+    expect(page.coverage.gaps).toEqual(
+      expect.arrayContaining([expect.objectContaining({ reason: "ordinal-cutoff-unproved" })]),
+    );
+  } finally {
+    await f.store.close();
+  }
 });

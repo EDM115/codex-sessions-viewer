@@ -1,12 +1,15 @@
-import { flushPromises, mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
+import { mountSuspended } from "@nuxt/test-utils/runtime";
+import { flushPromises } from "@vue/test-utils";
+import { describe, expect, it, vi } from "vitest";
 
-import ConversationTurn from "../../../app/components/conversation/ConversationTurn.vue";
 import type {
   ConversationMessage,
   ConversationTurn as Turn,
   TurnEntryReference,
-} from "../../../shared/types/conversation.ts";
+} from "#shared/types/conversation.ts";
+import ConversationTurn from "~/components/conversation/ConversationTurn.vue";
+
+import { detailsElement } from "./helpers/elements.ts";
 
 function message(
   id: string,
@@ -177,16 +180,16 @@ function orderedTurn(): Turn {
 
 describe("ConversationWorkStream", () => {
   it("interleaves work chronologically and leaves only the final assistant response visible", async () => {
-    const wrapper = mount(ConversationTurn, {
+    const wrapper = await mountSuspended(ConversationTurn, {
       props: {
         turn: orderedTurn(),
         reasoningDefault: "expanded",
-        toolCallsDefault: "expanded",
+        toolCallsDefault: "collapsed",
         timestampFormat: "absolute",
       },
       global: {
         stubs: {
-          DiffBlock: {
+          ContentDiffBlock: {
             props: ["source"],
             template: '<pre class="rich-diff-test">{{ source }}</pre>',
           },
@@ -204,7 +207,7 @@ describe("ConversationWorkStream", () => {
     );
 
     const work = wrapper.get('[data-activity-group="worked"]');
-    (work.element as HTMLDetailsElement).open = true;
+    detailsElement(work.element).open = true;
     await work.trigger("toggle");
 
     expect(wrapper.text()).toContain("I am checking the call sites.");
@@ -218,21 +221,21 @@ describe("ConversationWorkStream", () => {
     expect(wrapper.findAll(".conversation-tool-row__header strong")).toHaveLength(1);
     expect(
       wrapper.findAll("[data-tool-group]").map((group) => group.attributes("data-tool-group")),
-    ).toEqual(["command-b", "file-a"]);
+    ).toEqual(["command-b", "file-a", "file-b"]);
     expect(wrapper.findAll(".conversation-tool-row pre")).toHaveLength(0);
     await Promise.all(
       wrapper.findAll("[data-tool-group]").map((group) => {
-        (group.element as HTMLDetailsElement).open = true;
+        detailsElement(group.element).open = true;
         return group.trigger("toggle");
       }),
     );
     expect(
       wrapper.findAll(".conversation-tool-row__header strong").map((node) => node.text()),
     ).toEqual(["Ran command", "Ran command", "Ran command"]);
-    expect(wrapper.text()).toContain("Approved · low risk");
-    expect(wrapper.text()).toContain("Read-only verification command.");
+    expect(wrapper.text()).not.toContain("Approved · low risk");
+    expect(wrapper.text()).not.toContain("Read-only verification command.");
     const child = wrapper.get('[data-entry-id="agent"] details');
-    (child.element as HTMLDetailsElement).open = true;
+    detailsElement(child.element).open = true;
     await child.trigger("toggle");
     expect(wrapper.get('a[href="/session/child-session"]').text()).toContain(
       "Reviewed the cache path",
@@ -241,14 +244,14 @@ describe("ConversationWorkStream", () => {
     expect(wrapper.get('[data-tool-group="file-a"] > summary').text()).toContain("Edited files");
     await Promise.all(
       wrapper.findAll(".conversation-file-changes").map((details) => {
-        (details.element as HTMLDetailsElement).open = true;
+        detailsElement(details.element).open = true;
         return details.trigger("toggle");
       }),
     );
     const fileDetails = wrapper.findAll(".conversation-file-changes__files details");
     await Promise.all(
       fileDetails.map((details) => {
-        (details.element as HTMLDetailsElement).open = true;
+        detailsElement(details.element).open = true;
         return details.trigger("toggle");
       }),
     );
@@ -270,4 +273,28 @@ describe("ConversationWorkStream", () => {
       "file-b",
     ]);
   });
+});
+
+it("preserves explicit work disclosure intent across virtual remounts when browser storage is unavailable", async () => {
+  vi.spyOn(localStorage, "getItem").mockImplementation(() => {
+    throw new Error("disabled");
+  });
+  vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+    throw new Error("disabled");
+  });
+  const props = {
+    turn: orderedTurn(),
+    disclosureKey: "virtual-remount",
+    reasoningDefault: "collapsed" as const,
+    toolCallsDefault: "collapsed" as const,
+    timestampFormat: "absolute" as const,
+  };
+  const first = await mountSuspended(ConversationTurn, { props });
+  const work = first.get('[data-activity-group="worked"]');
+  detailsElement(work.element).open = true;
+  await work.trigger("toggle");
+  first.unmount();
+  const second = await mountSuspended(ConversationTurn, { props });
+  expect(detailsElement(second.get('[data-activity-group="worked"]').element).open).toBe(true);
+  second.unmount();
 });

@@ -51,9 +51,23 @@ export class MaterializationQueue {
   #active: QueueEntry | null = null;
   #sequence = 0;
   #closed = false;
+  #selected = 0;
 
   constructor(worker: MaterializationWorker) {
     this.#worker = worker;
+  }
+
+  holdSelected(): () => void {
+    this.#selected += 1;
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      this.#selected -= 1;
+      this.#drain();
+    };
   }
 
   enqueue(
@@ -106,7 +120,10 @@ export class MaterializationQueue {
   #next(): QueueEntry | null {
     return (
       [...this.#entries.values()]
-        .filter(({ state }) => state === "queued")
+        .filter(
+          ({ state, priority }) =>
+            state === "queued" && (this.#selected === 0 || priority !== "deep-search"),
+        )
         .toSorted(
           (left, right) =>
             priorityRank[right.priority] - priorityRank[left.priority] ||

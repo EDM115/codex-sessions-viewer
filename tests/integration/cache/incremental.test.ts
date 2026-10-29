@@ -17,6 +17,7 @@ import { getCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import {
   SessionCacheUpdater,
+  CACHE_PARSER_VERSION,
   type StableJsonlReader,
 } from "../../../server/cache/sourceManifest.ts";
 import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
@@ -342,8 +343,12 @@ describe("incremental session cache", () => {
       }
       expect(updater.retention.sources).toBe(2);
       expect(updater.retention.bytes).toBeLessThanOrEqual(2_000_000);
-      await appendFile(paths[0]!, "\n");
-      await expect(updater.update({ path: paths[0]!, scope: "active" })).resolves.toMatchObject({
+      const firstPath = paths.at(0);
+      if (!firstPath) {
+        throw new Error("Expected first retained fixture path");
+      }
+      await appendFile(firstPath, "\n");
+      await expect(updater.update({ path: firstPath, scope: "active" })).resolves.toMatchObject({
         status: "updated",
         mode: "full",
       });
@@ -351,7 +356,7 @@ describe("incremental session cache", () => {
         maxRetainedSources: 2,
         maxRetainedBytes: 1,
       });
-      await tiny.update({ path: paths[0]!, scope: "active" }, { force: true });
+      await tiny.update({ path: firstPath, scope: "active" }, { force: true });
       expect(tiny.retention).toMatchObject({ sources: 0, bytes: 0 });
     } finally {
       database.close();
@@ -485,7 +490,9 @@ describe("incremental session cache", () => {
     await writeFile(sourcePath, await fixture("modern.jsonl"), "utf8");
     const oldDatabase = openCacheDatabase(cachePath);
     try {
-      const oldUpdater = new SessionCacheUpdater(oldDatabase, { parserVersion: 1 });
+      const oldUpdater = new SessionCacheUpdater(oldDatabase, {
+        parserVersion: CACHE_PARSER_VERSION - 1,
+      });
       await expect(oldUpdater.update({ path: sourcePath, scope: "active" })).resolves.toMatchObject(
         {
           status: "updated",

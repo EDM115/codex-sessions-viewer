@@ -8,7 +8,8 @@ import {
   SOURCE_GENERATION_SCHEMA_SQL,
   METADATA_CATALOG_SCHEMA_SQL,
   VERIFIED_PROJECTION_SCHEMA_SQL,
-} from "./schema.ts";
+  LOGICAL_VISIBILITY_SCHEMA_SQL,
+} from "#server/cache/schema.ts";
 
 interface CacheMigration {
   version: number;
@@ -22,6 +23,7 @@ const migrations: readonly CacheMigration[] = [
   { version: 4, sql: SOURCE_GENERATION_SCHEMA_SQL },
   { version: 5, sql: METADATA_CATALOG_SCHEMA_SQL },
   { version: 6, sql: VERIFIED_PROJECTION_SCHEMA_SQL },
+  { version: 7, sql: LOGICAL_VISIBILITY_SCHEMA_SQL },
 ];
 
 function userVersion(database: DatabaseSync): number {

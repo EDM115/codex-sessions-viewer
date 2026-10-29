@@ -1,5 +1,3 @@
-import { createError, defineEventHandler, getRequestHost } from "h3";
-
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[(.*)\]$/u, "$1");
   if (normalized === "localhost" || normalized === "::1") {

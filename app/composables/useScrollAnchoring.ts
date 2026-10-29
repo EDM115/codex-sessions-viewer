@@ -1,4 +1,4 @@
-import { nextTick, type Ref } from "vue";
+import type { Ref } from "vue";
 
 import {
   scrollAnchorAdjustment,
@@ -20,6 +20,7 @@ export function useScrollAnchoring(
   let inputVersion = 0;
   let remembered: ScrollAnchorSnapshot | null = null;
   let restoring = 0;
+  let transaction = 0;
 
   function turnElements(): HTMLElement[] {
     return scrollElement.value === null
@@ -79,9 +80,13 @@ export function useScrollAnchoring(
       return;
     }
     const version = inputVersion;
+    const currentTransaction = ++transaction;
     remembered = snapshot;
     restoring += 1;
-    const valid = () => version === inputVersion && scrollElement.value === container;
+    const valid = () =>
+      version === inputVersion &&
+      currentTransaction === transaction &&
+      scrollElement.value === container;
     const apply = () => {
       if (!valid()) {
         return;
@@ -128,6 +133,9 @@ export function useScrollAnchoring(
     restore,
     remember,
     cancel,
+    get active() {
+      return restoring > 0;
+    },
     get snapshot() {
       return remembered;
     },

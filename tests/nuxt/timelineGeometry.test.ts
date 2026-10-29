@@ -1,12 +1,12 @@
+import { mountSuspended } from "@nuxt/test-utils/runtime";
 import { Virtualizer } from "@tanstack/vue-virtual";
-import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { h, nextTick, ref } from "vue";
 
-import TurnMinimap from "../../../app/components/conversation/TurnMinimap.vue";
-import { useScrollAnchoring } from "../../../app/composables/useScrollAnchoring.ts";
-import { installConversationScrollPolicy } from "../../../shared/timeline/virtualizer.ts";
-import type { TurnNavigatorItem } from "../../../shared/types/conversation.ts";
+import { installConversationScrollPolicy } from "#shared/timeline/virtualizer.ts";
+import type { TurnNavigatorItem } from "#shared/types/conversation.ts";
+import TurnMinimap from "~/components/conversation/TurnMinimap.vue";
+import { useScrollAnchoring } from "~/composables/useScrollAnchoring.ts";
 
 function rectangle(top: number, height = 200): DOMRect {
   return {
@@ -113,7 +113,7 @@ describe("timeline mounted range recovery", () => {
     }));
     const currentTurnId = ref("turn-0");
     // Render through a parent: VTU inspects every getter when given nested mount props.
-    const wrapper = mount(
+    const wrapper = await mountSuspended(
       { render: () => h(TurnMinimap, { items, currentTurnId: currentTurnId.value }) },
       { attachTo: document.body },
     );

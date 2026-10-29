@@ -46,6 +46,267 @@ function jsonlRecords(values: JsonlRecord["value"][]): JsonlRecord[] {
 }
 
 describe("session normalization", () => {
+  it("I3 keeps the completion-backed original in source order before later commentary", () => {
+    const result = normalizeSession({
+      sourcePath: "completion-source-order.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: jsonlRecords([
+        { type: "session_meta", payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+        { type: "event_msg", payload: { type: "user_message", message: "Question" } },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            id: "original",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Actual answer" }],
+          },
+        },
+        {
+          type: "event_msg",
+          payload: { type: "agent_message", phase: "commentary", message: "Later commentary" },
+        },
+        {
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: "turn", last_agent_message: "Actual answer" },
+        },
+      ]),
+    });
+    const turn = result.session?.turns.at(0);
+    if (!turn) {
+      throw new Error("Expected original answer followed by commentary");
+    }
+    expect(
+      turn.assistantMessages.map((message) => ({ id: message.id, phase: message.phase })),
+    ).toEqual([
+      { id: "message-original", phase: null },
+      { id: `message-${expectedRaw(400)}`, phase: "commentary" },
+    ]);
+    expect(turn.assistantMessages.at(0)?.rawEventIds).toEqual([expectedRaw(300), expectedRaw(500)]);
+    expect(
+      turn.entryOrder?.filter((entry) => entry.kind === "message").map((entry) => entry.id),
+    ).toEqual([`message-${expectedRaw(200)}`, "message-original", `message-${expectedRaw(400)}`]);
+    expect(turn.finalAssistantMessageId).toBe("message-original");
+  });
+  it.each([
+    ["commentary-match", "commentary", "Actual answer", 2, "completion"],
+    ["null-phase-match", null, "Actual answer", 1, "message"],
+    ["explicit-final", "final_answer", "Actual answer", 1, "message"],
+    ["completion-only", "missing", "Actual answer", 1, "completion"],
+    ["whitespace", null, "   ", 1, null],
+    ["empty", null, "", 1, null],
+    ["absent", null, null, 1, null],
+  ] as const)(
+    "I2/I3 static completion eligibility preserves observed phase and associated raw evidence: %s",
+    (_name, phase, completion, count, finalSource) => {
+      const records = jsonlRecords([
+        { type: "session_meta", payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+        { type: "event_msg", payload: { type: "user_message", message: "Question" } },
+        ...(phase === "missing"
+          ? []
+          : [
+              {
+                type: "response_item",
+                payload: {
+                  type: "message",
+                  id: "original",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: "Actual answer" }],
+                  ...(phase === null ? {} : { phase }),
+                },
+              },
+            ]),
+        {
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            turn_id: "turn",
+            ...(completion === null ? {} : { last_agent_message: completion }),
+          },
+        },
+      ]);
+      const result = normalizeSession({
+        sourcePath: "completion-eligibility.jsonl",
+        scope: "active",
+        sessionIndexEntries: [],
+        stateSnapshot: null,
+        records,
+      });
+      const session = result.session;
+      const turn = session?.turns.at(0);
+      if (!session || !turn) {
+        throw new Error("Expected static completion qualification turn");
+      }
+      const completionId = expectedRaw((records.length - 1) * 100);
+      const messageId = "message-original";
+      const selected = turn.assistantMessages.find(
+        (message) => message.id === turn.finalAssistantMessageId,
+      );
+      const original = turn.assistantMessages.find((message) => message.id === messageId);
+      expect(turn.assistantMessages).toHaveLength(count);
+      expect(original?.phase).toBe(phase === "missing" ? undefined : phase);
+      expect(turn.finalAssistantMessageId).toBe(
+        finalSource === "message"
+          ? messageId
+          : finalSource === "completion"
+            ? `message-${completionId}`
+            : null,
+      );
+      const expectedEvidence =
+        finalSource === null
+          ? []
+          : finalSource === "completion"
+            ? [completionId]
+            : phase === null
+              ? [expectedRaw(300), completionId]
+              : [expectedRaw(300)];
+      expect(selected?.rawEventIds ?? []).toEqual(expectedEvidence);
+      expect(selected?.sourceMarkdown ?? null).toBe(finalSource === null ? null : "Actual answer");
+      expect(session.rawEvents.find((event) => event.id === completionId)?.payload).toEqual(
+        records.at(-1)?.value,
+      );
+    },
+  );
+  it("retains equal source prose when explicit message identities conflict across envelope forms", () => {
+    const result = normalizeSession({
+      sourcePath: "distinct-prose.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: jsonlRecords([
+        { type: "session_meta", payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+        {
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            id: "first-message",
+            phase: "final",
+            message: "Repeated actual prose",
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            id: "second-message",
+            role: "assistant",
+            phase: "final",
+            content: [{ type: "output_text", text: "Repeated actual prose" }],
+          },
+        },
+      ]),
+    });
+    const turn = result.session?.turns.at(0);
+    if (!turn) {
+      throw new Error("Expected distinct assistant fixture turn");
+    }
+    expect(turn.assistantMessages).toHaveLength(2);
+  });
+  it("retains nonempty reasoning content behind an empty supplied summary and deduplicates repeated representations", () => {
+    const result = normalizeSession({
+      sourcePath: "reasoning.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: jsonlRecords([
+        { type: "session_meta", payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
+        { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+        {
+          type: "response_item",
+          payload: {
+            type: "reasoning",
+            summary: [],
+            content: [{ type: "reasoning_text", text: "Nonempty body" }],
+          },
+        },
+        {
+          type: "response_item",
+          payload: {
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: "Summary" }],
+            content: [
+              { type: "reasoning_text", text: "Summary" },
+              { type: "reasoning_text", text: "Distinct body" },
+            ],
+          },
+        },
+      ]),
+    });
+    const turn = result.session?.turns.at(0);
+    if (!turn) {
+      throw new Error("Expected reasoning fixture turn");
+    }
+    expect(
+      turn.activities
+        .filter((activity) => activity.kind === "reasoning")
+        .map((activity) => activity.summary),
+    ).toEqual(["Nonempty body", "Summary", "Distinct body"]);
+  });
+  it.each([
+    [
+      "explicit final",
+      [
+        { type: "agent_message", message: "Actual answer", phase: "final_answer" },
+        { type: "agent_message", message: "Later commentary", phase: "commentary" },
+      ],
+      { type: "task_complete", turn_id: "turn" },
+      "Actual answer",
+    ],
+    [
+      "unqualified commentary",
+      [{ type: "agent_message", message: "Still working", phase: "commentary" }],
+      { type: "task_complete", turn_id: "turn" },
+      null,
+    ],
+    [
+      "matched completion",
+      [
+        { type: "agent_message", message: "Actual answer" },
+        { type: "agent_message", message: "Later commentary", phase: "commentary" },
+      ],
+      { type: "task_complete", turn_id: "turn", last_agent_message: "Actual answer" },
+      "Actual answer",
+    ],
+    [
+      "supplied completion body",
+      [{ type: "agent_message", message: "Progress", phase: "commentary" }],
+      { type: "task_complete", turn_id: "turn", last_agent_message: "Actual answer" },
+      "Actual answer",
+    ],
+  ] as const)(
+    "qualifies final identity from %s without replacing it with the last assistant",
+    (_name, messages, completion, expected) => {
+      const result = normalizeSession({
+        sourcePath: "qualified-final.jsonl",
+        scope: "active",
+        sessionIndexEntries: [],
+        stateSnapshot: null,
+        records: jsonlRecords([
+          { type: "session_meta", payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
+          { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+          { type: "event_msg", payload: { type: "user_message", message: "Question" } },
+          ...messages.map((payload) => ({ type: "event_msg", payload })),
+          { type: "event_msg", payload: completion },
+        ]),
+      });
+      const turn = result.session!.turns[0];
+      if (!turn) {
+        throw new Error("Expected qualified final fixture turn");
+      }
+      expect(
+        turn.assistantMessages.find((message) => message.id === turn.finalAssistantMessageId)
+          ?.sourceMarkdown ?? null,
+      ).toBe(expected);
+      expect(
+        turn.assistantMessages.filter((message) => message.sourceMarkdown === "Actual answer"),
+      ).toHaveLength(expected === null ? 0 : 1);
+    },
+  );
   it("normalizes a modern rollout without double-counting duplicated prose or token snapshots", async () => {
     const records = await fixtureRecords("modern.jsonl");
 
@@ -128,7 +389,7 @@ describe("session normalization", () => {
         "reasoning",
         "tool",
         "web_search",
-        "patch",
+        "file_change",
         "plan",
         "subagent",
         "compaction",
@@ -609,7 +870,7 @@ describe("session normalization", () => {
         name: "exec_command",
         input: { cmd: "pnpm test" },
         output: "passed",
-        status: "succeeded",
+        status: "unknown",
         rawEventIds: [expectedRaw(300), expectedRaw(500)],
       }),
     ]);

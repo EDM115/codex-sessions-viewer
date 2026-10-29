@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 
+import { adaptCoreTurnItem } from "#server/history/nativeItemAdapter.ts";
+import { nativeActivity } from "#shared/timeline/activityPresentation.ts";
+
 import {
   serializeAgentWork,
   serializeAssistantMessage,
@@ -324,7 +327,7 @@ describe("Markdown copy serializers", () => {
       {
         ...message("assistant", "Untimed response."),
         id: "assistant-untimed",
-        createdAt: null as unknown as string,
+        createdAt: null,
       },
       {
         ...message("assistant", "Final response."),
@@ -429,5 +432,76 @@ describe("Markdown copy serializers", () => {
     const markdown = serializeConversation(conversation);
     expect(markdown).toContain("cwd: null");
     expect(markdown).not.toContain("### User prompt");
+  });
+});
+
+describe("native file bodies in Markdown", () => {
+  it.each(["add", "delete"] as const)(
+    "retains the complete %s body including literal signs",
+    (kind) => {
+      const content = "UNIQUE_FILE_CONTENT\n+literal\n-literal\n";
+      const item = adaptCoreTurnItem({
+        type: "FileChange",
+        id: "file",
+        status: "completed",
+        changes: { "a.txt": { type: kind, content } },
+      })!;
+      const activity = nativeActivity(item, {
+        turnId: "turn-1",
+        sessionId: "parent",
+        rawEventIds: [],
+      })!;
+      const markdown = serializeAgentWork({
+        ...turn(),
+        activities: [activity],
+        entryOrder: [{ kind: "activity", id: "file" }],
+      });
+      expect(markdown).toContain(content);
+      expect(markdown).toContain("```text\n" + content + "```");
+      expect(markdown).not.toContain("```diff");
+      expect(markdown).toContain(kind === "add" ? "+3 −0" : "+0 −3");
+    },
+  );
+  it.each(["add", "delete"] as const)("keeps absent %s content unavailable", (kind) => {
+    const item = adaptCoreTurnItem({
+      type: "FileChange",
+      id: "file",
+      status: "completed",
+      changes: { "a.txt": { type: kind } },
+    })!;
+    const activity = nativeActivity(item, {
+      turnId: "turn-1",
+      sessionId: "parent",
+      rawEventIds: [],
+    })!;
+    const markdown = serializeAgentWork({
+      ...turn(),
+      activities: [activity],
+      entryOrder: [{ kind: "activity", id: "file" }],
+    });
+    expect(markdown).toContain("Recorded file content unavailable.");
+    expect(markdown).toContain("Line counts unavailable");
+    expect(markdown).not.toContain("```");
+  });
+  it("retains update unified diffs without turning them into full-file content", () => {
+    const diff = "@@ -1 +1 @@\n-old\n+new\n";
+    const item = adaptCoreTurnItem({
+      type: "FileChange",
+      id: "file",
+      status: "completed",
+      changes: { "a.txt": { type: "update", unified_diff: diff } },
+    })!;
+    const activity = nativeActivity(item, {
+      turnId: "turn-1",
+      sessionId: "parent",
+      rawEventIds: [],
+    })!;
+    expect(
+      serializeAgentWork({
+        ...turn(),
+        activities: [activity],
+        entryOrder: [{ kind: "activity", id: "file" }],
+      }),
+    ).toContain("```diff\n" + diff + "```");
   });
 });

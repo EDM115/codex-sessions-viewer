@@ -1,22 +1,25 @@
 <script setup lang="ts">
 import { PhRobot, PhWarning, PhGlobe, PhListChecks, PhInfo } from "@phosphor-icons/vue";
-import { computed, ref } from "vue";
 
-import type { ConversationActivity, ConversationMessage } from "#shared/types/conversation.ts";
+import type {
+  ConversationActivity,
+  ConversationMessage,
+  DisclosureDefault,
+} from "#shared/types/conversation.ts";
 import type { InspectorTarget, ResolvedAsset } from "#shared/types/repository.ts";
-
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import DiffBlock from "../content/DiffBlock.client.vue";
-import RichTextRenderer from "../content/RichTextRenderer.vue";
-import ConversationAttachment from "./ConversationAttachment.vue";
-import ConversationFileChanges from "./ConversationFileChanges.vue";
-import ConversationRaw from "./ConversationRaw.vue";
-import ConversationReasoning from "./ConversationReasoning.vue";
-import ConversationToolRow from "./ConversationToolRow.vue";
-import { bodyAssetIds, statusLabel, subagentLabel } from "./toolPresentation.ts";
+import {
+  activateChild,
+  bodyAssetIds,
+  statusLabel,
+  subagentLabel,
+} from "~/components/conversation/toolPresentation.ts";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 const props = defineProps<{
   activity?: ConversationActivity | undefined;
   message?: ConversationMessage | undefined;
+  disclosureKey?: string;
+  reasoningDefault?: DisclosureDefault;
+  toolCallsDefault?: DisclosureDefault;
   resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
   resolveFavicon?: (origin: string) => Promise<string | null>;
 }>();
@@ -25,7 +28,20 @@ const emit = defineEmits<{
   openMedia: [item: MediaViewerItem];
   openChild: [id: string];
 }>();
-const open = ref(false);
+const { open, toggle } = useWorkDisclosure(
+  () => `${props.disclosureKey ?? props.activity?.id}:entry`,
+  () =>
+    props.activity && "status" in props.activity
+      ? props.activity.status === "failed"
+        ? "error"
+        : props.activity.status === "cancelled"
+          ? "cancelled"
+          : props.activity.status === "running"
+            ? "running"
+            : "unknown"
+      : "unknown",
+  () => props.toolCallsDefault ?? "collapsed",
+);
 const entryId = computed(() => props.message?.id ?? props.activity?.id ?? "missing-entry");
 const attachments = computed(() => {
   if (props.message === undefined) {
@@ -69,7 +85,7 @@ function activityLabel(activity: ConversationActivity): string {
     <p class="conversation-work-entry__label">
       {{ message.role === "user" ? "You · steering" : "Assistant · progress" }}
     </p>
-    <RichTextRenderer
+    <ContentRichTextRenderer
       :document="message.body"
       :resolve-asset="resolveAsset"
       :resolve-favicon="resolveFavicon"
@@ -86,6 +102,8 @@ function activityLabel(activity: ConversationActivity): string {
   <ConversationReasoning
     v-else-if="activity?.kind === 'reasoning'"
     :activity="activity"
+    :disclosure-key="disclosureKey"
+    :reasoning-default="reasoningDefault"
     :resolve-asset="resolveAsset"
     :resolve-favicon="resolveFavicon"
     @open-media="emit('openMedia', $event)"
@@ -93,10 +111,17 @@ function activityLabel(activity: ConversationActivity): string {
   <ConversationToolRow
     v-else-if="activity?.kind === 'tool'"
     :activity="activity"
+    :disclosure-key="disclosureKey"
+    :tool-calls-default="toolCallsDefault"
     @inspect="emit('inspect', { type: 'activity', id: $event })"
     @open-child="emit('openChild', $event)"
   />
-  <ConversationFileChanges v-else-if="activity?.kind === 'file_change'" :activities="[activity]" />
+  <ConversationFileChanges
+    v-else-if="activity?.kind === 'file_change'"
+    :activities="[activity]"
+    :disclosure-key="disclosureKey"
+    :tool-calls-default="toolCallsDefault"
+  />
   <ConversationAttachment
     v-else-if="activity?.kind === 'media'"
     :asset-id="activity.assetId"
@@ -109,8 +134,8 @@ function activityLabel(activity: ConversationActivity): string {
     :class="'status' in activity && activity.status === 'failed' ? 'is-failed' : null"
     :data-entry-id="entryId"
   >
-    <details @toggle="open = ($event.currentTarget as HTMLDetailsElement).open">
-      <summary>
+    <details :open="open" @toggle="toggle">
+      <summary :aria-expanded="open">
         <PhWarning
           v-if="'status' in activity && activity.status === 'failed'"
           :size="18"
@@ -128,7 +153,7 @@ function activityLabel(activity: ConversationActivity): string {
         <p v-if="activity.kind === 'subagent' && activity.childThreadId !== null">
           <a
             :href="`/session/${encodeURIComponent(activity.childThreadId)}`"
-            @click.prevent="emit('openChild', activity.childThreadId)"
+            @click="activateChild($event, activity.childThreadId, (id) => emit('openChild', id))"
             >Open {{ activity.description }} conversation</a
           >
         </p>
@@ -145,7 +170,7 @@ function activityLabel(activity: ConversationActivity): string {
               : `${activity.resultCount} results`
           }}
         </p>
-        <DiffBlock v-if="activity.kind === 'patch'" :source="activity.patch" wrapped />
+        <ContentDiffBlock v-if="activity.kind === 'patch'" :source="activity.patch" wrapped />
         <button type="button" @click="emit('inspect', { type: 'activity', id: activity.id })">
           Inspect preserved record
         </button>

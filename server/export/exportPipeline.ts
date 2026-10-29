@@ -1,65 +1,76 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import type { CustomRecord } from "pagefind";
 
-import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import { catalogSession } from "../cache/catalogStore.ts";
-import { getCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
-import { openCacheDatabase } from "../cache/database.ts";
-import { SessionCacheUpdater } from "../cache/sourceManifest.ts";
-import { loadServerViewerConfig, resolvedTrustedMediaRoots } from "../core/config.ts";
-import type { ViewerPaths } from "../core/paths.ts";
-import { discoverSources } from "../ingestion/discoverSources.ts";
-import { selectSessionSources } from "../ingestion/selectSessionSources.ts";
-import { readGlobalState } from "../metadata/globalState.ts";
-import { readSessionIndex, type SessionIndexEntry } from "../metadata/sessionIndex.ts";
-import { snapshotStateDatabase, type StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
-import { classifyNormalizedSession, isThreadVisible } from "../metadata/threadClassification.ts";
-import { resolveThreadFields } from "../metadata/threadFields.ts";
+import { catalogSession } from "#server/cache/catalogStore.ts";
 import {
-  attachGuardianEvidence,
-  parseGuardianConversations,
-  associateApprovalReviews,
-  approvalEvidenceResult,
-  type GuardianReview,
-} from "../normalization/guardianEvidence.ts";
-import type { NormalizedSession } from "../normalization/normalizeSession.ts";
-import { resolveSubagentTopology } from "../normalization/subagentTopology.ts";
+  getCachedSession,
+  updateCachedSessionRichContent,
+} from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { SessionCacheUpdater } from "#server/cache/sourceManifest.ts";
+import { loadServerViewerConfig, resolvedTrustedMediaRoots } from "#server/core/config.ts";
+import type { ViewerPaths } from "#server/core/paths.ts";
 import {
   appendPagefindRecords,
   buildPagefindRecordSpool,
   createPagefindTurnRecords,
   type PagefindBuildOptions,
   type PagefindBuildResult,
-} from "./buildPagefind.ts";
+} from "#server/export/buildPagefind.ts";
 import {
   noopExportProgress,
   type ExportProgressSink,
   type ExportProgressStep,
-} from "./exportProgress.ts";
+} from "#server/export/exportProgress.ts";
 import {
   createOutputStagingDirectories,
   discardOutputStagingDirectories,
   publishStagedOutput,
   serializedJson,
   writeOutputFile,
-} from "./outputFiles.ts";
+} from "#server/export/outputFiles.ts";
 import {
   prepareConversationForExport,
   type PreparedConversationExport,
   type PrepareConversationExportOptions,
-} from "./prepareConversation.ts";
-import { writeConversationExport } from "./writeConversationExport.ts";
+} from "#server/export/prepareConversation.ts";
+import { writeConversationExport } from "#server/export/writeConversationExport.ts";
 import {
   publishCachedContent,
   publishGeneratedExportFiles,
   reconcileStaticSessionArtifacts,
   writeStaticPayloads,
-} from "./writeStaticPayloads.ts";
+} from "#server/export/writeStaticPayloads.ts";
+import { discoverSources } from "#server/ingestion/discoverSources.ts";
+import { selectSessionSources } from "#server/ingestion/selectSessionSources.ts";
+import { readGlobalState } from "#server/metadata/globalState.ts";
+import { readSessionIndex, type SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import {
+  snapshotStateDatabase,
+  type StateMetadataSnapshot,
+} from "#server/metadata/stateSnapshot.ts";
+import {
+  classifyNormalizedSession,
+  isThreadVisible,
+} from "#server/metadata/threadClassification.ts";
+import { resolveThreadFields } from "#server/metadata/threadFields.ts";
+import {
+  attachGuardianEvidence,
+  parseGuardianConversations,
+  parseParentNativeReviews,
+  parentNativeReviewAvailability,
+  associateApprovalReviews,
+  approvalEvidenceResult,
+  type GuardianReview,
+} from "#server/normalization/guardianEvidence.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import { resolveSubagentTopology } from "#server/normalization/subagentTopology.ts";
+import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 
 export interface StaticGenerateInput {
   outputRoot: string;
@@ -353,21 +364,41 @@ async function prepareConversations(
         .map(([id]) => id)
         .toSorted(),
     };
+    const reviews = [
+      ...parseParentNativeReviews(conversation),
+      ...(guardianReviews.get(sessionId) ?? []),
+    ];
     conversation.approvalEvidence = approvalEvidenceResult(
       sessionId,
       associateApprovalReviews(
         conversation.turns.flatMap((turn) =>
           turn.activities.filter((activity) => activity.kind === "tool"),
         ),
-        guardianReviews.get(sessionId) ?? [],
+        reviews,
         { sessionId },
       ),
+      {
+        availability: parentNativeReviewAvailability(conversation),
+        historyEpoch: null,
+        contentRevision: createHash("sha256")
+          .update(
+            JSON.stringify(
+              conversation.rawEvents.map((event) => [
+                event.id,
+                event.identity ?? null,
+                event.logicalVisibility ?? "unresolved",
+              ]),
+            ),
+          )
+          .digest("hex"),
+        coverage: null,
+      },
     );
     attachGuardianEvidence(
       conversation.turns.flatMap(({ activities }) =>
         activities.filter((activity) => activity.kind === "tool"),
       ),
-      guardianReviews.get(sessionId) ?? [],
+      reviews,
       { sessionId },
     );
     let prepared: PreparedConversationExport | null = null;

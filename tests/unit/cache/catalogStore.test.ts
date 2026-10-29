@@ -13,6 +13,7 @@ import {
   type CatalogSessionInput,
 } from "../../../server/cache/catalogStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
+import { parseSessionMetaBytes } from "../../../server/ingestion/sessionMetaPrefix.ts";
 import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
 import type { ConversationSummary } from "../../../shared/types/conversation.ts";
 
@@ -75,6 +76,56 @@ function catalogInput(id: string, options: Partial<CatalogSessionInput> = {}): C
 }
 
 describe("session catalog store", () => {
+  it("carries observed child identity from catalog classification without preparation or runtime status", () => {
+    const database = openCacheDatabase(":memory:");
+    const classification = classifyCatalogThread({
+      source: {
+        subAgent: {
+          thread_spawn: {
+            parent_thread_id: "parent",
+            agent_role: "reviewer",
+            agent_nickname: "Ada",
+            agent_path: "/review",
+          },
+        },
+      },
+    });
+    const meta = parseSessionMetaBytes(
+      "child.jsonl",
+      Buffer.from(
+        JSON.stringify({
+          type: "session_meta",
+          payload: { id: "child", parent_thread_id: "parent" },
+        }) + "\n",
+      ),
+    ).meta;
+    try {
+      upsertCatalogSessions(database, [
+        catalogInput("child", {
+          kind: "subagent",
+          parentThreadId: "parent",
+          structuralEvidence: {
+            version: 2,
+            origin: "rollout-prefix",
+            status: "found",
+            parentThreadIdHint: "parent",
+            meta,
+            classification,
+          },
+        }),
+      ]);
+      const child = listCatalogSessions(database, { scope: "active", parentThreadId: "parent" })
+        .items[0];
+      if (!child) {
+        throw new Error("Expected catalog child metadata");
+      }
+      expect(child.agent).toEqual({ name: "Ada", path: "/review", role: "reviewer" });
+      expect(child).not.toHaveProperty("status");
+      expect(catalogSession(database, "child")?.materialization).toBe("cold");
+    } finally {
+      database.close();
+    }
+  });
   it("carries disagreeing active and archived project recency order through the compatibility API", () => {
     const database = openCacheDatabase(":memory:");
     try {

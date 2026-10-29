@@ -1,17 +1,6 @@
 <script setup lang="ts">
 import { PhArrowDown, PhArrowLeft, PhArrowUp, PhSidebarSimple } from "@phosphor-icons/vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
-import {
-  computed,
-  defineAsyncComponent,
-  nextTick,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  shallowRef,
-  watch,
-  useId,
-} from "vue";
 
 import { activeVirtualRowIndex } from "#shared/timeline/turnMinimap.ts";
 import { installConversationScrollPolicy } from "#shared/timeline/virtualizer.ts";
@@ -22,24 +11,10 @@ import type {
   RepositoryMode,
   TurnChunk,
 } from "#shared/types/repository.ts";
-
-import { useConversationTimeline } from "../../composables/useConversationTimeline.ts";
-import { useMediaViewer } from "../../composables/useMediaViewer.ts";
-import { usePresentationSettings } from "../../composables/usePresentationSettings.ts";
-import {
-  type ScrollAnchorSnapshot,
-  useScrollAnchoring,
-} from "../../composables/useScrollAnchoring.ts";
-import { createConversationRepository } from "../../repositories/index.ts";
-import type { RepositoryRequester } from "../../repositories/live.ts";
-import UiButton from "../ui/UiButton.vue";
-import UiIconButton from "../ui/UiIconButton.vue";
-import ConversationInspector from "./ConversationInspector.vue";
-import ConversationTurn from "./ConversationTurn.vue";
-import { formatTimestamp } from "./format.ts";
-import TurnMinimap from "./TurnMinimap.vue";
-
-const MediaViewer = defineAsyncComponent(() => import("../media/MediaViewer.vue"));
+import { formatTimestamp } from "~/components/conversation/format.ts";
+import type { ScrollAnchorSnapshot } from "~/composables/useScrollAnchoring.ts";
+import { createConversationRepository } from "~/repositories/index.ts";
+import type { RepositoryRequester } from "~/repositories/live.ts";
 
 const props = defineProps<{
   embedded?: boolean;
@@ -78,8 +53,19 @@ const timeline = useConversationTimeline({
   sessionId: props.summary.id,
   repository,
   initialChunk: props.initialChunk,
+  anchorTurnId: () => currentTurnId.value,
 });
 const { settings } = usePresentationSettings();
+const approvals = useApprovalEvidence(
+  repository,
+  () => props.summary.id,
+  () =>
+    JSON.stringify([
+      timeline.turns.value.map((turn) => turn.id),
+      props.initialChunk.revision,
+      summaryState.value.revision,
+    ]),
+);
 const navigatorItems = shallowRef<readonly TurnNavigatorItem[]>([...props.navigator]);
 const workbench = ref<HTMLElement | null>(null);
 const scroller = ref<HTMLElement | null>(null);
@@ -88,7 +74,17 @@ let layoutObserver: ResizeObserver | null = null;
 let layoutWidth: number | null = null;
 let layoutRestorePending = false;
 let layoutRestoreQueued = false;
-const currentTurnId = ref(props.initialTargetTurnId ?? props.initialChunk.turns.at(-1)?.id ?? null);
+const savedPositions = useState<Record<string, ScrollAnchorSnapshot>>(
+  "static-conversation-positions",
+  () => ({}),
+);
+const savedPosition =
+  props.initialTargetTurnId === null ? savedPositions.value[props.summary.id] : null;
+const tailFollow = ref(props.initialTargetTurnId === null && !savedPosition);
+const latestAvailable = ref(false);
+const currentTurnId = ref(
+  props.initialTargetTurnId ?? savedPosition?.turnId ?? props.initialChunk.turns.at(-1)?.id ?? null,
+);
 const minimapOverlayOpen = ref(false);
 const inspectorTarget = shallowRef<InspectorTarget | null>(null);
 const inspectorRecord = shallowRef<InspectorRecord | null>(null);
@@ -98,6 +94,7 @@ const liveRefreshError = ref<string | null>(null);
 const virtualized = ref(false);
 let unsubscribe: () => void = () => undefined;
 let scrollFrame: number | null = null;
+let readerScrollPending = false;
 let disclosureAnchor: ScrollAnchorSnapshot | null = null;
 let beforeLoadRequest: Promise<void> | null = null;
 let liveRefreshRequest: Promise<void> | null = null;
@@ -249,8 +246,11 @@ async function loadBefore(): Promise<void> {
 }
 
 async function loadAfter(): Promise<void> {
-  await timeline.loadAfter();
-  await nextTick();
+  let anchor: ScrollAnchorSnapshot | null = null;
+  await timeline.loadAfter(() => {
+    anchor = anchoring.capture();
+  });
+  await anchoring.restore(anchor);
 }
 
 function updateCurrentTurn(): void {
@@ -280,7 +280,18 @@ function handleScroll(): void {
       return;
     }
     updateCurrentTurn();
+    if (!anchoring.active) {
+      tailFollow.value = container.scrollHeight - container.scrollTop - container.clientHeight < 80;
+      if (tailFollow.value) {
+        latestAvailable.value = false;
+      }
+    }
     anchoring.remember();
+    const shouldPage = readerScrollPending && !anchoring.active;
+    readerScrollPending = false;
+    if (!shouldPage) {
+      return;
+    }
     if (container.scrollTop < 560 && timeline.canLoadBefore.value) {
       void loadBefore();
     }
@@ -418,9 +429,8 @@ function closeInspector(): void {
 
 async function refreshLiveSession(): Promise<void> {
   const interactionVersion = jumpRequestVersion;
-  const wasNearEnd =
-    scroller.value !== null &&
-    scroller.value.scrollHeight - scroller.value.scrollTop - scroller.value.clientHeight < 160;
+  const wasNearEnd = tailFollow.value;
+  latestAvailable.value = !tailFollow.value;
   const [items, summary] = await Promise.all([
     repository.getTurnNavigator(props.summary.id),
     repository.getSession(props.summary.id),
@@ -519,6 +529,8 @@ function handleReadInput(event: Event): void {
   ) {
     return;
   }
+  readerScrollPending = true;
+  tailFollow.value = false;
   anchoring.cancel();
   timeline.cancelTarget();
   jumpRequestVersion += 1;
@@ -551,6 +563,9 @@ function restoreLayoutAnchor(): void {
   if (layoutRestorePending) {
     layoutRestoreQueued = true;
     return;
+  }
+  if (tailFollow.value && settings.liveFollow && scroller.value) {
+    scroller.value.scrollTop = scroller.value.scrollHeight;
   }
   const width = scroller.value?.clientWidth ?? 0;
   const anchor = anchoring.snapshot ?? anchoring.capture();
@@ -588,6 +603,9 @@ onMounted(async () => {
   });
   if (props.initialTargetTurnId !== null) {
     await jumpToTurn(props.initialTargetTurnId, false);
+  } else if (savedPosition) {
+    await jumpToTurn(savedPosition.turnId, false);
+    await anchoring.restore({ turnId: savedPosition.turnId, top: savedPosition.top });
   }
   await nextTick();
   anchoring.remember();
@@ -598,7 +616,26 @@ onMounted(async () => {
   });
 });
 
+async function latestContent() {
+  const turnId = navigatorItems.value.at(-1)?.turnId;
+  if (turnId) {
+    await jumpToTurn(turnId);
+  }
+  tailFollow.value = true;
+  latestAvailable.value = false;
+  virtualizer.value.scrollToIndex(Math.max(0, timeline.turns.value.length - 1), { align: "end" });
+}
+
 onBeforeUnmount(() => {
+  const position = anchoring.capture();
+  if (position) {
+    savedPositions.value = Object.fromEntries([
+      ...Object.entries(savedPositions.value)
+        .filter(([id]) => id !== props.summary.id)
+        .slice(-31),
+      [props.summary.id, { turnId: position.turnId, top: position.top }],
+    ]);
+  }
   disposed = true;
   timeline.cancelTarget();
   anchoring.cancel();
@@ -650,12 +687,20 @@ onBeforeUnmount(() => {
           >Updated {{ formatTimestamp(summaryState.updatedAt, settings.timestampFormat) }}</time
         >
       </div>
+      <ConversationApprovals
+        :evidence="approvals.evidence.value"
+        :loading="approvals.loading.value"
+        :error="approvals.error.value"
+        :disclosure-key="summary.id"
+        @load="approvals.load"
+      />
     </header>
 
     <section class="conversation-stage">
       <div
         ref="scroller"
         class="conversation-timeline"
+        :data-retained-turns="timeline.turns.value.length"
         aria-label="Conversation timeline"
         tabindex="0"
         @scroll.passive="handleScroll"
@@ -663,6 +708,14 @@ onBeforeUnmount(() => {
         @pointerdown.capture="handleReadInput"
         @keydown.capture="handleReadInput"
       >
+        <button
+          v-if="latestAvailable || !tailFollow"
+          class="conversation-latest"
+          type="button"
+          @click="latestContent"
+        >
+          Latest content
+        </button>
         <div class="conversation-timeline__load conversation-timeline__load--before">
           <UiButton
             v-if="timeline.canLoadBefore.value"
@@ -697,7 +750,7 @@ onBeforeUnmount(() => {
           >
             <ConversationTurn
               v-if="timeline.turns.value[row.index] !== undefined"
-              :turn="timeline.turns.value[row.index]!"
+              :turn="approvals.present(timeline.turns.value[row.index]!)"
               :anchor-prefix="turnAnchorPrefix"
               :reasoning-default="settings.reasoningDefault"
               :resolve-asset="resolveAsset"
@@ -716,7 +769,7 @@ onBeforeUnmount(() => {
           <ConversationTurn
             v-for="turn in timeline.turns.value"
             :key="turn.id"
-            :turn="turn"
+            :turn="approvals.present(turn)"
             :anchor-prefix="turnAnchorPrefix"
             :reasoning-default="settings.reasoningDefault"
             :resolve-asset="resolveAsset"
@@ -748,7 +801,7 @@ onBeforeUnmount(() => {
         :class="minimapOverlayOpen ? 'is-open' : null"
         @keydown.esc.stop="closeMinimapOverlay"
       >
-        <TurnMinimap
+        <ConversationTurnMinimap
           :items="navigatorItems"
           :current-turn-id="currentTurnId"
           :pending-turn-id="timeline.pendingTurnId.value"
@@ -769,7 +822,7 @@ onBeforeUnmount(() => {
       />
     </section>
   </component>
-  <MediaViewer
+  <LazyMediaViewer
     v-if="mediaViewer.item.value !== null"
     :item="mediaViewer.item.value"
     :background="workbench ?? undefined"
@@ -778,6 +831,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.conversation-latest {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
 .conversation-heading__actions {
   display: flex;
   align-items: center;

@@ -4,11 +4,92 @@ import type { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
 import {
-  conversationActivitySchema,
-  type SourceGeneration,
-} from "../../shared/types/conversation.ts";
-import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { DeepSearchJob, PreparationResult } from "../../shared/types/library.ts";
+  catalogSession,
+  listAllCatalogSessions,
+  listCatalogAuxiliaryChildren,
+  listCatalogChildren,
+  setCatalogMaterialization,
+  storeValidatedCatalogClassification,
+} from "#server/cache/catalogStore.ts";
+import {
+  hasCachedSession,
+  updateCachedSessionRichContent,
+} from "#server/cache/conversationStore.ts";
+import {
+  getCachedSessionSummary,
+  getCachedTurnsInRange,
+  historyEpochStorage,
+} from "#server/cache/repositoryStore.ts";
+import { countCachedSearchResults } from "#server/cache/searchStore.ts";
+import {
+  CACHE_PARSER_VERSION,
+  SessionCacheUpdater,
+  refreshUnchangedSourceManifest,
+  getSourceManifestEntry,
+  type StableJsonlReader,
+} from "#server/cache/sourceManifest.ts";
+import { prepareConversationForExport } from "#server/export/prepareConversation.ts";
+import { HistoryEpochAuthority } from "#server/history/historyEpochAuthority.ts";
+import { HistoryPager, HistoryReloadError } from "#server/history/historyPager.ts";
+import {
+  NativeHistoryService,
+  unavailableNativeHistory,
+} from "#server/history/nativeHistoryService.ts";
+import {
+  type DiscoveredRolloutSource,
+  type SourceDiscoveryResult,
+} from "#server/ingestion/discoverSources.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { recoverCatalogSources } from "#server/ingestion/recoverCatalogSources.ts";
+import { rolloutRefFromSource } from "#server/ingestion/rolloutIdentity.ts";
+import type { ResolvedRolloutLineage } from "#server/ingestion/rolloutLineage.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
+import {
+  observeSessionMetaSource,
+  readSessionMetaPrefix,
+  parseSessionMetaBytes,
+  CATALOG_EVIDENCE_VERSION,
+  type SessionMetaPrefixObservation,
+} from "#server/ingestion/sessionMetaPrefix.ts";
+import {
+  watchSources,
+  type SourceChange,
+  type SourceWatchBatch,
+  type SourceWatcher,
+  type WatchSourcesOptions,
+} from "#server/ingestion/watchSources.ts";
+import { refreshLiveCatalog } from "#server/live/catalogBuilder.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import {
+  MaterializationQueue,
+  type MaterializationPriority,
+} from "#server/live/materializationQueue.ts";
+import {
+  readCatalogMetadata,
+  type CatalogMetadataSnapshot,
+} from "#server/metadata/catalogMetadata.ts";
+import type { GlobalStateMetadata } from "#server/metadata/globalState.ts";
+import { HistorySnapshotManager } from "#server/metadata/historySnapshot.ts";
+import type { SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import type { StateMetadataSnapshot } from "#server/metadata/stateSnapshot.ts";
+import {
+  catalogVisibilitySql,
+  classifyThreadMetadata,
+  rawThreadMetadata,
+} from "#server/metadata/threadClassification.ts";
+import {
+  attachGuardianEvidence,
+  associateApprovalReviews,
+  approvalEvidenceForHistoryPage,
+  parseParentNativeReviews,
+  parseGuardianTurns,
+  type GuardianReview,
+} from "#server/normalization/guardianEvidence.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import { enrichSubagentActivities } from "#server/normalization/subagentTopology.ts";
+import { conversationActivitySchema, type SourceGeneration } from "#shared/types/conversation.ts";
+import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import type { DeepSearchJob, PreparationResult } from "#shared/types/library.ts";
 import type {
   SearchQuery,
   ViewerInvalidation,
@@ -16,70 +97,7 @@ import type {
   HistoryPageQuery,
   HistoryItemQuery,
   RepositoryRequestOptions,
-} from "../../shared/types/repository.ts";
-import {
-  catalogSession,
-  listCatalogAuxiliaryChildren,
-  listCatalogChildren,
-  setCatalogMaterialization,
-  storeValidatedCatalogClassification,
-} from "../cache/catalogStore.ts";
-import { hasCachedSession, updateCachedSessionRichContent } from "../cache/conversationStore.ts";
-import { getCachedSessionSummary, getCachedTurnsInRange } from "../cache/repositoryStore.ts";
-import { countCachedSearchResults } from "../cache/searchStore.ts";
-import {
-  CACHE_PARSER_VERSION,
-  SessionCacheUpdater,
-  refreshUnchangedSourceManifest,
-  getSourceManifestEntry,
-  type StableJsonlReader,
-} from "../cache/sourceManifest.ts";
-import { prepareConversationForExport } from "../export/prepareConversation.ts";
-import { NativeHistoryService, unavailableNativeHistory } from "../history/nativeHistoryService.ts";
-import {
-  type DiscoveredRolloutSource,
-  type SourceDiscoveryResult,
-} from "../ingestion/discoverSources.ts";
-import { readStableJsonl } from "../ingestion/jsonlStream.ts";
-import { recoverCatalogSources } from "../ingestion/recoverCatalogSources.ts";
-import { rolloutRefFromSource } from "../ingestion/rolloutIdentity.ts";
-import type { ResolvedRolloutLineage } from "../ingestion/rolloutLineage.ts";
-import {
-  observeSessionMetaSource,
-  readSessionMetaPrefix,
-  parseSessionMetaBytes,
-  CATALOG_EVIDENCE_VERSION,
-  type SessionMetaPrefixObservation,
-} from "../ingestion/sessionMetaPrefix.ts";
-import {
-  watchSources,
-  type SourceChange,
-  type SourceWatchBatch,
-  type SourceWatcher,
-  type WatchSourcesOptions,
-} from "../ingestion/watchSources.ts";
-import { readCatalogMetadata, type CatalogMetadataSnapshot } from "../metadata/catalogMetadata.ts";
-import type { GlobalStateMetadata } from "../metadata/globalState.ts";
-import { HistorySnapshotManager } from "../metadata/historySnapshot.ts";
-import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
-import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
-import {
-  catalogVisibilitySql,
-  classifyThreadMetadata,
-  rawThreadMetadata,
-} from "../metadata/threadClassification.ts";
-import {
-  attachGuardianEvidence,
-  associateApprovalReviews,
-  approvalEvidenceResult,
-  parseGuardianTurns,
-  type GuardianReview,
-} from "../normalization/guardianEvidence.ts";
-import type { NormalizedSession } from "../normalization/normalizeSession.ts";
-import { enrichSubagentActivities } from "../normalization/subagentTopology.ts";
-import { refreshLiveCatalog } from "./catalogBuilder.ts";
-import { InvalidationBus } from "./invalidationBus.ts";
-import { MaterializationQueue, type MaterializationPriority } from "./materializationQueue.ts";
+} from "#shared/types/repository.ts";
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 30_000;
 
@@ -133,6 +151,8 @@ export class LiveReconciler {
   readonly #codexHome: string;
   readonly #database: DatabaseSync;
   readonly #nativeHistory: NativeHistoryService;
+  readonly #historyPager: HistoryPager;
+  readonly #rolloutStore: RolloutStore;
   readonly #debounceMs: number | undefined;
   readonly #reconciliationIntervalMs: number;
   readonly #fetchFavicons: boolean;
@@ -178,6 +198,10 @@ export class LiveReconciler {
     this.#cacheDir = options.cacheDir;
     this.#codexHome = resolve(options.codexHome);
     this.#database = options.database;
+    const epochAuthority = new HistoryEpochAuthority(historyEpochStorage(options.database));
+    this.#rolloutStore = new RolloutStore({
+      cacheDirectory: join(options.cacheDir, "decoded-rollouts"),
+    });
     this.#nativeHistory = new NativeHistoryService(
       options.database,
       new HistorySnapshotManager({
@@ -185,7 +209,14 @@ export class LiveReconciler {
         sourceWal: join(this.#codexHome, "thread_history_1.sqlite-wal"),
         snapshotRoot: join(options.cacheDir, "history-snapshots"),
       }),
+      { epochAuthority },
     );
+    this.#historyPager = new HistoryPager({
+      database: options.database,
+      epochAuthority,
+      native: this.#nativeHistory,
+      open: (ref, signal) => this.#rolloutStore.open(ref, signal),
+    });
     this.#debounceMs = options.debounceMs;
     this.#reconciliationIntervalMs = interval;
     this.#fetchFavicons = options.fetchFavicons ?? true;
@@ -361,7 +392,10 @@ export class LiveReconciler {
       });
   }
   async #attachGuardianReviews(session: NormalizedSession): Promise<void> {
-    const reviews = await this.#guardianReviews(session.summary.id);
+    const reviews = [
+      ...parseParentNativeReviews(session),
+      ...(await this.#guardianReviews(session.summary.id)),
+    ];
     const allTools = this.#approvalTools(session.summary.id, reviews);
     const associations = associateApprovalReviews(allTools, reviews, {
       sessionId: session.summary.id,
@@ -376,14 +410,30 @@ export class LiveReconciler {
     );
   }
 
-  async getApprovalEvidence(sessionId: string) {
-    if (catalogSession(this.#database, sessionId) === null) {
-      throw new Error("Session not found");
+  async getApprovalEvidence(sessionId: string, options: RepositoryRequestOptions = {}) {
+    const release = this.#materializationQueue.holdSelected();
+    try {
+      const selection = this.#historySelection(sessionId);
+      const page = await this.#historyPager.readRawEvidence(
+        selection.ref,
+        selection.references,
+        { anchor: { kind: "latest" } },
+        options.signal,
+        selection.sourceRevision,
+      );
+      const auxiliary = await this.#guardianReviews(sessionId);
+      options.signal?.throwIfAborted();
+      const current = catalogSession(this.#database, sessionId);
+      if (
+        current?.summary.sourcePath !== selection.ref.sourcePath ||
+        current.sourceRevision !== selection.sourceRevision
+      ) {
+        throw new HistoryReloadError("history.selection_changed");
+      }
+      return approvalEvidenceForHistoryPage(page, auxiliary);
+    } finally {
+      release();
     }
-    const reviews = await this.#guardianReviews(sessionId);
-    const tools = this.#approvalTools(sessionId, reviews);
-    const result = associateApprovalReviews(tools, reviews, { sessionId });
-    return approvalEvidenceResult(sessionId, result);
   }
 
   #enrichSubagents(session: NormalizedSession): void {
@@ -1191,6 +1241,88 @@ export class LiveReconciler {
     return this.#nativeHistory.read(lineage, source, query, options.signal);
   }
 
+  #historySelection(id: string) {
+    const record = catalogSession(this.#database, id);
+    if (!record) {
+      throw new Error("Session not found");
+    }
+    const references = listAllCatalogSessions(this.#database).flatMap((entry) => {
+      if (!entry.summary.sourcePath) {
+        return [];
+      }
+      const ref = rolloutRefFromSource(
+        entry.summary.sourcePath,
+        entry.structuralEvidence?.meta ?? null,
+      );
+      return [
+        {
+          ...ref,
+          stableThreadId: entry.summary.id,
+          physicalRolloutId: ref.physicalRolloutId?.startsWith("path:")
+            ? entry.summary.id
+            : ref.physicalRolloutId,
+        },
+      ];
+    });
+    const ref = references.find((entry) => entry.stableThreadId === id);
+    if (!ref) {
+      throw new Error("rollout.source_unresolved");
+    }
+    return { ref, references, sourceRevision: record.sourceRevision };
+  }
+
+  async getHistoryPage(
+    id: string,
+    query: HistoryPageQuery,
+    options: RepositoryRequestOptions = {},
+  ) {
+    const release = this.#materializationQueue.holdSelected();
+    try {
+      const selection = this.#historySelection(id);
+      const result = await this.#historyPager.read(
+        selection.ref,
+        selection.references,
+        query,
+        options.signal,
+        selection.sourceRevision,
+      );
+      const current = catalogSession(this.#database, id);
+      if (
+        current?.summary.sourcePath !== selection.ref.sourcePath ||
+        current.sourceRevision !== selection.sourceRevision
+      ) {
+        throw new HistoryReloadError("history.selection_changed");
+      }
+      return result;
+    } finally {
+      release();
+    }
+  }
+
+  async getTurnItems(id: string, query: HistoryItemQuery, options: RepositoryRequestOptions = {}) {
+    const release = this.#materializationQueue.holdSelected();
+    try {
+      const selection = this.#historySelection(id);
+      const result = await this.#historyPager.readItems(
+        selection.ref,
+        selection.references,
+        query,
+        options.signal,
+        selection.sourceRevision,
+      );
+      const current = catalogSession(this.#database, id);
+      if (
+        current?.summary.sourcePath !== selection.ref.sourcePath ||
+        current.sourceRevision !== selection.sourceRevision
+      ) {
+        throw new HistoryReloadError("history.selection_changed");
+      }
+      return result;
+    } finally {
+      release();
+    }
+  }
+
   async start(): Promise<void> {
     if (this.#started || this.#watcher !== null) {
       throw new Error("The live reconciler has already been started.");
@@ -1258,6 +1390,8 @@ export class LiveReconciler {
       return;
     }
     this.#closed = true;
+    await this.#historyPager.close();
+    await this.#rolloutStore.close();
     await this.#nativeHistory.close();
     this.#recoveryController?.abort();
     const materializationClosing = this.#materializationQueue.close();

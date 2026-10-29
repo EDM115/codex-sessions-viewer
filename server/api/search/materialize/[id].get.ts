@@ -1,7 +1,5 @@
-import { defineEventHandler } from "h3";
-
-import { useLiveViewerRuntime } from "../../../live/requestContext.ts";
-import { deepSearchId, notFound } from "../../_validation.ts";
+import { deepSearchId, notFound } from "#server/api/_validation.ts";
+import { useLiveViewerRuntime } from "#server/live/requestContext.ts";
 
 export default defineEventHandler(async (event) => {
   const id = await deepSearchId(event);

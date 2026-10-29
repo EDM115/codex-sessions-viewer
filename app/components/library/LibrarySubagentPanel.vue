@@ -1,17 +1,12 @@
 <script setup lang="ts">
 import { PhArrowLeft, PhArrowSquareOut, PhX } from "@phosphor-icons/vue";
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from "vue";
 
 import { recentChunkCursor } from "#shared/timeline/conversation.ts";
 import type { ConversationSummary, TurnNavigatorItem } from "#shared/types/conversation.ts";
-import type { LibraryEntry } from "#shared/types/library.ts";
+import type { CatalogSessionMetadata, LibraryEntry } from "#shared/types/library.ts";
 import type { RepositoryMode, TurnChunk } from "#shared/types/repository.ts";
-
-import { createConversationRepository } from "../../repositories/index.ts";
-import type { RepositoryRequester } from "../../repositories/live.ts";
-import ConversationView from "../conversation/ConversationView.vue";
-import UiButton from "../ui/UiButton.vue";
-import UiIconButton from "../ui/UiIconButton.vue";
+import { createConversationRepository } from "~/repositories/index.ts";
+import type { RepositoryRequester } from "~/repositories/live.ts";
 
 const props = defineProps<{
   parentId: string;
@@ -20,12 +15,14 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ close: []; select: [sessionId: string | null] }>();
 const headingId = useId();
-const requestFetch = useRequestFetch() as unknown as (
-  path: string,
-  options: { signal?: AbortSignal },
-) => Promise<unknown>;
+const requestFetch = useRequestFetch();
 const requester: RepositoryRequester = (path, options = {}) =>
-  requestFetch(path, { signal: options.signal }) as Promise<unknown>;
+  requestFetch<unknown, string, "get" | "post" | "delete">(path, {
+    method: options.method === "POST" ? "post" : options.method === "DELETE" ? "delete" : "get",
+    signal: options.signal,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
+  });
 const repository = computed(() => createConversationRepository(props.mode, requester));
 const items = shallowRef<LibraryEntry[]>([]);
 const nextCursor = ref<string | null>(null);
@@ -34,11 +31,17 @@ const listLoading = ref(false);
 const listError = ref<string | null>(null);
 const transcriptLoading = ref(false);
 const transcriptError = ref<string | null>(null);
-const transcript = shallowRef<{
-  summary: ConversationSummary;
-  navigator: TurnNavigatorItem[];
-  chunk: TurnChunk;
-} | null>(null);
+const transcript = shallowRef<
+  | {
+      kind: "legacy";
+      summary: ConversationSummary;
+      navigator: TurnNavigatorItem[];
+      chunk: TurnChunk;
+    }
+  | { kind: "progressive"; metadata: CatalogSessionMetadata }
+  | null
+>(null);
+let transcriptController: AbortController | null = null;
 let listVersion = 0;
 let transcriptVersion = 0;
 let retryAppend = false;
@@ -49,8 +52,17 @@ let stopSubscription: () => void = () => undefined;
 
 const selectedTitle = computed(() => {
   const item = items.value.find((entry) => entry.id === props.selectedId);
-  return transcript.value?.summary.title ?? item?.title ?? "Subagent";
+  return (
+    (transcript.value?.kind === "progressive"
+      ? transcript.value.metadata.title
+      : transcript.value?.summary.title) ??
+    item?.title ??
+    "Subagent"
+  );
 });
+const selectedAgent = computed(
+  () => items.value.find((item) => item.id === props.selectedId)?.agent,
+);
 
 async function loadList(append = false): Promise<void> {
   const version = ++listVersion;
@@ -110,6 +122,8 @@ async function loadList(append = false): Promise<void> {
 
 async function loadTranscript(): Promise<void> {
   const version = ++transcriptVersion;
+  transcriptController?.abort();
+  transcriptController = new AbortController();
   const id = props.selectedId;
   transcript.value = null;
   transcriptError.value = null;
@@ -119,6 +133,16 @@ async function loadTranscript(): Promise<void> {
   }
   const source = repository.value;
   try {
+    if (source.capabilities().progressiveHistory) {
+      const metadata = await source.getSessionMetadata(id, { signal: transcriptController.signal });
+      if (metadata.id !== id) {
+        throw new Error("Subagent metadata belongs to a different conversation");
+      }
+      if (version === transcriptVersion) {
+        transcript.value = { kind: "progressive", metadata };
+      }
+      return;
+    }
     const [summary, navigator] = await Promise.all([
       source.getSession(id),
       source.getTurnNavigator(id),
@@ -130,8 +154,11 @@ async function loadTranscript(): Promise<void> {
       cursor: recentChunkCursor(summary.turnCount),
       limit: 20,
     });
+    if (summary.id !== id || chunk.sessionId !== id || chunk.revision !== summary.revision) {
+      throw new Error("Subagent transcript changed, reload this conversation");
+    }
     if (version === transcriptVersion) {
-      transcript.value = { summary, navigator, chunk };
+      transcript.value = { kind: "legacy", summary, navigator, chunk };
     }
   } catch (error) {
     if (version === transcriptVersion) {
@@ -182,6 +209,7 @@ onBeforeUnmount(() => {
   stopSubscription();
   listVersion++;
   transcriptVersion++;
+  transcriptController?.abort();
 });
 </script>
 
@@ -219,6 +247,11 @@ onBeforeUnmount(() => {
             @click="emit('select', item.id)"
           >
             <strong>{{ item.title }}</strong>
+            <span v-if="item.agent?.name && item.agent.name !== item.title">{{
+              item.agent.name
+            }}</span>
+            <span v-if="item.agent?.role">{{ item.agent.role }}</span>
+            <span v-if="item.agent?.path">{{ item.agent.path }}</span>
           </button>
         </li>
       </ul>
@@ -244,7 +277,7 @@ onBeforeUnmount(() => {
         <UiButton @click="loadTranscript">Retry loading conversation</UiButton>
       </div>
       <ConversationView
-        v-else-if="transcript"
+        v-else-if="transcript?.kind === 'legacy'"
         :key="transcript.summary.id"
         embedded
         :summary="transcript.summary"
@@ -254,6 +287,17 @@ onBeforeUnmount(() => {
         :mode="mode"
         @open-child="emit('select', $event)"
       />
+      <ConversationProgressiveConversationView
+        v-else-if="transcript?.kind === 'progressive'"
+        :key="transcript.metadata.id"
+        :metadata="transcript.metadata"
+        :repository="repository"
+        :target-turn-id="null"
+        @open-child="emit('select', $event)"
+      />
+      <p v-if="selectedAgent?.role" class="subagent-panel__identity">
+        {{ selectedAgent.name ?? selectedTitle }} · {{ selectedAgent.role }}
+      </p>
     </div>
   </aside>
 </template>

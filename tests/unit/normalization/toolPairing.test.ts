@@ -73,6 +73,12 @@ describe("tool call pairing", () => {
     expect(result.activities).toEqual([
       {
         id: "tool-call-1",
+        presentation: expect.objectContaining({
+          category: "read",
+          evidenceKind: "direct",
+          callId: "call-1",
+          status: "unknown",
+        }),
         turnId: "turn-1",
         createdAt: "2026-01-01T10:00:00.000Z",
         rawEventIds: [expectedRaw(100), expectedRaw(400)],
@@ -80,7 +86,7 @@ describe("tool call pairing", () => {
         namespace: "filesystem",
         name: "read_file",
         callId: "call-1",
-        status: "succeeded",
+        status: "unknown",
         startedAt: "2026-01-01T10:00:00.000Z",
         completedAt: "2026-01-01T10:00:00.250Z",
         durationMs: 250,
@@ -268,7 +274,7 @@ describe("tool call pairing", () => {
     [{ isError: true, error: "bare error" }, "failed", "bare error"],
     [{ isError: true, message: "bare message" }, "failed", "bare message"],
     [{ isError: true }, "failed", "Tool returned an error"],
-    [{ value: "ok" }, "succeeded", null],
+    [{ value: "ok" }, "unknown", null],
     ["primitive", "unknown", null],
   ] as const)("normalizes MCP result variant %#", (resultValue, expectedStatus, expectedError) => {
     const result = pairToolCalls(
@@ -345,7 +351,7 @@ describe("tool call pairing", () => {
           namespace: "codex",
           name: "tool_search",
           output: null,
-          status: "succeeded",
+          status: "unknown",
         }),
         expect.objectContaining({
           callId: "reverse-time",
@@ -365,5 +371,308 @@ describe("tool call pairing", () => {
       ]),
     );
     expect(result.consumedEventIds).toHaveLength(5);
+  });
+});
+
+describe("host-recorded Code Mode delta inventories", () => {
+  const time = "2026-01-01T10:00:00.000Z";
+  const metadata = (cell: string, calls: unknown, complete?: boolean) => ({
+    cell_id: cell,
+    ...(calls === undefined ? {} : { executed_tool_calls: calls }),
+    ...(complete === undefined ? {} : { tool_calls_complete: complete }),
+  });
+  it("aggregates exec/wait deltas once, keeps repeated arguments distinct and never pairs printed results positionally", () => {
+    const first = event(1, time, {
+      type: "custom_tool_call",
+      call_id: "exec",
+      namespace: "functions",
+      name: "exec",
+      input:
+        "const a=await tools.exec_command({cmd:'first'}); const b=await tools.exec_command({cmd:'second'}); text(b); text(a)",
+    });
+    const firstOutput = event(2, time, {
+      type: "custom_tool_call_output",
+      call_id: "exec",
+      output: [
+        { exit_code: 7, output: "second" },
+        { exit_code: 0, output: "first" },
+      ],
+      internal_chat_message_metadata_passthrough: metadata("cell-17", [
+        { name: "exec_command", arguments: { cmd: "first" } },
+        { name: "exec_command", arguments: { cmd: "second" } },
+      ]),
+    });
+    const events = scoped(
+      first,
+      firstOutput,
+      event(3, time, {
+        type: "function_call",
+        call_id: "wait1",
+        namespace: "functions",
+        name: "wait",
+        arguments: { cell_id: "cell-17" },
+      }),
+      event(4, time, {
+        type: "function_call_output",
+        call_id: "wait1",
+        output: "completed",
+        internal_chat_message_metadata_passthrough: metadata(
+          "cell-17",
+          [{ name: "exec_command", arguments: { cmd: "first" } }],
+          false,
+        ),
+      }),
+      event(5, time, {
+        type: "function_call",
+        call_id: "wait2",
+        namespace: "functions",
+        name: "wait",
+        arguments: { cell_id: "cell-17" },
+      }),
+      event(6, time, {
+        type: "function_call_output",
+        call_id: "wait2",
+        output: "completed",
+        internal_chat_message_metadata_passthrough: metadata("cell-17", [], true),
+      }),
+    );
+    const result = pairToolCalls([...events, { event: firstOutput, turnId: "turn-1" }]);
+    const attempts = result.activities.filter(
+      (activity) => activity.presentation?.evidenceKind === "host-attempt",
+    );
+    expect(attempts).toHaveLength(3);
+    expect(attempts.map((activity) => (activity.kind === "tool" ? activity.input : null))).toEqual([
+      { cmd: "first" },
+      { cmd: "second" },
+      { cmd: "first" },
+    ]);
+    expect(new Set(attempts.map((activity) => activity.id)).size).toBe(3);
+    for (const attempt of attempts) {
+      expect(attempt).toMatchObject({
+        callId: null,
+        status: "unknown",
+        output: null,
+        durationMs: null,
+        presentation: { cellId: "cell-17", evidenceKind: "host-attempt" },
+      });
+    }
+    expect(result.activities.find((activity) => activity.id === "tool-exec")).toMatchObject({
+      input: expect.stringContaining("text(b); text(a)"),
+      codeMode: {
+        cellId: "cell-17",
+        completeness: "complete",
+        outerActivityIds: ["tool-exec", "tool-wait1", "tool-wait2"],
+      },
+    });
+  });
+  it("distinguishes absent, partial and complete empty inventories and keeps direct invocation evidence single", () => {
+    for (const [calls, complete, expected] of [
+      [undefined, undefined, "absent"],
+      [[], undefined, "partial"],
+      [[], true, "complete"],
+    ] as const) {
+      const result = pairToolCalls(
+        scoped(
+          event(1, time, {
+            type: "custom_tool_call_output",
+            call_id: "empty",
+            output: null,
+            internal_chat_message_metadata_passthrough: metadata("empty-cell", calls, complete),
+          }),
+        ),
+      );
+      expect(result.activities).toHaveLength(1);
+      expect(result.activities[0]).toMatchObject({ codeMode: { completeness: expected } });
+    }
+    const result = pairToolCalls(
+      scoped(
+        event(1, time, {
+          type: "function_call",
+          call_id: "direct",
+          name: "exec_command",
+          arguments: { cmd: "direct" },
+        }),
+        event(2, time, {
+          type: "function_call_output",
+          call_id: "direct",
+          output: { exit_code: 7, output: "direct failed" },
+          internal_chat_message_metadata_passthrough: {
+            executed_tool_calls: [{ name: "exec_command", arguments: { cmd: "direct" } }],
+            tool_calls_complete: true,
+          },
+        }),
+      ),
+    );
+    expect(result.activities).toHaveLength(1);
+    expect(result.activities[0]).toMatchObject({
+      callId: "direct",
+      status: "failed",
+      codeMode: { cellId: null, completeness: "complete" },
+    });
+  });
+  it("uses recorded dynamic invocation names, preserves truncated arguments and ignores script/printed metadata", () => {
+    const truncation = {
+      _codex_executed_tool_call_truncated: { reason: "size", original_bytes: 10000 },
+    };
+    const result = pairToolCalls(
+      scoped(
+        event(1, time, {
+          type: "custom_tool_call",
+          call_id: "dynamic",
+          namespace: "functions",
+          name: "exec",
+          input: "try { await tools[name](args) } catch {}",
+        }),
+        event(2, time, {
+          type: "custom_tool_call_output",
+          call_id: "dynamic",
+          output: { isError: false, executed_tool_calls: [{ name: "fake", arguments: {} }] },
+          internal_chat_message_metadata_passthrough: metadata(
+            "dynamic-cell",
+            [{ name: "mcp__service__operation", arguments: truncation }],
+            true,
+          ),
+        }),
+      ),
+    );
+    const attempts = result.activities.filter(
+      (activity) => activity.presentation?.evidenceKind === "host-attempt",
+    );
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      name: "mcp__service__operation",
+      input: truncation,
+      status: "unknown",
+      output: null,
+    });
+  });
+  it("keeps reused provider call IDs in different turns and physical segments separate", () => {
+    const a = event(1, time, {
+      type: "function_call",
+      call_id: "reused",
+      name: "read_file",
+      arguments: { path: "a" },
+    });
+    const b = event(2, time, {
+      type: "function_call",
+      call_id: "reused",
+      name: "read_file",
+      arguments: { path: "b" },
+    });
+    const result = pairToolCalls([
+      { event: a, turnId: "one" },
+      { event: b, turnId: "two" },
+    ]);
+    expect(result.activities).toHaveLength(2);
+    expect(
+      result.activities.map((activity) => (activity.kind === "tool" ? activity.input : null)),
+    ).toEqual([{ path: "a" }, { path: "b" }]);
+  });
+});
+
+describe("native command lifecycle and canonical updates", () => {
+  const timestamp = "2026-01-01T10:00:00.000Z";
+  const command = {
+    call_id: "native",
+    command: ["node", "task.js"],
+    cwd: "C:/repo",
+    parsed_cmd: [],
+    source: "agent",
+    process_id: "process-3",
+  };
+  it("updates one command from actual begin/end and later canonical payload without keeping the old outcome", () => {
+    const result = pairToolCalls(
+      scoped(
+        event(1, timestamp, { type: "exec_command_begin", ...command }, "event_msg"),
+        event(
+          2,
+          timestamp,
+          {
+            type: "exec_command_end",
+            ...command,
+            status: "completed",
+            aggregated_output: "old",
+            exit_code: 0,
+            duration: { secs: 2, nanos: 0 },
+          },
+          "event_msg",
+        ),
+        event(
+          3,
+          timestamp,
+          {
+            type: "item_completed",
+            item: {
+              type: "CommandExecution",
+              id: "native",
+              ...command,
+              status: "failed",
+              aggregated_output: "new failure",
+              exit_code: 9,
+            },
+          },
+          "event_msg",
+        ),
+      ),
+    );
+    expect(result.activities).toHaveLength(1);
+    expect(result.activities[0]).toMatchObject({
+      id: "native",
+      nativeItemId: "native",
+      status: "failed",
+      output: "new failure",
+      rawEventIds: [expectedRaw(100), expectedRaw(200), expectedRaw(300)],
+    });
+  });
+  it("keeps a pending process session and its write_stdin continuation identifiers", () => {
+    const result = pairToolCalls(
+      scoped(
+        event(1, timestamp, {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "shell",
+          arguments: { cmd: "long" },
+        }),
+        event(2, timestamp, {
+          type: "function_call_output",
+          call_id: "shell",
+          output: { session_id: 77, output: "started", exit_code: null },
+        }),
+        event(3, timestamp, {
+          type: "function_call",
+          name: "write_stdin",
+          call_id: "poll",
+          arguments: { session_id: 77, chars: "" },
+        }),
+        event(4, timestamp, {
+          type: "function_call_output",
+          call_id: "poll",
+          output: { exit_code: 4, output: "failed" },
+        }),
+      ),
+    );
+    expect(result.activities).toMatchObject([
+      { name: "exec_command", status: "running", completedAt: null, output: { session_id: 77 } },
+      {
+        name: "write_stdin",
+        status: "failed",
+        input: { session_id: 77 },
+        output: { exit_code: 4 },
+      },
+    ]);
+  });
+  it("preserves structured text, image and audio blocks without interpreting their order as tool results", () => {
+    const output = {
+      content: [
+        { type: "text", text: "first" },
+        { type: "image", data: "AA==", mimeType: "image/png" },
+        { type: "audio", data: "AA==", mimeType: "audio/wav" },
+      ],
+      isError: false,
+    };
+    const result = pairToolCalls(
+      scoped(event(1, timestamp, { type: "function_call_output", call_id: "media", output })),
+    );
+    expect(result.activities[0]).toMatchObject({ output, status: "succeeded" });
   });
 });

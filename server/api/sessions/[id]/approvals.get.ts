@@ -1,14 +1,16 @@
-import { defineEventHandler } from "h3";
-
-import { useCatalogReadyLiveViewerRuntime } from "../../../live/requestContext.ts";
-import { notFound, sessionId } from "../../_validation.ts";
+import { historyFailure } from "#server/api/_history.ts";
+import { sessionId } from "#server/api/_validation.ts";
+import { historyRequestSignal } from "#server/live/requestCancellation.ts";
+import { useCatalogReadyLiveViewerRuntime } from "#server/live/requestContext.ts";
 
 export default defineEventHandler(async (event) => {
   const id = await sessionId(event);
   const runtime = await useCatalogReadyLiveViewerRuntime(event);
   try {
-    return await runtime.repository.getApprovalEvidence(id);
-  } catch {
-    return notFound("Approval evidence unavailable");
+    return await runtime.repository.getApprovalEvidence(id, {
+      signal: historyRequestSignal(event),
+    });
+  } catch (error) {
+    return historyFailure(error);
   }
 });

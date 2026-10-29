@@ -1,3 +1,5 @@
+import { fileLineCountLabel } from "#shared/timeline/fileChanges.ts";
+import { finalAssistantId } from "#shared/timeline/finalAnswer.ts";
 import type {
   ConversationActivity,
   ConversationTurn,
@@ -116,7 +118,7 @@ function activityText(activity: ConversationActivity): string | null {
               : file.change === "move"
                 ? "Moved file"
                 : "Edited file";
-        return `${verb} · ${file.path} (+${file.addedLines} −${file.removedLines})`;
+        return `${verb} · ${file.path} (${fileLineCountLabel(file)})`;
       })
       .join("\n");
   }
@@ -141,8 +143,7 @@ function activityText(activity: ConversationActivity): string | null {
 }
 
 export function agentWorkText(turn: ConversationTurn): string {
-  const finalAssistantId =
-    turn.finalAssistantMessageId ?? turn.assistantMessages.at(-1)?.id ?? null;
+  const finalId = finalAssistantId(turn);
   const messages = new Map(
     [turn.userMessage, ...(turn.steeringMessages ?? []), ...turn.assistantMessages]
       .filter((message) => message !== null)
@@ -161,7 +162,7 @@ export function agentWorkText(turn: ConversationTurn): string {
         const text = activities.get(reference.id);
         return text === undefined ? [] : [activityText(text)];
       }
-      if (reference.id === turn.userMessage?.id || reference.id === finalAssistantId) {
+      if (reference.id === turn.userMessage?.id || reference.id === finalId) {
         return [];
       }
       const message = messages.get(reference.id);

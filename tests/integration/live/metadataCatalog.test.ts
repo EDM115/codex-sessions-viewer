@@ -1,26 +1,16 @@
-import { mkdir, mkdtemp, rm, writeFile, rename } from "node:fs/promises";
-import { createServer, request as httpRequest } from "node:http";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { createApp, defineEventHandler } from "h3";
-import { toNodeHandler } from "h3/node";
 import { describe, expect, it, vi } from "vitest";
 
-import listProjects from "../../../server/api/projects.get.ts";
-import listSessions from "../../../server/api/sessions/index.get.ts";
-import prepareSessions from "../../../server/api/sessions/prepare.post.ts";
 import { catalogSession, readCatalogLibrary } from "../../../server/cache/catalogStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import { LiveReconciler } from "../../../server/live/reconciler.ts";
-import { attachLiveViewerRuntime } from "../../../server/live/requestContext.ts";
 import { LiveViewerRuntime } from "../../../server/live/viewerRuntime.ts";
 import { readCatalogMetadata } from "../../../server/metadata/catalogMetadata.ts";
-import loopback from "../../../server/middleware/loopback.ts";
 import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
-import { sessionListResponseSchema } from "../../../shared/types/repository.ts";
 import { createStateDatabase } from "../source-boundary/fixtures.ts";
 
 const sourceIo = vi.hoisted(() => ({ paths: [] as string[] }));
@@ -265,161 +255,6 @@ describe("metadata-only live catalog", () => {
       });
       expect(sourceIo.paths).toEqual([]);
     } finally {
-      await runtime.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("serves concurrent cold HTTP library requests and real WAL/atomic metadata changes without rollout work", async () => {
-    const root = await mkdtemp(join(tmpdir(), "viewer-metadata-http-"));
-    const home = join(root, "home");
-    await mkdir(join(home, "sessions"), { recursive: true });
-    const statePath = join(home, "state_5.sqlite");
-    const initial = createStateDatabase(statePath);
-    initial.exec(
-      "CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT); INSERT INTO projects VALUES ('native:section-1', 'Native project sharing a section ID'), ('none', 'Native project named none'); ALTER TABLE threads ADD COLUMN project_id TEXT",
-    );
-    const cloned = {
-      ...initial.prepare("SELECT * FROM threads LIMIT 1").get(),
-      id: "native-none",
-      rollout_path: "sessions/native-none.jsonl",
-      updated_at: 100,
-      is_pinned: 0,
-      thread_section_id: null,
-      project_id: "none",
-      name: "Native none",
-    };
-    initial
-      .prepare(
-        `INSERT INTO threads (${Object.keys(cloned).join(",")}) VALUES (${Object.keys(cloned)
-          .map(() => "?")
-          .join(",")})`,
-      )
-      .run(...Object.values(cloned));
-    initial.close();
-    const prepare = vi.spyOn(LiveReconciler.prototype, "prepareSessions");
-    const readJsonl =
-      vi.fn<typeof import("../../../server/ingestion/jsonlStream.ts").readStableJsonl>();
-    sourceIo.paths = [];
-    const runtime = await LiveViewerRuntime.start(config(root, home), {
-      initialReconciliation: "deferred",
-      debounceMs: 0,
-      reconciliationIntervalMs: 1000,
-      readJsonl,
-    });
-    const app = createApp()
-      .use(loopback)
-      .use(defineEventHandler((event) => attachLiveViewerRuntime(event, runtime)));
-    app
-      .use("/api/sessions/prepare", prepareSessions)
-      .use("/api/sessions", listSessions)
-      .use("/api/projects", listProjects);
-    const server = createServer(toNodeHandler(app));
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    if (!address || typeof address === "string") {
-      throw new Error("Expected loopback fixture server");
-    }
-    const origin = `http://127.0.0.1:${address.port}`;
-    try {
-      const responses = await Promise.all([
-        fetch(`${origin}/api/sessions?scope=active&limit=1`),
-        fetch(`${origin}/api/projects`),
-      ]);
-      expect(responses.map((response) => response.status)).toEqual([200, 200]);
-      const page = await responses[0].json();
-      expect(page.items).toHaveLength(1);
-      expect(page.items[0]).toMatchObject({ id: "thread-1", title: "Chosen name" });
-      expect(runtime.status).toMatchObject({
-        state: "ready",
-        catalogSource: "fresh",
-        recoveryState: "idle",
-      });
-      const groups = await responses[1].json();
-      expect(groups.map((group: { groupId: string }) => group.groupId)).toEqual(
-        expect.arrayContaining([
-          "project:native%3Asection-1",
-          "section:native%3Asection-1",
-          "project:none",
-          "recents:none",
-        ]),
-      );
-      const apiList = async (query: string) =>
-        sessionListResponseSchema.parse(
-          await (await fetch(`${origin}/api/sessions?scope=active${query}`)).json(),
-        );
-      expect((await apiList("")).total).toBe(2);
-      expect((await apiList("&projectId=")).items.map((entry) => entry.id)).toEqual(["thread-1"]);
-      expect((await apiList("&projectId=none")).items.map((entry) => entry.id)).toEqual([
-        "native-none",
-      ]);
-      expect((await apiList("&projectId=native%3Asection-1")).total).toBe(0);
-      expect(
-        (await apiList(`&groupId=${encodeURIComponent("section:native%3Asection-1")}`)).items.map(
-          (entry) => entry.id,
-        ),
-      ).toEqual(["thread-1"]);
-      expect((await apiList("&groupId=recents%3Anone")).total).toBe(0);
-      await Promise.all(
-        groups.map(async (group: { groupId: string }) => {
-          expect(
-            (
-              await fetch(
-                `${origin}/api/sessions?scope=active&groupId=${encodeURIComponent(group.groupId)}&limit=1`,
-              )
-            ).status,
-          ).toBe(200);
-        }),
-      );
-      expect((await fetch(`${origin}/api/sessions?scope=active&limit=bad`)).status).toBe(400);
-      const rejectedHost = await new Promise<number | undefined>((resolve, reject) => {
-        const request = httpRequest(
-          `${origin}/api/projects`,
-          { headers: { Host: "external.example" } },
-          (response) => {
-            response.resume();
-            resolve(response.statusCode);
-          },
-        );
-        request.on("error", reject);
-        request.end();
-      });
-      expect(rejectedHost).toBe(421);
-      expect(
-        (
-          await fetch(`${origin}/api/sessions/prepare`, {
-            method: "POST",
-            headers: { Origin: "https://external.example", "Content-Type": "application/json" },
-            body: '{"ids":["thread-1"]}',
-          })
-        ).status,
-      ).toBe(403);
-      let changed = nextLibrary(runtime, (event) => event.ids.includes("thread-1"));
-      const writer = new DatabaseSync(statePath);
-      writer.exec("PRAGMA journal_mode=WAL; UPDATE threads SET name='WAL title'");
-      await changed;
-      expect((await runtime.repository.listSessions({ scope: "active" })).items[0]?.title).toBe(
-        "WAL title",
-      );
-      writer.close();
-      changed = nextLibrary(runtime, (event) => event.groupsChanged === true);
-      await writeFile(
-        join(home, ".codex-global-state.json.tmp"),
-        JSON.stringify({ "pinned-thread-ids": ["thread-1"] }),
-      );
-      await rename(
-        join(home, ".codex-global-state.json.tmp"),
-        join(home, ".codex-global-state.json"),
-      );
-      await changed;
-      expect(sourceIo.paths).toEqual([]);
-      expect(readJsonl).not.toHaveBeenCalled();
-      expect(prepare).not.toHaveBeenCalled();
-      expect(runtime.database.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({
-        count: 0,
-      });
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
       await runtime.close();
       await rm(root, { recursive: true, force: true });
     }

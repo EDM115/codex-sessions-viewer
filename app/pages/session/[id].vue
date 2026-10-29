@@ -1,29 +1,43 @@
 <script setup lang="ts">
 import type { RepositoryMode } from "#shared/types/repository.ts";
-
-import ConversationView from "../../components/conversation/ConversationView.vue";
-import LibrarySkeleton from "../../components/library/LibrarySkeleton.vue";
-import LibrarySubagentPanel from "../../components/library/LibrarySubagentPanel.vue";
-import { recentChunkCursor } from "../../composables/useConversationTimeline.ts";
-import { createConversationRepository } from "../../repositories/index.ts";
-import type { RepositoryRequester } from "../../repositories/live.ts";
+import { createConversationRepository } from "~/repositories/index.ts";
+import type { RepositoryRequester } from "~/repositories/live.ts";
 
 const route = useRoute();
-definePageMeta({ key: (route) => ("id" in route.params ? String(route.params.id) : route.path) });
+definePageMeta({
+  key: (destination) =>
+    "id" in destination.params ? String(destination.params.id) : destination.path,
+});
 const childPanelOpen = ref(false);
 const selectedChildId = ref<string | null>(null);
+let childPanelOpener: HTMLElement | null = null;
 function openChild(id: string) {
+  childPanelOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   selectedChildId.value = id;
   childPanelOpen.value = true;
 }
+function openChildren() {
+  childPanelOpener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  selectedChildId.value = null;
+  childPanelOpen.value = true;
+}
+async function closeChildren() {
+  childPanelOpen.value = false;
+  await nextTick();
+  if (childPanelOpener?.isConnected) {
+    childPanelOpener.focus();
+  }
+}
 const runtimeConfig = useRuntimeConfig();
-const requestFetch = useRequestFetch() as unknown as (
-  path: string,
-  options: { signal?: AbortSignal },
-) => Promise<unknown>;
+const requestFetch = useRequestFetch();
 const mode: RepositoryMode = runtimeConfig.public.viewerMode === "static" ? "static" : "live";
 const requester: RepositoryRequester = (path, options = {}) =>
-  requestFetch(path, { signal: options.signal }) as Promise<unknown>;
+  requestFetch<unknown, string, "get" | "post" | "delete">(path, {
+    method: options.method === "POST" ? "post" : options.method === "DELETE" ? "delete" : "get",
+    signal: options.signal,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
+  });
 const repository = createConversationRepository(mode, requester);
 const sessionParameter = "id" in route.params ? route.params.id : undefined;
 const sessionId = Array.isArray(sessionParameter) ? sessionParameter[0] : sessionParameter;
@@ -36,6 +50,12 @@ if (typeof sessionId !== "string" || sessionId.trim() === "") {
 }
 
 async function loadConversation() {
+  if (repository.capabilities().progressiveHistory) {
+    const metadata = await repository.getSessionMetadata(sessionId, {
+      signal: selectionController.signal,
+    });
+    return { kind: "progressive" as const, metadata };
+  }
   const [summary, navigator] = await Promise.all([
     repository.getSession(sessionId),
     repository.getTurnNavigator(sessionId),
@@ -46,8 +66,11 @@ async function loadConversation() {
       ? { cursor: recentChunkCursor(summary.turnCount), limit: 20 }
       : { targetTurnId: targetTurnId.value, limit: 20 },
   );
-  return { summary, navigator, initialChunk };
+  return { kind: "legacy" as const, summary, navigator, initialChunk };
 }
+
+const selectionController = new AbortController();
+onBeforeUnmount(() => selectionController.abort());
 
 const asyncConversation = await useLazyAsyncData(`conversation:${sessionId}`, loadConversation, {
   server: false,
@@ -56,15 +79,33 @@ const asyncConversation = await useLazyAsyncData(`conversation:${sessionId}`, lo
 const { data, error, status } = asyncConversation;
 
 useHead(() => ({
-  title: `${data.value?.summary.title ?? "Conversation"} · Codex Sessions Viewer`,
+  title: `${data.value?.kind === "progressive" ? data.value.metadata.title : (data.value?.summary.title ?? "Conversation")} · Codex Sessions Viewer`,
 }));
 </script>
 
 <template>
   <div class="session-page" :class="{ 'has-subagent-panel': childPanelOpen }">
     <div class="session-page__main">
+      <ConversationProgressiveConversationView
+        v-if="data?.kind === 'progressive'"
+        :metadata="data.metadata"
+        :repository="repository"
+        :target-turn-id="targetTurnId"
+        @open-child="openChild"
+      >
+        <template #actions="{ summary }">
+          <button
+            v-if="summary.childThreadIds.length"
+            class="session-page__subagents"
+            type="button"
+            @click="openChildren"
+          >
+            Subagents · {{ summary.childThreadIds.length }}
+          </button>
+        </template>
+      </ConversationProgressiveConversationView>
       <ConversationView
-        v-if="data !== undefined && data !== null"
+        v-else-if="data?.kind === 'legacy'"
         :summary="data.summary"
         :navigator="data.navigator"
         :initial-chunk="data.initialChunk"
@@ -77,10 +118,7 @@ useHead(() => ({
             v-if="summary.childThreadIds.length"
             class="session-page__subagents"
             type="button"
-            @click="
-              childPanelOpen = true;
-              selectedChildId = null;
-            "
+            @click="openChildren"
           >
             Subagents · {{ summary.childThreadIds.length }}
           </button>
@@ -109,7 +147,7 @@ useHead(() => ({
       :selected-id="selectedChildId"
       :mode="mode"
       @select="selectedChildId = $event"
-      @close="childPanelOpen = false"
+      @close="closeChildren"
     />
   </div>
 </template>

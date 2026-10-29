@@ -1,24 +1,26 @@
-import { mount } from "@vue/test-utils";
+import { mountSuspended } from "@nuxt/test-utils/runtime";
 import { describe, expect, it, vi } from "vitest";
 
-import ConversationActivityList from "../../../app/components/conversation/ConversationActivityList.vue";
-import ConversationInspector from "../../../app/components/conversation/ConversationInspector.vue";
-import ConversationMessage from "../../../app/components/conversation/ConversationMessage.vue";
-import ConversationTurn from "../../../app/components/conversation/ConversationTurn.vue";
-import {
-  agentWorkText,
-  formatDuration,
-  formattedJson,
-  formatTimestamp,
-} from "../../../app/components/conversation/format.ts";
-import TurnMinimap from "../../../app/components/conversation/TurnMinimap.vue";
 import type {
   ConversationActivity,
   ConversationMessage as Message,
   ConversationTurn as Turn,
   TurnNavigatorItem,
-} from "../../../shared/types/conversation.ts";
-import type { InspectorRecord } from "../../../shared/types/repository.ts";
+} from "#shared/types/conversation.ts";
+import type { InspectorRecord } from "#shared/types/repository.ts";
+import ConversationActivityList from "~/components/conversation/ConversationActivityList.vue";
+import ConversationInspector from "~/components/conversation/ConversationInspector.vue";
+import ConversationMessage from "~/components/conversation/ConversationMessage.vue";
+import ConversationTurn from "~/components/conversation/ConversationTurn.vue";
+import {
+  agentWorkText,
+  formatDuration,
+  formattedJson,
+  formatTimestamp,
+} from "~/components/conversation/format.ts";
+import TurnMinimap from "~/components/conversation/TurnMinimap.vue";
+
+import { detailsElement, htmlElement } from "./helpers/elements.ts";
 
 function message(id: string, role: "assistant" | "user", sourceMarkdown: string): Message {
   return {
@@ -93,7 +95,7 @@ function turn(): Turn {
 }
 
 function activityVariants(): ConversationActivity[] {
-  const base = { turnId: "turn-1", createdAt: null, rawEventIds: [] } as const;
+  const base = { turnId: "turn-1", createdAt: null, rawEventIds: [] as string[] };
   return [
     { ...base, id: "reasoning-empty", kind: "reasoning", summary: "", body: null, encrypted: true },
     {
@@ -181,7 +183,7 @@ describe("conversation presentation", () => {
 
   it("renders every known work activity, its fallbacks, statuses, and resize events", async () => {
     const activities = activityVariants();
-    const wrapper = mount(ConversationActivityList, {
+    const wrapper = await mountSuspended(ConversationActivityList, {
       props: { activities, reasoningDefault: "expanded", toolCallsDefault: "expanded" },
     });
 
@@ -198,6 +200,9 @@ describe("conversation presentation", () => {
     expect(wrapper.findAll(".conversation-work-row.is-failed")).toHaveLength(2);
 
     const summaries = wrapper.findAll("summary");
+    if (!summaries[0] || !summaries[1]) {
+      throw new Error("Expected two rendered disclosure summaries");
+    }
     await summaries[0].trigger("pointerdown");
     await summaries[1].trigger("keydown", { key: "Enter" });
     await summaries[1].trigger("toggle");
@@ -206,23 +211,22 @@ describe("conversation presentation", () => {
 
     const enriched: ConversationActivity[] = activities.map((activity) => {
       if (activity.kind === "patch") {
-        return { ...activity, affectedPaths: ["app.vue"] };
+        return Object.assign({}, activity, { affectedPaths: ["app.vue"] });
       }
       if (activity.kind === "plan") {
-        return { ...activity, title: "Release" };
+        return Object.assign({}, activity, { title: "Release" });
       }
       if (activity.kind === "compaction") {
-        return { ...activity, summary: "Earlier context" };
+        return Object.assign({}, activity, { summary: "Earlier context" });
       }
       if (activity.kind === "media") {
-        return {
-          ...activity,
+        return Object.assign({}, activity, {
           reference: {
             kind: "local-file" as const,
             path: "C:/diagram.png",
             provenance: "user-message" as const,
           },
-        };
+        });
       }
       return activity;
     });
@@ -294,7 +298,7 @@ describe("conversation presentation", () => {
   });
 
   it("separates user and assistant prose while keeping protocol-only events out of the timeline", async () => {
-    const wrapper = mount(ConversationTurn, {
+    const wrapper = await mountSuspended(ConversationTurn, {
       props: {
         turn: turn(),
         reasoningDefault: "expanded",
@@ -319,14 +323,14 @@ describe("conversation presentation", () => {
     expect(wrapper.text()).not.toContain("protocol-only");
 
     const work = wrapper.get('[data-activity-group="worked"]');
-    (work.element as HTMLDetailsElement).open = true;
+    detailsElement(work.element).open = true;
     await work.trigger("toggle");
     expect(wrapper.text()).toContain("Read file");
     expect(wrapper.text()).toContain("Access denied");
   });
 
   it("preserves the selected assistant message as the Info target", async () => {
-    const wrapper = mount(ConversationTurn, {
+    const wrapper = await mountSuspended(ConversationTurn, {
       props: {
         turn: turn(),
         reasoningDefault: "collapsed",
@@ -344,7 +348,7 @@ describe("conversation presentation", () => {
     const writeText = vi.fn<() => Promise<void>>(async () => undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const assistant = message("assistant-1", "assistant", "The parser is ready.");
-    const wrapper = mount(ConversationMessage, {
+    const wrapper = await mountSuspended(ConversationMessage, {
       props: {
         message: assistant,
         timestampFormat: "absolute",
@@ -368,10 +372,10 @@ describe("conversation presentation", () => {
       userMessageId: `user-${index}`,
       promptPreview: `Prompt ${index}`,
       assistantPreview: `Assistant ${index}`,
-      proseLengthBucket: buckets[index],
+      proseLengthBucket: buckets[index] ?? 1,
       createdAt: null,
     }));
-    const wrapper = mount(TurnMinimap, {
+    const wrapper = await mountSuspended(TurnMinimap, {
       attachTo: document.body,
       props: { items, currentTurnId: "turn-0" },
     });
@@ -396,12 +400,12 @@ describe("conversation presentation", () => {
         createdAt: null,
       },
     ];
-    const wrapper = mount(TurnMinimap, {
+    const wrapper = await mountSuspended(TurnMinimap, {
       attachTo: document.body,
       props: { items, currentTurnId: "turn-0" },
     });
-    const nav = wrapper.get(".turn-minimap").element as HTMLElement;
-    const marker = wrapper.get(".turn-minimap__marker").element as HTMLElement;
+    const nav = htmlElement(wrapper.get(".turn-minimap").element);
+    const marker = htmlElement(wrapper.get(".turn-minimap__marker").element);
     let markerTop = 172;
     vi.spyOn(nav, "getBoundingClientRect").mockReturnValue({
       x: 0,
@@ -429,7 +433,7 @@ describe("conversation presentation", () => {
     await wrapper.get('button[data-turn-id="turn-0"]').trigger("focus");
     await wrapper.vm.$nextTick();
     expect(
-      (wrapper.get('[role="tooltip"]').element as HTMLElement).style.getPropertyValue(
+      htmlElement(wrapper.get('[role="tooltip"]').element).style.getPropertyValue(
         "--turn-preview-center",
       ),
     ).toBe("126px");
@@ -437,7 +441,7 @@ describe("conversation presentation", () => {
     markerTop = 232;
     await wrapper.get(".turn-minimap__scroll").trigger("scroll");
     expect(
-      (wrapper.get('[role="tooltip"]').element as HTMLElement).style.getPropertyValue(
+      htmlElement(wrapper.get('[role="tooltip"]').element).style.getPropertyValue(
         "--turn-preview-center",
       ),
     ).toBe("186px");
@@ -468,7 +472,7 @@ describe("conversation presentation", () => {
       diagnosticIds: ["diagnostic-1"],
       rawRecords: [{ type: "future_payload", value: 7 }],
     };
-    const wrapper = mount(ConversationInspector, {
+    const wrapper = await mountSuspended(ConversationInspector, {
       props: { record, loading: false, error: null },
     });
 
@@ -480,16 +484,16 @@ describe("conversation presentation", () => {
     expect(wrapper.text()).toContain("diagnostic-1");
     expect(wrapper.find("pre").exists()).toBe(false);
     const raw = wrapper.get(".conversation-inspector__raw");
-    (raw.element as HTMLDetailsElement).open = true;
+    detailsElement(raw.element).open = true;
     await raw.trigger("toggle");
     const selected = wrapper.get(".conversation-raw");
-    (selected.element as HTMLDetailsElement).open = true;
+    detailsElement(selected.element).open = true;
     await selected.trigger("toggle");
     expect(wrapper.get("pre").text()).toContain("future_payload");
   });
 
   it("moves focus into the Info surface and closes it with Escape", async () => {
-    const wrapper = mount(ConversationInspector, {
+    const wrapper = await mountSuspended(ConversationInspector, {
       attachTo: document.body,
       props: { record: null, loading: true, error: null },
     });
@@ -501,7 +505,7 @@ describe("conversation presentation", () => {
   });
 
   it("renders inspector failure recovery and unavailable metadata fallbacks", async () => {
-    const wrapper = mount(ConversationInspector, {
+    const wrapper = await mountSuspended(ConversationInspector, {
       props: { record: null, loading: false, error: "Metadata read failed" },
     });
     expect(wrapper.text()).toContain("Metadata read failed");

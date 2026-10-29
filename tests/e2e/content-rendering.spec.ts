@@ -1,6 +1,24 @@
+import { fileURLToPath } from "node:url";
+
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@nuxt/test-utils/playwright";
 import type { Page } from "@playwright/test";
+
+test.use({
+  nuxt: {
+    rootDir: fileURLToPath(new URL("../..", import.meta.url)),
+    dev: false,
+    build: true,
+    nuxtConfig: {
+      experimental: { buildCache: false },
+    },
+    env: {
+      LOCALAPPDATA: fileURLToPath(new URL("../../.tmp/task10-browser/content/", import.meta.url)),
+      CODEX_VIEWER_MODE: "live",
+      CODEX_VIEWER_CODEX_HOME: fileURLToPath(new URL("../fixtures", import.meta.url)),
+    },
+  },
+});
 
 const sessionRoute = "/session/11111111-1111-4111-8111-111111111111?turn=turn-1#turn-turn-1";
 

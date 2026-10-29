@@ -1,8 +1,6 @@
-import { defineEventHandler, readValidatedBody } from "h3";
-
-import { serverViewerSettingsSchema } from "../../../shared/types/settings.ts";
-import { useLiveViewerRuntime } from "../../live/requestContext.ts";
-import { assertSameOriginMutation } from "../_validation.ts";
+import { assertSameOriginMutation } from "#server/api/_validation.ts";
+import { useLiveViewerRuntime } from "#server/live/requestContext.ts";
+import { serverViewerSettingsSchema } from "#shared/types/settings.ts";
 
 export default defineEventHandler(async (event) => {
   assertSameOriginMutation(event);

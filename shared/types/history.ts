@@ -1,11 +1,24 @@
 import * as z from "zod";
 
-import { jsonValueSchema } from "./conversation.ts";
+import { jsonValueSchema, rawEventIdentitySchema } from "./conversation.ts";
+import { richTextDocumentSchema } from "./richText.ts";
 
 const id = z.string().min(1);
 const ordinal = z.int().nonnegative();
 const nullableText = z.string().nullable();
 const time = z.int().nonnegative().nullable();
+export const logicalVisibilitySchema = z.enum(["visible", "context-only", "unresolved"]);
+export type LogicalVisibility = z.infer<typeof logicalVisibilitySchema>;
+export const reviewSourceRecordSchema = z.strictObject({
+  envelope: jsonValueSchema,
+  identity: rawEventIdentitySchema,
+  logicalVisibility: logicalVisibilitySchema.default("unresolved"),
+});
+export type ReviewSourceRecord = z.infer<typeof reviewSourceRecordSchema>;
+export const historyReviewEvidenceSchema = z.strictObject({
+  availability: z.enum(["complete", "partial", "unresolved"]),
+  records: z.array(reviewSourceRecordSchema),
+});
 const base = {
   id,
   startedAtMs: time,
@@ -53,7 +66,7 @@ export const historyItemSchema = z.discriminatedUnion("type", [
   z.object({
     ...base,
     type: z.literal("fileChange"),
-    status,
+    status: status.nullable(),
     changes: z.array(
       z.object({
         path: z.string(),
@@ -85,6 +98,7 @@ export const historyItemSchema = z.discriminatedUnion("type", [
     status,
     contentItems: jsonValueSchema,
     success: z.boolean().nullable(),
+    error: nullableText.default(null),
     durationMs: time,
   }),
   z.object({
@@ -155,9 +169,12 @@ export const historyCoverageSchema = z.strictObject({
 });
 export type HistoryCoverage = z.infer<typeof historyCoverageSchema>;
 export const historyTurnWindowSchema = z.strictObject({
+  reviewEvidence: historyReviewEvidenceSchema.optional(),
   turnId: id,
   physicalRolloutId: id,
   order: ordinal,
+  segmentOrder: ordinal.optional(),
+  decodedByteOrder: ordinal.optional(),
   orderKind: z.enum(["ordinal", "decodedByte"]).optional(),
   boundary: z
     .strictObject({
@@ -189,7 +206,7 @@ export const historyTurnWindowSchema = z.strictObject({
   durationMs: time,
   opening: z.strictObject({
     itemId: id.nullable(),
-    availability: z.enum(["notLoaded", "available", "absent", "unsupported"]),
+    availability: z.enum(["notLoaded", "available", "absent", "unsupported", "unresolved"]),
     item: historyItemSchema.nullable(),
   }),
   items: z.array(
@@ -212,6 +229,7 @@ export const historyTurnWindowSchema = z.strictObject({
   beforeCursor: id.nullable(),
   afterCursor: id.nullable(),
   loadedRanges: z.array(historyLoadedRangeSchema),
+  itemIslands: z.array(z.array(id)).optional(),
   coverage: historyCoverageSchema,
   finalAnswerItemId: id.nullable(),
   historyEpoch: id,
@@ -219,6 +237,7 @@ export const historyTurnWindowSchema = z.strictObject({
 });
 export type HistoryTurnWindow = z.infer<typeof historyTurnWindowSchema>;
 export const historyPageSchema = z.strictObject({
+  reviewEvidence: historyReviewEvidenceSchema.optional(),
   stale: z.boolean().optional(),
   threadId: id,
   metadataRevision: id.nullable(),
@@ -231,3 +250,47 @@ export const historyPageSchema = z.strictObject({
   preparation: z.enum(["ready", "partial", "unavailable"]),
 });
 export type HistoryPage = z.infer<typeof historyPageSchema>;
+export const historyPresentationRequestSchema = z.strictObject({
+  threadId: id,
+  historyEpoch: id,
+  contentRevision: id,
+  physicalRolloutId: id,
+  turnId: id,
+  itemId: id,
+  markdown: z.string().max(5 * 1024 * 1024),
+});
+export type HistoryPresentationRequest = z.infer<typeof historyPresentationRequestSchema>;
+export const historyPresentationSchema = historyPresentationRequestSchema.extend({
+  body: richTextDocumentSchema,
+});
+export type HistoryPresentation = z.infer<typeof historyPresentationSchema>;
+export const historyNavigatorPageSchema = historyPageSchema.omit({ turns: true }).extend({
+  turns: z.array(
+    historyTurnWindowSchema
+      .pick({
+        turnId: true,
+        physicalRolloutId: true,
+        order: true,
+        orderKind: true,
+        status: true,
+        boundary: true,
+      })
+      .extend({ promptPreview: z.string().nullable() }),
+  ),
+});
+export type HistoryNavigatorPage = z.infer<typeof historyNavigatorPageSchema>;
+export function historyNavigatorPage(page: HistoryPage): HistoryNavigatorPage {
+  return {
+    ...page,
+    turns: page.turns.map((turn) => ({
+      turnId: turn.turnId,
+      physicalRolloutId: turn.physicalRolloutId,
+      order: turn.order,
+      orderKind: turn.orderKind,
+      status: turn.status,
+      boundary: turn.boundary,
+      promptPreview:
+        turn.opening.item?.type === "userMessage" ? turn.opening.item.text.slice(0, 240) : null,
+    })),
+  };
+}

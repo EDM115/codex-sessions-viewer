@@ -1,16 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
+  observeSessionMetaSource,
+  type SessionMetaPrefixObservation,
+} from "#server/ingestion/sessionMetaPrefix.ts";
+import { stableRead } from "#server/ingestion/stableRead.ts";
+import {
   rolloutRefSchema,
   sourceGenerationSchema,
   type RolloutRef,
   type SourceGeneration,
-} from "../../shared/types/conversation.ts";
-import {
-  observeSessionMetaSource,
-  type SessionMetaPrefixObservation,
-} from "./sessionMetaPrefix.ts";
-import { stableRead } from "./stableRead.ts";
+} from "#shared/types/conversation.ts";
 
 export interface ValidatedSourceGeneration {
   generation: SourceGeneration;
@@ -20,7 +20,7 @@ export interface GenerationValidationOptions {
   parserVersion?: number;
   decoderVersion?: string;
 }
-export const SOURCE_GENERATION_PARSER_VERSION = 7;
+export const SOURCE_GENERATION_PARSER_VERSION = 11;
 function newSemanticEpoch(): string {
   return randomUUID();
 }

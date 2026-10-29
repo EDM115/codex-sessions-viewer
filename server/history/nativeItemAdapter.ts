@@ -1,10 +1,10 @@
 import * as z from "zod";
 
-import { jsonValueSchema, type JsonValue } from "../../shared/types/conversation.ts";
-import { historyItemSchema, type HistoryItem } from "../../shared/types/history.ts";
-import type { GuardianReview } from "../normalization/guardianEvidence.ts";
+import type { GuardianReview } from "#shared/types/approvals.ts";
+import { jsonValueSchema, type JsonValue } from "#shared/types/conversation.ts";
+import { historyItemSchema, type HistoryItem } from "#shared/types/history.ts";
 
-export const NATIVE_ITEM_ADAPTER_VERSION = 2;
+export const NATIVE_ITEM_ADAPTER_VERSION = 4;
 const citationEntriesSchema = z.array(
   z.object({
     path: z.string(),
@@ -143,6 +143,28 @@ export function adaptNativeThreadItem(value: unknown): HistoryItem | null {
   return adapt(value, value, false);
 }
 
+/** The pinned item_builders.rs maps command lifecycle call_id to CommandExecution.id */
+export function adaptCommandEvent(value: unknown): HistoryItem | null {
+  const event = record(value);
+  if (
+    !event ||
+    !["exec_command_begin", "exec_command_end", "patch_apply_begin", "patch_apply_end"].includes(
+      text(event["type"]) ?? "",
+    )
+  ) {
+    return null;
+  }
+  const patch = event["type"] === "patch_apply_begin" || event["type"] === "patch_apply_end";
+  const begin = event["type"] === "exec_command_begin" || event["type"] === "patch_apply_begin";
+  const item = adaptCoreTurnItem({
+    ...event,
+    id: event["call_id"],
+    type: patch ? "FileChange" : "CommandExecution",
+    status: begin ? "in_progress" : event["status"],
+  });
+  return item === null ? null : { ...item, evidence: event };
+}
+
 function adapt(value: unknown, lifecycle: unknown, core: boolean): HistoryItem | null {
   const item = record(value);
   if (item === null || !envelope.safeParse(item).success) {
@@ -263,11 +285,11 @@ function adapt(value: unknown, lifecycle: unknown, core: boolean): HistoryItem |
           path: row["path"],
           kind,
           movePath,
-          diff: diff ?? null,
+          diff: kind === "update" ? (diff ?? null) : null,
           content: kind === "add" || kind === "delete" ? (diff ?? null) : null,
         };
       });
-      return finish({ ...common, status: status ?? "inProgress", changes });
+      return finish({ ...common, status, changes });
     }
     case "mcpToolCall":
       return finish({
@@ -300,6 +322,7 @@ function adapt(value: unknown, lifecycle: unknown, core: boolean): HistoryItem |
         status,
         contentItems: field("contentItems", "content_items"),
         success: field("success"),
+        error: core ? field("error") : null,
         durationMs,
       });
     case "collabAgentToolCall": {
@@ -381,9 +404,7 @@ export function adaptGuardianReviewEnvelope(value: unknown): GuardianReview | nu
   }
   const { data } = parsed;
   const iso = (ms: number | undefined) =>
-    ms == null || ms === 0 || !Number.isFinite(new Date(ms).valueOf())
-      ? null
-      : new Date(ms).toISOString();
+    ms == null || !Number.isFinite(new Date(ms).valueOf()) ? null : new Date(ms).toISOString();
   return {
     reviewId: data.reviewId,
     targetItemId: data.targetItemId,

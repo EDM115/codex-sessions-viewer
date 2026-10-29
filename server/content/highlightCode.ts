@@ -1,13 +1,16 @@
 import type { Properties, RootContent } from "hast";
 import { codeToHast } from "shiki";
 
+import { createBoundedWorkQueue } from "#shared/timeline/boundedWork.ts";
 import {
   highlightedCodeRootSchema,
   type HighlightedCodeNode,
   type HighlightedCodeRoot,
   type RichTextAttribute,
-} from "../../shared/types/richText.ts";
-import { safeCodeStyle } from "../../shared/utils/codeStyles.ts";
+} from "#shared/types/richText.ts";
+import { safeCodeStyle } from "#shared/utils/codeStyles.ts";
+
+const highlighting = createBoundedWorkQueue(2);
 
 function safeAttributes(properties: Properties | undefined): Record<string, RichTextAttribute> {
   const result: Record<string, RichTextAttribute> = {};
@@ -51,15 +54,22 @@ export async function highlightCode(
   source: string,
   language: string | null,
 ): Promise<HighlightedCodeRoot | null> {
-  if (language === null || language.trim() === "") {
+  if (
+    language === null ||
+    language.trim() === "" ||
+    source.length > 100_000 ||
+    source.split("\n").length > 1_000
+  ) {
     return null;
   }
   try {
-    const tree = await codeToHast(source, {
-      lang: language,
-      themes: { light: "github-light-default", dark: "github-dark-default" },
-      defaultColor: "light-dark()",
-    });
+    const tree = await highlighting.run(() =>
+      codeToHast(source, {
+        lang: language,
+        themes: { light: "github-light-default", dark: "github-dark-default" },
+        defaultColor: "light-dark()",
+      }),
+    );
     return highlightedCodeRootSchema.parse({
       type: "root",
       children: (tree.children ?? [])

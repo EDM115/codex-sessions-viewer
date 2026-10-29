@@ -1,9 +1,17 @@
+import { approvalEvidenceResultSchema } from "#shared/types/approvals.ts";
 import {
   conversationSummarySchema,
   type ConversationSummary,
   type TurnNavigatorItem,
 } from "#shared/types/conversation.ts";
 import {
+  historyPageSchema,
+  historyTurnWindowSchema,
+  historyNavigatorPageSchema,
+  historyPresentationSchema,
+} from "#shared/types/history.ts";
+import {
+  catalogSessionMetadataSchema,
   catalogProjectGroupsSchema,
   deepSearchJobSchema,
   preparationResultsSchema,
@@ -20,6 +28,8 @@ import {
   turnNavigatorResponseSchema,
   viewerInvalidationSchema,
   type ConversationRepository,
+  type HistoryPageQuery,
+  type HistoryItemQuery,
   type InspectorRecord,
   type InspectorTarget,
   type ResolvedAsset,
@@ -30,8 +40,7 @@ import {
   type TurnChunkQuery,
   type ViewerInvalidation,
 } from "#shared/types/repository.ts";
-
-import { publishFaviconAvailability } from "../components/content/faviconAvailability.ts";
+import { publishFaviconAvailability } from "~/components/content/faviconAvailability.ts";
 
 export interface RepositoryRequesterOptions extends RepositoryRequestOptions {
   method?: "GET" | "POST" | "DELETE";
@@ -83,11 +92,25 @@ async function request(path: string, options: RepositoryRequesterOptions = {}): 
 }
 
 export class LiveApiConversationRepository implements ConversationRepository {
-  constructor(private readonly requester: RepositoryRequester = request) {}
+  private readonly requester: RepositoryRequester;
+  constructor(requester: RepositoryRequester = request) {
+    this.requester = requester;
+  }
 
   capabilities() {
     return repositoryCapabilitiesForMode("live");
   }
+  prepareHistoryPresentation: ConversationRepository["prepareHistoryPresentation"] = async (
+    query,
+    options,
+  ) =>
+    historyPresentationSchema.parse(
+      await this.requester("/api/history/presentation", {
+        ...options,
+        method: "POST",
+        body: query,
+      }),
+    );
 
   async listSessions(query: SessionListQuery, options: RepositoryRequestOptions = {}) {
     return sessionListResponseSchema.parse(
@@ -151,21 +174,74 @@ export class LiveApiConversationRepository implements ConversationRepository {
     );
   }
 
+  async getApprovalEvidence(id: string, options: RepositoryRequestOptions = {}) {
+    const evidence = approvalEvidenceResultSchema.parse(
+      await this.requester(`/api/sessions/${encodeURIComponent(id)}/approvals`, options),
+    );
+    if (evidence.sessionId !== id) {
+      throw new Error("Approval evidence belongs to a different session");
+    }
+    return evidence;
+  }
+
   async getSession(id: string): Promise<ConversationSummary> {
     return conversationSummarySchema.parse(
-      await this.requester(`/api/sessions/${encodeURIComponent(id)}`),
+      await this.requester(`/api/sessions/${encodeURIComponent(id)}?legacy=1`),
+    );
+  }
+
+  async getSessionMetadata(id: string, options: RepositoryRequestOptions = {}) {
+    return catalogSessionMetadataSchema.parse(
+      await this.requester(`/api/sessions/${encodeURIComponent(id)}`, options),
+    );
+  }
+
+  async getHistoryPage(
+    id: string,
+    query: HistoryPageQuery,
+    options: RepositoryRequestOptions = {},
+  ) {
+    return historyPageSchema.parse(
+      await this.requester(
+        `/api/sessions/${encodeURIComponent(id)}/turns?history=${encodeURIComponent(JSON.stringify(query))}`,
+        options,
+      ),
+    );
+  }
+
+  async getTurnItems(id: string, query: HistoryItemQuery, options: RepositoryRequestOptions = {}) {
+    return historyTurnWindowSchema.parse(
+      await this.requester(
+        `/api/sessions/${encodeURIComponent(id)}/items?history=${encodeURIComponent(JSON.stringify(query))}`,
+        options,
+      ),
+    );
+  }
+
+  async getHistoryNavigator(
+    id: string,
+    query: HistoryPageQuery,
+    options: RepositoryRequestOptions = {},
+  ) {
+    return historyNavigatorPageSchema.parse(
+      await this.requester(
+        `/api/sessions/${encodeURIComponent(id)}/navigator?history=${encodeURIComponent(JSON.stringify(query))}`,
+        options,
+      ),
     );
   }
 
   async getTurnNavigator(id: string): Promise<TurnNavigatorItem[]> {
     return turnNavigatorResponseSchema.parse(
-      await this.requester(`/api/sessions/${encodeURIComponent(id)}/navigator`),
+      await this.requester(`/api/sessions/${encodeURIComponent(id)}/navigator?legacy=1`),
     );
   }
 
   async getTurns(id: string, query: TurnChunkQuery): Promise<TurnChunk> {
     return turnChunkSchema.parse(
-      await this.requester(`/api/sessions/${encodeURIComponent(id)}/turns${queryString(query)}`),
+      await this.requester(
+        `/api/sessions/${encodeURIComponent(id)}/turns${queryString({ ...query, legacy: 1 })}`,
+      ),
     );
   }
 

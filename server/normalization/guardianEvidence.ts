@@ -2,16 +2,32 @@ import { createHash } from "node:crypto";
 
 import * as z from "zod";
 
+import { adaptGuardianReviewEnvelope } from "#server/history/nativeItemAdapter.ts";
+import { historyWindowPresentation } from "#shared/timeline/historyPresentation.ts";
+import { logicalRecordVisibility } from "#shared/timeline/reviewVisibility.ts";
+import type {
+  GuardianReview,
+  ApprovalAssociations,
+  ApprovalEvidenceResult,
+} from "#shared/types/approvals.ts";
+import { jsonValueSchema } from "#shared/types/conversation.ts";
 import type {
   GuardianApprovalEvidence,
   JsonValue,
+  JsonObject,
   ToolActivity,
   RolloutRef,
-} from "../../shared/types/conversation.ts";
-import type { JsonlRecord } from "../ingestion/jsonlStream.ts";
-import { qualifyRawRecord, rawRecordIdentity } from "../ingestion/rolloutIdentity.ts";
-import { classifyCatalogThread, rawThreadMetadata } from "../metadata/threadClassification.ts";
-import type { NormalizedSession } from "./normalizeSession.ts";
+} from "#shared/types/conversation.ts";
+import type { HistoryPage } from "#shared/types/history.ts";
+export type {
+  GuardianReview,
+  ApprovalAssociations,
+  ApprovalEvidenceResult,
+} from "#shared/types/approvals.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import { qualifyRawRecord, rawRecordIdentity } from "#server/ingestion/rolloutIdentity.ts";
+import { classifyCatalogThread, rawThreadMetadata } from "#server/metadata/threadClassification.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
 
 const guardianResultSchema = z.strictObject({
   risk_level: z.string().min(1),
@@ -19,15 +35,6 @@ const guardianResultSchema = z.strictObject({
   outcome: z.enum(["allow", "deny"]),
   rationale: z.string().min(1),
 });
-
-export interface GuardianReview extends GuardianApprovalEvidence {
-  guardianSessionId: string | null;
-  parentThreadId: string | null;
-  rawEventIds: string[];
-  toolName?: string | null;
-  toolNamespace?: string | null;
-  requestedAt?: string | null;
-}
 
 const nativeApprovalReviewSchema = z.object({
   reviewId: z.string().min(1),
@@ -65,10 +72,13 @@ export function parseNativeApprovalReview(value: unknown): GuardianReview | null
   };
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function objectValue(value: JsonValue): JsonObject | null;
+function objectValue(value: unknown): Record<string, unknown> | null;
 function objectValue(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+  return isObject(value) ? value : null;
 }
 
 function contentText(value: unknown): string {
@@ -116,7 +126,7 @@ function jsonObjects(text: string): JsonValue[] {
       depth -= 1;
       if (depth === 0 && start >= 0) {
         try {
-          values.push(JSON.parse(text.slice(start, index + 1)) as JsonValue);
+          values.push(jsonValueSchema.parse(JSON.parse(text.slice(start, index + 1))));
         } catch {
           // A malformed candidate remains available in the raw inspector evidence.
         }
@@ -275,6 +285,55 @@ export function parseGuardianTurns(
     userEnvelopes.clear();
   };
   for (const record of records) {
+    const notification = objectValue(record.value);
+    if (
+      ["item/autoApprovalReview/started", "item/autoApprovalReview/completed"].includes(
+        nullableString(notification?.["method"]) ?? "",
+      )
+    ) {
+      const bodyStart = (ref?.historyBase?.endOrdinalExclusive ?? 0) + 1;
+      const logicalVisibility =
+        record.logicalVisibility ??
+        logicalRecordVisibility({
+          ...(record.contextOnly === undefined ? {} : { contextOnly: record.contextOnly }),
+          ordinal: record.ordinal ?? record.identity?.ordinal ?? null,
+          bodyStartOrdinal: bodyStart,
+          displayStartOrdinal: Math.max(bodyStart, ref?.subagentHistoryStartOrdinal ?? 0),
+        });
+      if (logicalVisibility !== "visible") {
+        continue;
+      }
+      const review = adaptGuardianReviewEnvelope(notification?.["params"]);
+      if (review) {
+        const qualified = ref === undefined ? record : qualifyRawRecord(record, ref);
+        review.rawEventIds = [rawRecordId(qualified)];
+        if (qualified.identity) {
+          review.sourceRecords = [
+            { envelope: qualified.value, identity: qualified.identity, logicalVisibility },
+          ];
+        }
+        const previous = reviews.findIndex(
+          (candidate) =>
+            candidate.reviewId === review.reviewId &&
+            candidate.parentThreadId === review.parentThreadId &&
+            candidate.targetTurnId === review.targetTurnId &&
+            candidate.targetItemId === review.targetItemId,
+        );
+        if (previous < 0) {
+          reviews.push(review);
+        } else {
+          review.rawEventIds = [
+            ...new Set([...reviews[previous]!.rawEventIds, ...review.rawEventIds]),
+          ];
+          review.sourceRecords = [
+            ...(reviews[previous]!.sourceRecords ?? []),
+            ...(review.sourceRecords ?? []),
+          ];
+          reviews[previous] = review;
+        }
+      }
+      continue;
+    }
     if (recordType(record) === "session_meta") {
       metadata = [record];
       continue;
@@ -319,9 +378,11 @@ export function parseGuardianConversations(conversation: NormalizedSession): Gua
   return parseGuardianTurns(
     conversation.rawEvents.map((event, index) => ({
       rawEventId: event.id,
+      logicalVisibility: event.logicalVisibility ?? "unresolved",
+      ...(event.identity ? { identity: event.identity } : {}),
       lineNumber: index + 1,
-      byteStart: index,
-      byteEnd: index + 1,
+      byteStart: event.identity?.decodedByteStart ?? index,
+      byteEnd: event.identity?.decodedByteEnd ?? index + 1,
       raw: JSON.stringify(event.payload),
       value: event.payload,
     })),
@@ -339,14 +400,14 @@ function normalizedJson(value: JsonValue): JsonValue {
   return Object.fromEntries(
     Object.entries(object)
       .toSorted(([left], [right]) => left.localeCompare(right))
-      .map(([key, child]) => [key, normalizedJson(child as JsonValue)]),
+      .map(([key, child]) => [key, normalizedJson(child)]),
   );
 }
 
 function reviewedInput(value: JsonValue): JsonValue {
   const object = objectValue(value);
   const argumentsValue = object?.["arguments"] ?? object?.["input"];
-  return argumentsValue === undefined ? value : (argumentsValue as JsonValue);
+  return argumentsValue === undefined ? value : argumentsValue;
 }
 
 export function guardianActionHash(value: JsonValue, identity?: string): string {
@@ -374,31 +435,16 @@ function approval(review: GuardianReview): GuardianApprovalEvidence {
 export interface ApprovalAssociationContext {
   sessionId: string;
 }
-export interface ApprovalAssociations {
-  matches: Map<string, GuardianReview[]>;
-  unattached: {
-    review: GuardianReview;
-    reason:
-      | "missing-scope"
-      | "missing-tool-or-turn"
-      | "missing-target"
-      | "conflicting-targets"
-      | "ambiguous-target";
-  }[];
-}
-export interface ApprovalEvidenceResult {
-  sessionId: string;
-  matched: { activityId: string; attempts: GuardianReview[] }[];
-  unattached: ApprovalAssociations["unattached"];
-}
 export function approvalEvidenceResult(
   sessionId: string,
   associations: ApprovalAssociations,
+  parentSource?: ApprovalEvidenceResult["parentSource"],
 ): ApprovalEvidenceResult {
   return {
     sessionId,
     matched: [...associations.matches].map(([activityId, attempts]) => ({ activityId, attempts })),
     unattached: associations.unattached,
+    ...(parentSource ? { parentSource } : {}),
   };
 }
 function toolIdentity(name: string, namespace: string | null | undefined): string {
@@ -424,6 +470,20 @@ export function associateApprovalReviews(
 ): ApprovalAssociations {
   const result: ApprovalAssociations = { matches: new Map(), unattached: [] };
   for (const review of reviews) {
+    if (
+      review.reviewId != null &&
+      reviews.some(
+        (other) =>
+          other !== review &&
+          other.reviewId === review.reviewId &&
+          other.parentThreadId === review.parentThreadId &&
+          (other.targetItemId !== review.targetItemId ||
+            other.targetTurnId !== review.targetTurnId),
+      )
+    ) {
+      result.unattached.push({ review, reason: "conflicting-targets" });
+      continue;
+    }
     if (
       context === undefined ||
       (review.parentThreadId !== null && review.parentThreadId !== context.sessionId)
@@ -475,6 +535,13 @@ export function associateApprovalReviews(
       continue;
     }
     const id = candidates[0]!.id;
+    if (
+      review.outcome === "deny" &&
+      objectValue(review.reviewedAction)?.["type"] === "mcpToolCall"
+    ) {
+      result.unattached.push({ review, reason: "standalone-denial" });
+      continue;
+    }
     result.matches.set(id, [...(result.matches.get(id) ?? []), review]);
   }
   return result;
@@ -504,4 +571,76 @@ export function attachGuardianEvidence(
     tool.approval = tool.approvalAttempts.findLast((attempt) => attempt.outcome !== null) ?? null;
   }
   return matches.size;
+}
+
+/** Only actually supplied parent notifications enter this path, ordinary user prose cannot create reviews */
+export function parseParentNativeReviews(conversation: NormalizedSession): GuardianReview[] {
+  return parseGuardianConversations({
+    ...conversation,
+    rawEvents: conversation.rawEvents.filter((event) => {
+      if (event.logicalVisibility !== "visible") {
+        return false;
+      }
+      const envelope = objectValue(event.payload);
+      return ["item/autoApprovalReview/started", "item/autoApprovalReview/completed"].includes(
+        nullableString(envelope?.["method"]) ?? "",
+      );
+    }),
+  }).filter((review) => review.parentThreadId === conversation.summary.id);
+}
+
+export function approvalEvidenceForHistoryPage(
+  page: HistoryPage,
+  auxiliary: readonly GuardianReview[] = [],
+): ApprovalEvidenceResult {
+  const reviews = parseGuardianTurns(
+    (page.reviewEvidence?.records ?? [])
+      .filter((record) => record.logicalVisibility === "visible")
+      .map((record, index) => ({
+        logicalVisibility: record.logicalVisibility,
+        identity: record.identity,
+        lineNumber: index + 1,
+        byteStart: record.identity.decodedByteStart,
+        byteEnd: record.identity.decodedByteEnd,
+        raw: JSON.stringify(record.envelope),
+        value: record.envelope,
+      })),
+  );
+  const tools = page.turns.flatMap((turn) =>
+    historyWindowPresentation(page.threadId, turn).activities.filter(
+      (activity): activity is ToolActivity => activity.kind === "tool",
+    ),
+  );
+  return approvalEvidenceResult(
+    page.threadId,
+    associateApprovalReviews(tools, [...reviews, ...auxiliary], { sessionId: page.threadId }),
+    {
+      availability: page.reviewEvidence?.records.some(
+        (record) =>
+          record.logicalVisibility !== "visible" && record.logicalVisibility !== "context-only",
+      )
+        ? "unresolved"
+        : (page.reviewEvidence?.availability ?? "unresolved"),
+      historyEpoch: page.historyEpoch,
+      contentRevision: page.contentRevision,
+      coverage: page.coverage,
+    },
+  );
+}
+
+export function parentNativeReviewAvailability(
+  conversation: NormalizedSession,
+): "partial" | "unresolved" {
+  return conversation.rawEvents.some((event) => {
+    const envelope = objectValue(event.payload);
+    return (
+      ["item/autoApprovalReview/started", "item/autoApprovalReview/completed"].includes(
+        nullableString(envelope?.["method"]) ?? "",
+      ) &&
+      event.logicalVisibility !== "visible" &&
+      event.logicalVisibility !== "context-only"
+    );
+  })
+    ? "unresolved"
+    : "partial";
 }

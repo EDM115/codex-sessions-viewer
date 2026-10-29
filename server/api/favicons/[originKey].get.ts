@@ -1,11 +1,9 @@
 import { join } from "node:path";
 
-import { createError, defineEventHandler } from "h3";
-
-import { getCachedFaviconFile } from "../../cache/contentStore.ts";
-import { useLiveViewerRuntime } from "../../live/requestContext.ts";
-import { sendCachedContent } from "../_content.ts";
-import { faviconKey } from "../_validation.ts";
+import { sendCachedContent } from "#server/api/_content.ts";
+import { faviconKey } from "#server/api/_validation.ts";
+import { getCachedFaviconFile } from "#server/cache/contentStore.ts";
+import { useLiveViewerRuntime } from "#server/live/requestContext.ts";
 
 export default defineEventHandler(async (event) => {
   const runtime = useLiveViewerRuntime(event);

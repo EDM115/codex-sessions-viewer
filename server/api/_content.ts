@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 
-import { createError, setResponseHeaders, type H3Event } from "h3";
+import type { H3Event } from "h3";
 
-import type { CachedContentFile } from "../cache/contentStore.ts";
+import type { CachedContentFile } from "#server/cache/contentStore.ts";
 
 function isWithinRoot(root: string, candidate: string): boolean {
   const pathFromRoot = relative(resolve(root), resolve(candidate));

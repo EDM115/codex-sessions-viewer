@@ -1,7 +1,5 @@
-import { defineEventHandler } from "h3";
-
-import { useLiveViewerRuntime } from "../live/requestContext.ts";
-import { searchQuery } from "./_validation.ts";
+import { searchQuery } from "#server/api/_validation.ts";
+import { useLiveViewerRuntime } from "#server/live/requestContext.ts";
 
 export default defineEventHandler(async (event) => {
   const query = await searchQuery(event);

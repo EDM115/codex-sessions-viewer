@@ -3,6 +3,18 @@ import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import * as z from "zod";
 
 import {
+  catalogSession,
+  markCatalogSessionReady,
+  storeMaterializedClassification,
+} from "#server/cache/catalogStore.ts";
+import { withCacheTransaction } from "#server/cache/database.ts";
+import { replaceSessionSearchRows } from "#server/cache/searchStore.ts";
+import { guardianActionHash } from "#server/normalization/guardianEvidence.ts";
+import {
+  type NormalizedRawEvent,
+  type NormalizedSession,
+} from "#server/normalization/normalizeSession.ts";
+import {
   conversationSummarySchema,
   conversationTurnSchema,
   jsonValueSchema,
@@ -12,20 +24,9 @@ import {
   type ConversationTurn,
   type SourceFingerprint,
   type SourceGeneration,
-} from "../../shared/types/conversation.ts";
-import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import { guardianActionHash } from "../normalization/guardianEvidence.ts";
-import {
-  type NormalizedRawEvent,
-  type NormalizedSession,
-} from "../normalization/normalizeSession.ts";
-import {
-  catalogSession,
-  markCatalogSessionReady,
-  storeMaterializedClassification,
-} from "./catalogStore.ts";
-import { withCacheTransaction } from "./database.ts";
-import { replaceSessionSearchRows } from "./searchStore.ts";
+} from "#shared/types/conversation.ts";
+import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import { logicalVisibilitySchema } from "#shared/types/history.ts";
 
 export interface CachedSourceWrite {
   generation?: SourceGeneration;
@@ -49,6 +50,7 @@ export type ReplaceCachedSessionResult =
 class StaleCatalogCommitError extends Error {}
 
 const rawEventSchema = z.strictObject({
+  logicalVisibility: logicalVisibilitySchema,
   identity: rawEventIdentitySchema.optional(),
   id: z.string().min(1),
   turnId: z.string().nullable(),
@@ -338,9 +340,9 @@ function replaceChildren(
 
   const insertRawEvent = database.prepare(`
     INSERT INTO raw_events (
-      id, session_id, source_order, turn_id, type, timestamp, payload_json, identity_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(session_id, id) DO UPDATE SET source_order = excluded.source_order, turn_id = excluded.turn_id, type = excluded.type, timestamp = excluded.timestamp, payload_json = excluded.payload_json, identity_json = excluded.identity_json
+      id, session_id, source_order, turn_id, type, timestamp, payload_json, identity_json, logical_visibility
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id, id) DO UPDATE SET source_order = excluded.source_order, turn_id = excluded.turn_id, type = excluded.type, timestamp = excluded.timestamp, payload_json = excluded.payload_json, identity_json = excluded.identity_json, logical_visibility = excluded.logical_visibility
   `);
   const priorEvents = new Map(previous?.rawEvents.map((event) => [event.id, event]));
   session.rawEvents.forEach((event, index) => {
@@ -351,7 +353,8 @@ function replaceChildren(
       before.turnId === event.turnId &&
       before.payload === event.payload &&
       before.type === event.type &&
-      before.timestamp === event.timestamp
+      before.timestamp === event.timestamp &&
+      before.logicalVisibility === event.logicalVisibility
     ) {
       return;
     }
@@ -364,6 +367,7 @@ function replaceChildren(
       event.timestamp,
       json(event.payload),
       event.identity === undefined ? null : json(event.identity),
+      event.logicalVisibility ?? "unresolved",
     );
   });
   return [...changed];
@@ -534,7 +538,7 @@ export function getCachedSession(
       ? []
       : database
           .prepare(`
-            SELECT id, turn_id, type, timestamp, payload_json, identity_json
+            SELECT id, turn_id, type, timestamp, payload_json, identity_json, logical_visibility
             FROM raw_events
             WHERE session_id = ?
             ORDER BY source_order
@@ -543,6 +547,7 @@ export function getCachedSession(
           .map((row) =>
             rawEventSchema.parse({
               id: requiredText(row, "id"),
+              logicalVisibility: row["logical_visibility"],
               turnId: row["turn_id"],
               type: requiredText(row, "type"),
               timestamp: row["timestamp"],

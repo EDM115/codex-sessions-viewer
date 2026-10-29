@@ -1,9 +1,7 @@
-import type { EventStreamMessage } from "h3";
-
 import { InvalidationBus } from "./invalidationBus.ts";
 
 export interface InvalidationEventStream<Response = void> {
-  push(message: EventStreamMessage): Promise<void>;
+  push(message: { id: string; event: string; data: string }): Promise<void>;
   send(): Promise<Response>;
   close(): Promise<void>;
   onClosed(callback: () => void): void;

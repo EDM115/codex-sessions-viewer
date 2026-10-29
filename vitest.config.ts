@@ -7,7 +7,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   resolve: {
-    alias: [{ find: /^#shared\/(.*)$/u, replacement: `${resolve("shared")}/$1` }],
+    alias: [
+      { find: /^#shared\/(.*)$/u, replacement: `${resolve("shared")}/$1` },
+      { find: /^~\/(.*)$/u, replacement: `${resolve("app")}/$1` },
+    ],
   },
   test: {
     clearMocks: true,
@@ -38,6 +41,15 @@ export default defineConfig({
             "tests/integration/export/pagefind.test.ts",
           ],
           environment: "node",
+        },
+      },
+      {
+        test: {
+          name: "http",
+          include: ["tests/http/**/*.{test,spec}.ts"],
+          environment: "node",
+          fileParallelism: false,
+          maxWorkers: 1,
         },
       },
       {

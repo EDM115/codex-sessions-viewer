@@ -1,5 +1,129 @@
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
+import type { HistoryEpochStorage } from "#server/history/historyEpochAuthority.ts";
+import {
+  logicalVisibilitySchema,
+  historyTurnWindowSchema,
+  type HistoryPage,
+  type HistoryTurnWindow,
+} from "#shared/types/history.ts";
+
+const sparseHistoryWindowSchema = historyTurnWindowSchema
+  .pick({ loadedRanges: true, boundary: true })
+  .extend({
+    items: historyTurnWindowSchema.shape.items.element
+      .omit({ item: true, detail: true, physicalRolloutId: true })
+      .array(),
+  });
+
+export function initializeHistoryIndexes(database: DatabaseSync): void {
+  database.exec(
+    "CREATE TABLE IF NOT EXISTS history_semantic_epochs (selection_key TEXT PRIMARY KEY, evidence_json TEXT NOT NULL)",
+  );
+  database.exec(
+    "CREATE TABLE IF NOT EXISTS history_sparse_windows (thread_id TEXT NOT NULL, epoch TEXT NOT NULL, physical_id TEXT NOT NULL, turn_id TEXT NOT NULL, evidence_json TEXT NOT NULL, PRIMARY KEY(thread_id, epoch, physical_id, turn_id))",
+  );
+}
+export function historyEpochStorage(database: DatabaseSync): HistoryEpochStorage {
+  initializeHistoryIndexes(database);
+  return {
+    read(key) {
+      const raw = database
+        .prepare("SELECT evidence_json FROM history_semantic_epochs WHERE selection_key = ?")
+        .get(key)?.["evidence_json"];
+      if (typeof raw !== "string" || raw.length > 2 * 1024 * 1024) {
+        return null;
+      }
+      try {
+        return JSON.parse(raw) as unknown;
+      } catch {
+        return null;
+      }
+    },
+    write(key, value) {
+      database
+        .prepare("INSERT OR REPLACE INTO history_semantic_epochs VALUES (?, ?)")
+        .run(key, JSON.stringify(value));
+    },
+  };
+}
+export function persistHistoryWindows(
+  database: DatabaseSync,
+  threadId: string,
+  result: HistoryPage | HistoryTurnWindow,
+): void {
+  if ("turns" in result && (result.stale || result.preparation === "unavailable")) {
+    return;
+  }
+  const turns = "turns" in result ? result.turns : [result];
+  for (const turn of turns) {
+    const raw = database
+      .prepare(
+        "SELECT evidence_json FROM history_sparse_windows WHERE thread_id = ? AND epoch = ? AND physical_id = ? AND turn_id = ?",
+      )
+      .get(threadId, turn.historyEpoch, turn.physicalRolloutId, turn.turnId)?.["evidence_json"];
+    let previous: ReturnType<typeof sparseHistoryWindowSchema.parse> | null = null;
+    if (typeof raw === "string" && raw.length < 2 * 1024 * 1024) {
+      try {
+        previous = sparseHistoryWindowSchema.parse(JSON.parse(raw));
+      } catch {
+        /* Invalid sparse hints never establish history authority */
+      }
+    }
+    const ranges = [
+      ...new Map(
+        [...(previous?.loadedRanges ?? []), ...turn.loadedRanges].map((range) => [
+          JSON.stringify(range),
+          range,
+        ]),
+      ).values(),
+    ].slice(-1024);
+    const items = [
+      ...new Map(
+        [
+          ...(previous?.items ?? []),
+          ...turn.items.map(
+            ({
+              itemId,
+              ordinal,
+              decodedByteStart,
+              decodedByteEnd,
+              updatedAtOrdinal,
+              updatedAtDecodedByte,
+            }) => ({
+              itemId,
+              ordinal,
+              decodedByteStart,
+              decodedByteEnd,
+              updatedAtOrdinal,
+              updatedAtDecodedByte,
+            }),
+          ),
+        ].map((item) => [item.itemId, item]),
+      ).values(),
+    ].slice(-2048);
+    database.prepare("INSERT OR REPLACE INTO history_sparse_windows VALUES (?, ?, ?, ?, ?)").run(
+      threadId,
+      turn.historyEpoch,
+      turn.physicalRolloutId,
+      turn.turnId,
+      JSON.stringify({
+        loadedRanges: ranges,
+        boundary: turn.boundary ?? previous?.boundary,
+        items,
+      }),
+    );
+  }
+  database
+    .prepare("DELETE FROM history_sparse_windows WHERE thread_id = ? AND epoch != ?")
+    .run(threadId, result.historyEpoch);
+}
+
+import { listCatalogSessions } from "#server/cache/catalogStore.ts";
+import type {
+  NormalizedRawEvent,
+  NormalizedSession,
+} from "#server/normalization/normalizeSession.ts";
 import {
   conversationSummarySchema,
   conversationTurnSchema,
@@ -10,9 +134,9 @@ import {
   type ConversationTurn,
   type JsonValue,
   type TurnNavigatorItem,
-} from "../../shared/types/conversation.ts";
-import { viewerDiagnosticSchema, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { LibraryEntry } from "../../shared/types/library.ts";
+} from "#shared/types/conversation.ts";
+import { viewerDiagnosticSchema, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import type { LibraryEntry } from "#shared/types/library.ts";
 import {
   inspectorRecordSchema,
   inspectorTargetSchema,
@@ -26,9 +150,7 @@ import {
   type SessionListQuery,
   type TurnChunk,
   type TurnChunkQuery,
-} from "../../shared/types/repository.ts";
-import type { NormalizedRawEvent, NormalizedSession } from "../normalization/normalizeSession.ts";
-import { listCatalogSessions } from "./catalogStore.ts";
+} from "#shared/types/repository.ts";
 
 const DEFAULT_PAGE_SIZE = 20;
 const RAW_EVENT_QUERY_SIZE = 400;
@@ -362,7 +484,7 @@ function rawEventsById(
     const placeholders = ids.map(() => "?").join(", ");
     for (const row of database
       .prepare(`
-        SELECT id, turn_id, type, timestamp, payload_json, identity_json
+        SELECT id, turn_id, type, timestamp, payload_json, identity_json, logical_visibility
         FROM raw_events
         WHERE session_id = ? AND id IN (${placeholders})
       `)
@@ -370,6 +492,7 @@ function rawEventsById(
       const id = requiredText(row["id"], "id");
       events.set(id, {
         id,
+        logicalVisibility: logicalVisibilitySchema.parse(row["logical_visibility"]),
         turnId: nullableText(row["turn_id"], "turn_id"),
         type: requiredText(row["type"], "type"),
         timestamp: nullableText(row["timestamp"], "timestamp"),

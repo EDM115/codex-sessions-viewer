@@ -1,11 +1,9 @@
 <script setup lang="ts">
 import { PhCheck, PhCopy, PhWarning } from "@phosphor-icons/vue";
-import { nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 
-import { useClipboard } from "../../composables/useClipboard.ts";
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import UiIconButton from "../ui/UiIconButton.vue";
-import { useContentTheme } from "./useContentTheme.ts";
+import { diagramWorkQueue } from "#shared/timeline/boundedWork.ts";
+import { useContentTheme } from "~/components/content/useContentTheme.ts";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = defineProps<{ source: string }>();
 const emit = defineEmits<{ openMedia: [item: MediaViewerItem] }>();
@@ -19,6 +17,7 @@ const sanitizedSvg = ref<string | null>(null);
 const { copyText, state: copyState } = useClipboard();
 const theme = useContentTheme();
 let generation = 0;
+let job = new AbortController();
 let library: Promise<typeof import("mermaid")> | undefined;
 
 function safeSvg(source: string): { element: SVGElement; serialized: string } {
@@ -67,27 +66,29 @@ async function renderPreview(): Promise<void> {
     if (current !== generation) {
       return;
     }
-    const rootStyle = getComputedStyle(document.documentElement);
-    mermaid.initialize({
-      fontFamily: rootStyle.getPropertyValue("--font-body").trim(),
-      htmlLabels: false,
-      layout: "dagre",
-      look: "classic",
-      securityLevel: "strict",
-      secure: [
-        "secure",
-        "securityLevel",
-        "startOnLoad",
-        "maxTextSize",
-        "suppressErrorRendering",
-        "maxEdges",
-        "htmlLabels",
-      ],
-      startOnLoad: false,
-      suppressErrorRendering: true,
-      theme: theme.value === "dark" ? "dark" : "neutral",
-    });
-    const rendered = await mermaid.render(`${diagramId}-${current}`, source);
+    const rendered = await diagramWorkQueue.run(async () => {
+      const rootStyle = getComputedStyle(document.documentElement);
+      mermaid.initialize({
+        fontFamily: rootStyle.getPropertyValue("--font-body").trim(),
+        htmlLabels: false,
+        layout: "dagre",
+        look: "classic",
+        securityLevel: "strict",
+        secure: [
+          "secure",
+          "securityLevel",
+          "startOnLoad",
+          "maxTextSize",
+          "suppressErrorRendering",
+          "maxEdges",
+          "htmlLabels",
+        ],
+        startOnLoad: false,
+        suppressErrorRendering: true,
+        theme: theme.value === "dark" ? "dark" : "neutral",
+      });
+      return mermaid.render(`${diagramId}-${current}`, source);
+    }, job.signal);
     if (current !== generation) {
       return;
     }
@@ -110,6 +111,8 @@ async function renderPreview(): Promise<void> {
 
 watch([() => props.source, theme], () => {
   ++generation;
+  job.abort();
+  job = new AbortController();
   sanitizedSvg.value = null;
   preview.value?.replaceChildren();
   previewState.value = "idle";
@@ -119,6 +122,8 @@ watch([() => props.source, theme], () => {
 });
 onBeforeUnmount(() => {
   ++generation;
+  job.abort();
+  job = new AbortController();
 });
 
 function showCode(): void {

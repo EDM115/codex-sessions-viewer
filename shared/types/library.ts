@@ -49,6 +49,13 @@ export const libraryEntrySchema = z.strictObject({
   kind: z.enum(["root", "subagent"]),
   parentThreadId: z.string().nullable(),
   childCount: z.number().int().nonnegative(),
+  agent: z
+    .strictObject({
+      name: z.string().nullable(),
+      path: z.string().nullable(),
+      role: z.string().nullable(),
+    })
+    .optional(),
 });
 export type LibraryEntry = z.infer<typeof libraryEntrySchema>;
 
@@ -56,6 +63,9 @@ export function libraryEntryFromSummary(
   item: ConversationListItem,
   projectId: string | null = item.projectId,
 ): LibraryEntry {
+  const name = item.classification?.agentNickname ?? item.agentNickname;
+  const path = item.classification?.agentPath ?? item.agentPath;
+  const role = item.classification?.agentRole ?? null;
   return libraryEntrySchema.parse({
     id: item.summary.id,
     title: item.summary.title,
@@ -65,6 +75,7 @@ export function libraryEntryFromSummary(
     kind: item.kind,
     parentThreadId: item.parentThreadId,
     childCount: item.childCount,
+    ...(item.kind === "subagent" && (name || path || role) ? { agent: { name, path, role } } : {}),
   });
 }
 
@@ -174,6 +185,7 @@ export interface SidebarGroup {
 }
 
 export interface ConversationListItem {
+  classification?: ThreadClassification;
   summary: ConversationSummary;
   kind: "root" | "subagent";
   materialization: MaterializationState;
@@ -225,6 +237,7 @@ export interface DeepSearchJob {
 export const materializationStateSchema = z.enum(["cold", "queued", "loading", "ready", "failed"]);
 
 export const conversationListItemSchema = z.strictObject({
+  classification: threadClassificationSchema.optional(),
   summary: conversationSummarySchema,
   kind: z.enum(["root", "subagent"]),
   materialization: materializationStateSchema,

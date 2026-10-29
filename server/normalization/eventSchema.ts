@@ -1,13 +1,13 @@
 import * as z from "zod";
 
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import { rawRecordIdentity } from "#server/ingestion/rolloutIdentity.ts";
 import {
   jsonValueSchema,
   type JsonObject,
   type JsonValue,
   type RawEventIdentity,
-} from "../../shared/types/conversation.ts";
-import type { JsonlRecord } from "../ingestion/jsonlStream.ts";
-import { rawRecordIdentity } from "../ingestion/rolloutIdentity.ts";
+} from "#shared/types/conversation.ts";
 
 const knownTopLevelTypes = new Set([
   "compacted",
@@ -24,8 +24,11 @@ const knownEventMessageTypes = new Set([
   "agent_reasoning",
   "context_compacted",
   "image_generation_end",
+  "exec_command_begin",
+  "exec_command_end",
   "item_completed",
   "mcp_tool_call_end",
+  "patch_apply_begin",
   "patch_apply_end",
   "sub_agent_activity",
   "task_complete",
@@ -112,7 +115,17 @@ export function payloadObject(event: CodexEvent): JsonObject | null {
 }
 
 export function parseCodexEvent(record: JsonlRecord): CodexEventParseResult {
-  const parsed = eventEnvelopeSchema.safeParse(record.value);
+  const notification =
+    isJsonObject(record.value) &&
+    ["item/autoApprovalReview/started", "item/autoApprovalReview/completed"].includes(
+      typeof record.value["method"] === "string" ? record.value["method"] : "",
+    ) &&
+    isJsonObject(record.value["params"] ?? null)
+      ? record.value
+      : null;
+  const parsed = eventEnvelopeSchema.safeParse(
+    notification ? { type: "native_notification", payload: notification["params"] } : record.value,
+  );
   if (!parsed.success || !isJsonObject(record.value)) {
     return {
       success: false,
@@ -122,8 +135,11 @@ export function parseCodexEvent(record: JsonlRecord): CodexEventParseResult {
   }
 
   const payload = parsed.data.payload;
-  const payloadType =
-    isJsonObject(payload) && typeof payload["type"] === "string" && payload["type"] !== ""
+  const payloadType = notification
+    ? typeof notification["method"] === "string"
+      ? notification["method"]
+      : null
+    : isJsonObject(payload) && typeof payload["type"] === "string" && payload["type"] !== ""
       ? payload["type"]
       : null;
   const timestamp =

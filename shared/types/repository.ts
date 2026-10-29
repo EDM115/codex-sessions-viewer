@@ -1,5 +1,6 @@
 import * as z from "zod";
 
+import type { ApprovalEvidenceResult } from "./approvals.ts";
 import {
   conversationScopeSchema,
   conversationTurnSchema,
@@ -15,16 +16,25 @@ import {
   type TurnNavigatorItem,
 } from "./conversation.ts";
 import { viewerDiagnosticSchema, type ViewerDiagnostic } from "./diagnostics.ts";
+import type {
+  HistoryPage,
+  HistoryTurnWindow,
+  HistoryNavigatorPage,
+  HistoryPresentationRequest,
+  HistoryPresentation,
+} from "./history.ts";
 import {
   libraryEntrySchema,
   type LibraryEntry,
   type CatalogProjectGroup,
   type DeepSearchJob,
   type PreparationResult,
+  type CatalogSessionMetadata,
 } from "./library.ts";
 export type RepositoryMode = "live" | "static";
 
 export interface RepositoryCapabilities {
+  progressiveHistory?: boolean;
   liveUpdates: boolean;
   serverSettings: boolean;
   backgroundFaviconFetch: boolean;
@@ -56,6 +66,14 @@ export interface SearchQuery extends SessionListQuery {
 
 export interface RepositoryRequestOptions {
   signal?: AbortSignal;
+}
+export class UnsupportedHistoryError extends Error {
+  readonly code = "history.unsupported";
+  readonly preparation = "unavailable";
+  readonly coverage = { status: "unsupported" as const, segments: [], gaps: [] };
+  constructor() {
+    super("This export uses conversation chunks, progressive physical history is unavailable");
+  }
 }
 
 const historyCursorAnchorSchema = z.discriminatedUnion("kind", [
@@ -138,6 +156,7 @@ export interface InspectorRecord {
   diagnosticIds: string[];
   rawRecords: JsonValue[];
   diagnostics?: ViewerDiagnostic[];
+  historySnapshot?: z.infer<typeof inspectorRecordSchema>["historySnapshot"];
 }
 
 export interface ResolvedAsset {
@@ -175,6 +194,10 @@ export interface ViewerRuntimeStatus {
 }
 
 export interface ConversationRepository {
+  getApprovalEvidence?(
+    id: string,
+    options?: RepositoryRequestOptions,
+  ): Promise<ApprovalEvidenceResult>;
   capabilities(): RepositoryCapabilities;
   listSessions(
     query: SessionListQuery,
@@ -186,6 +209,29 @@ export interface ConversationRepository {
   getDeepSearch(id: string, options?: RepositoryRequestOptions): Promise<DeepSearchJob>;
   cancelDeepSearch(id: string, options?: RepositoryRequestOptions): Promise<void>;
   search(query: SearchQuery, options?: RepositoryRequestOptions): Promise<CursorPage<SearchHit>>;
+  getSessionMetadata(
+    id: string,
+    options?: RepositoryRequestOptions,
+  ): Promise<CatalogSessionMetadata>;
+  getHistoryPage(
+    id: string,
+    query: HistoryPageQuery,
+    options?: RepositoryRequestOptions,
+  ): Promise<HistoryPage>;
+  getTurnItems(
+    id: string,
+    query: HistoryItemQuery,
+    options?: RepositoryRequestOptions,
+  ): Promise<HistoryTurnWindow>;
+  getHistoryNavigator(
+    id: string,
+    query: HistoryPageQuery,
+    options?: RepositoryRequestOptions,
+  ): Promise<HistoryNavigatorPage>;
+  prepareHistoryPresentation(
+    query: HistoryPresentationRequest,
+    options?: RepositoryRequestOptions,
+  ): Promise<HistoryPresentation>;
   getSession(id: string): Promise<ConversationSummary>;
   getTurnNavigator(id: string): Promise<TurnNavigatorItem[]>;
   getTurns(id: string, query: TurnChunkQuery): Promise<TurnChunk>;
@@ -196,6 +242,7 @@ export interface ConversationRepository {
 }
 
 export const repositoryCapabilitiesSchema = z.strictObject({
+  progressiveHistory: z.boolean().optional(),
   liveUpdates: z.boolean(),
   serverSettings: z.boolean(),
   backgroundFaviconFetch: z.boolean(),
@@ -211,6 +258,7 @@ export const viewerRuntimeStatusSchema = z.strictObject({
 export function repositoryCapabilitiesForMode(mode: RepositoryMode): RepositoryCapabilities {
   const enabled = mode === "live";
   return {
+    progressiveHistory: enabled,
     liveUpdates: enabled,
     serverSettings: enabled,
     backgroundFaviconFetch: enabled,
@@ -301,6 +349,24 @@ export const inspectorRecordSchema = z.strictObject({
   diagnosticIds: z.array(z.string()),
   rawRecords: z.array(jsonValueSchema),
   diagnostics: z.array(viewerDiagnosticSchema).optional(),
+  historySnapshot: z
+    .strictObject({
+      threadId: z.string().min(1),
+      physicalRolloutId: z.string().min(1),
+      turnId: z.string().min(1),
+      sourceTurnId: z.string().nullable(),
+      itemId: z.string().nullable(),
+      historyEpoch: z.string().min(1),
+      contentRevision: z.string().min(1),
+      detail: z.enum(["full", "unresolved", "unsupported", "notLoaded"]),
+      evidenceAvailable: z.boolean(),
+      ordinal: z.int().nonnegative().nullable(),
+      updatedAtOrdinal: z.int().nonnegative().nullable(),
+      decodedByteStart: z.int().nonnegative().nullable(),
+      decodedByteEnd: z.int().nonnegative().nullable(),
+      updatedAtDecodedByte: z.int().nonnegative().nullable(),
+    })
+    .optional(),
 });
 
 export const resolvedAssetSchema = z.strictObject({

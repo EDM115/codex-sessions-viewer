@@ -1,6 +1,6 @@
-import { createError, type H3Event } from "h3";
+import type { H3Event } from "h3";
 
-import type { LiveViewerRuntime } from "./viewerRuntime.ts";
+import type { LiveViewerRuntime } from "#server/live/viewerRuntime.ts";
 
 declare module "h3" {
   interface H3EventContext {

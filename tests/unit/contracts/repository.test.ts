@@ -111,11 +111,13 @@ describe("persisted conversation contracts", () => {
 describe("repository mode contracts", () => {
   it("disables live-only capabilities in the static repository", () => {
     expect(repositoryCapabilitiesForMode("static")).toEqual({
+      progressiveHistory: false,
       liveUpdates: false,
       serverSettings: false,
       backgroundFaviconFetch: false,
     });
     expect(repositoryCapabilitiesForMode("live")).toEqual({
+      progressiveHistory: true,
       liveUpdates: true,
       serverSettings: true,
       backgroundFaviconFetch: true,

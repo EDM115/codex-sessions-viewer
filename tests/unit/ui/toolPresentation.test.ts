@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { ToolActivity } from "#shared/types/conversation.ts";
 import {
   boundedJson,
   groupLabel,
@@ -7,8 +8,8 @@ import {
   toolPresentation,
   subagentLabel,
   toolOutput,
-} from "../../../app/components/conversation/toolPresentation.ts";
-import type { ToolActivity } from "../../../shared/types/conversation.ts";
+  activityGroupingKey,
+} from "~/components/conversation/toolPresentation.ts";
 function tool(name: string, namespace: string | null = null): ToolActivity {
   return {
     kind: "tool",
@@ -29,6 +30,47 @@ function tool(name: string, namespace: string | null = null): ToolActivity {
   };
 }
 describe("semantic tool presentation", () => {
+  it("groups only the same successful operation and context, retaining uncertain, interactive, approval and agent boundaries", () => {
+    const call = {
+      ...tool("exec_command", "functions"),
+      input: { cmd: "node first", cwd: "/first" },
+    };
+    expect(activityGroupingKey(call)).toBe(
+      activityGroupingKey({ ...call, id: "next", input: { cmd: "node second", cwd: "/first" } }),
+    );
+    expect(activityGroupingKey(call)).not.toBe(
+      activityGroupingKey({ ...call, input: { cmd: "node second", cwd: "/second" } }),
+    );
+    expect(activityGroupingKey(call)).not.toBe(
+      activityGroupingKey(tool("apply_patch", "functions")),
+    );
+    for (const status of ["unknown", "failed", "cancelled", "running", "pending"] as const) {
+      expect(activityGroupingKey({ ...call, status })).toBeNull();
+    }
+    for (const name of [
+      "spawn_agent",
+      "request_user_input",
+      "computer_use",
+      "mcp__desktop__computer_use",
+    ]) {
+      expect(activityGroupingKey(tool(name))).toBeNull();
+    }
+    expect(
+      activityGroupingKey({
+        ...call,
+        approvalAttempts: [
+          {
+            reviewedAction: null,
+            outcome: null,
+            riskLevel: "unknown",
+            rationale: "",
+            userAuthorization: null,
+            reviewedAt: null,
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
   it("matches exact canonical families and preserves unfamiliar qualified identity", () => {
     expect(toolPresentation(tool("exec_command", "functions"))).toMatchObject({
       category: "shell",
@@ -115,5 +157,42 @@ describe("semantic tool presentation", () => {
         output: { content: [{ type: "image", data: "secret encoded payload" }] },
       }),
     ).not.toContain("secret encoded payload");
+  });
+});
+
+it("keeps readable text alongside native image/audio output and labels host inventory as attempted", () => {
+  const output = [
+    { type: "inputText", text: "First text" },
+    { type: "inputImage", imageUrl: "data:image/png;base64,secret" },
+    { type: "inputAudio", audioUrl: "data:audio/wav;base64,secret" },
+    { type: "inputText", text: "Last text" },
+  ];
+  const value = toolOutput({ ...tool("dynamic"), output });
+  expect(value).toContain("First text\nLast text");
+  expect(value).not.toContain("base64");
+  expect(output).toHaveLength(4);
+  const attempt: ToolActivity = {
+    ...tool("exec_command"),
+    status: "unknown",
+    presentation: {
+      category: "other",
+      label: "exec command",
+      subject: "attempt",
+      status: "unknown",
+      evidenceKind: "host-attempt",
+      itemId: null,
+      callId: null,
+      cellId: "cell",
+      childIds: [],
+      details: null,
+    },
+  };
+  expect(toolPresentation(attempt)).toMatchObject({
+    category: "shell",
+    label: "Attempted: Run command",
+  });
+  expect(toolPresentation({ ...tool("wait", "functions"), status: "unknown" })).toMatchObject({
+    category: "shell",
+    label: "Tool script continuation",
   });
 });

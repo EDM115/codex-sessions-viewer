@@ -316,3 +316,37 @@ describe("native and canonical item boundaries", () => {
     expect(classifyCatalogThread({ source, agentRole: "explicit" }).agentRole).toBe("explicit");
   });
 });
+
+it("retains absent Core file outcomes and Core dynamic errors instead of manufacturing running or successful state", () => {
+  expect(
+    adaptCoreTurnItem({
+      type: "FileChange",
+      id: "file",
+      changes: { a: { type: "add", content: "a" } },
+    }),
+  ).toMatchObject({ status: null });
+  expect(
+    adaptCoreTurnItem({
+      type: "DynamicToolCall",
+      id: "dynamic",
+      tool: "operation",
+      arguments: {},
+      status: "completed",
+      error: "reported failure",
+    }),
+  ).toMatchObject({ error: "reported failure", success: null });
+});
+
+it("preserves a supplied epoch-zero review timestamp independently of the item-completion sentinel", () => {
+  expect(
+    adaptGuardianReviewEnvelope({
+      threadId: "parent",
+      turnId: "turn",
+      reviewId: "review",
+      targetItemId: null,
+      startedAtMs: 0,
+      review: { status: "inProgress" },
+      action: { type: "networkAccess" },
+    }),
+  ).toMatchObject({ requestedAt: "1970-01-01T00:00:00.000Z", reviewedAt: null, outcome: null });
+});

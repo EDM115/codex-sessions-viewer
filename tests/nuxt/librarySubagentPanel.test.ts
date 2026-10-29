@@ -1,22 +1,25 @@
-import { flushPromises, mount } from "@vue/test-utils";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mountSuspended, mockNuxtImport } from "@nuxt/test-utils/runtime";
+import { flushPromises } from "@vue/test-utils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import LibrarySubagentPanel from "../../../app/components/library/LibrarySubagentPanel.vue";
-import type { ConversationSummary } from "../../../shared/types/conversation.ts";
-import type { LibraryEntry } from "../../../shared/types/library.ts";
-import type { ConversationRepository, CursorPage } from "../../../shared/types/repository.ts";
+import type { ConversationSummary } from "#shared/types/conversation.ts";
+import type { LibraryEntry } from "#shared/types/library.ts";
+import type { ConversationRepository, CursorPage } from "#shared/types/repository.ts";
+import LibrarySubagentPanel from "~/components/library/LibrarySubagentPanel.vue";
 
 const repository = vi.hoisted(() => ({
+  capabilities: vi.fn<ConversationRepository["capabilities"]>(),
+  getSessionMetadata: vi.fn<ConversationRepository["getSessionMetadata"]>(),
   listSessions: vi.fn<ConversationRepository["listSessions"]>(),
   getSession: vi.fn<ConversationRepository["getSession"]>(),
   getTurnNavigator: vi.fn<ConversationRepository["getTurnNavigator"]>(),
   getTurns: vi.fn<ConversationRepository["getTurns"]>(),
   subscribe: vi.fn<ConversationRepository["subscribe"]>(),
 }));
-vi.mock("../../../app/repositories/index.ts", () => ({
+vi.mock("~/repositories/index.ts", () => ({
   createConversationRepository: () => repository,
 }));
-vi.mock("../../../app/components/conversation/ConversationView.vue", () => ({
+vi.mock("~/components/conversation/ConversationView.vue", () => ({
   default: {
     name: "ConversationView",
     props: ["summary", "navigator", "initialChunk", "initialTargetTurnId", "embedded", "mode"],
@@ -66,17 +69,20 @@ function item(id: string, title: string | null = null): LibraryEntry {
     childCount: 0,
   };
 }
-function panel(selectedId: string | null = null) {
-  return mount(LibrarySubagentPanel, {
+async function panel(selectedId: string | null = null) {
+  return await mountSuspended(LibrarySubagentPanel, {
     props: { parentId: "parent", selectedId, mode: "live" },
-    global: {
-      stubs: { NuxtLink: { props: ["to", "prefetch"], template: '<a :href="to"><slot /></a>' } },
-    },
+    global: { stubs: { ConversationProgressiveConversationView: true } },
   });
 }
 
 beforeEach(() => {
-  vi.stubGlobal("useRequestFetch", () => vi.fn<() => Promise<unknown>>());
+  repository.capabilities.mockReturnValue({
+    progressiveHistory: false,
+    liveUpdates: true,
+    serverSettings: true,
+    backgroundFaviconFetch: true,
+  });
   repository.subscribe.mockReturnValue(() => undefined);
   repository.listSessions.mockResolvedValue({
     items: [item("child", "Ada")],
@@ -93,9 +99,41 @@ beforeEach(() => {
     revision: "r1",
   }));
 });
-afterEach(() => vi.unstubAllGlobals());
+mockNuxtImport("useRequestFetch", () => () => vi.fn<() => Promise<unknown>>());
 
 describe("LibrarySubagentPanel", () => {
+  it("shows supplied role without fetching child bodies and selects only one progressive child", async () => {
+    repository.capabilities.mockReturnValue({
+      progressiveHistory: true,
+      liveUpdates: true,
+      serverSettings: true,
+      backgroundFaviconFetch: true,
+    });
+    repository.listSessions.mockResolvedValue({
+      items: [
+        { ...item("child", "Ada"), agent: { name: "Ada", path: "worker", role: "reviewer" } },
+        item("other"),
+      ],
+      nextCursor: null,
+      total: 2,
+    });
+    repository.getSessionMetadata.mockResolvedValue(summary("child"));
+    const wrapper = await panel();
+    await flushPromises();
+    expect(wrapper.text()).toContain("reviewer");
+    expect(repository.getSessionMetadata).not.toHaveBeenCalled();
+    expect(repository.getSession).not.toHaveBeenCalled();
+    await wrapper.setProps({ selectedId: "child" });
+    await flushPromises();
+    expect(repository.getSessionMetadata).toHaveBeenCalledOnce();
+    expect(repository.getSessionMetadata).toHaveBeenCalledWith("child", {
+      signal: expect.any(AbortSignal),
+    });
+    expect(repository.getSession).not.toHaveBeenCalled();
+    expect(repository.getTurns).not.toHaveBeenCalled();
+    expect(repository.getTurnNavigator).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
   it("loads the recent child chunk and refreshes every loaded list page on invalidation", async () => {
     const unsubscribe = vi.fn<() => void>();
     repository.subscribe.mockReturnValue(unsubscribe);
@@ -113,11 +151,15 @@ describe("LibrarySubagentPanel", () => {
         total: 3,
       });
     repository.getSession.mockResolvedValue({ ...summary("child"), turnCount: 55 });
-    const wrapper = panel();
+    const wrapper = await panel();
     await flushPromises();
     await wrapper.get(".ui-button").trigger("click");
     await flushPromises();
-    repository.subscribe.mock.calls[0][0]({
+    const listener = repository.subscribe.mock.calls[0]?.[0];
+    if (!listener) {
+      throw new Error("Expected subscribed panel");
+    }
+    listener({
       type: "library.updated",
       ids: ["parent"],
       revision: "r2",
@@ -140,7 +182,7 @@ describe("LibrarySubagentPanel", () => {
   });
 
   it("lists associated named children and emits local selections without navigating", async () => {
-    const wrapper = panel();
+    const wrapper = await panel();
     await flushPromises();
     expect(repository.listSessions).toHaveBeenCalledWith({
       scope: "active",
@@ -163,7 +205,7 @@ describe("LibrarySubagentPanel", () => {
       .mockResolvedValueOnce({ items: [item("child")], nextCursor: "page2", total: 2 })
       .mockRejectedValueOnce(new Error("Page unavailable"))
       .mockResolvedValueOnce({ items: [item("second")], nextCursor: null, total: 2 });
-    const wrapper = panel();
+    const wrapper = await panel();
     await flushPromises();
     await wrapper.get(".ui-button").trigger("click");
     await flushPromises();
@@ -182,8 +224,16 @@ describe("LibrarySubagentPanel", () => {
   });
 
   it("embeds the selected transcript and supports full-session, nested, and back actions", async () => {
-    const wrapper = panel("child");
+    let ready!: (value: ConversationSummary) => void;
+    repository.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ConversationSummary>((settle) => {
+          ready = settle;
+        }),
+    );
+    const wrapper = await panel("child");
     expect(wrapper.text()).toContain("Loading subagent conversation");
+    ready(summary("child"));
     await flushPromises();
     const conversation = wrapper.getComponent({ name: "ConversationView" });
     expect(repository.getTurns).toHaveBeenCalledWith("child", { cursor: "0", limit: 20 });
@@ -211,7 +261,7 @@ describe("LibrarySubagentPanel", () => {
           }),
       )
       .mockRejectedValueOnce(new Error("Cannot read second"));
-    const wrapper = panel("first");
+    const wrapper = await panel("first");
     await wrapper.setProps({ selectedId: "second" });
     await flushPromises();
     resolveFirst(summary("first"));
@@ -234,7 +284,7 @@ describe("LibrarySubagentPanel", () => {
           }),
       )
       .mockResolvedValueOnce({ items: [], nextCursor: null, total: 0 });
-    const wrapper = panel();
+    const wrapper = await panel();
     await wrapper.setProps({ parentId: "different-parent" });
     await flushPromises();
     resolveFirst({ items: [item("old-child")], nextCursor: null, total: 1 });

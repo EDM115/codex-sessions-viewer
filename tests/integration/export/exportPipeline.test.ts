@@ -16,6 +16,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as z from "zod";
 
+import { StaticConversationRepository } from "../../../app/repositories/static.ts";
 import { getCachedSession } from "../../../server/cache/conversationStore.ts";
 import { openCacheDatabase } from "../../../server/cache/database.ts";
 import { SessionCacheUpdater } from "../../../server/cache/sourceManifest.ts";
@@ -32,6 +33,7 @@ import {
   hydrateStaticInspectorRecords,
   staticInspectorChunkSchema,
 } from "../../../shared/types/staticPayloads.ts";
+import { cutoffReviewRecords, parentReviewRecords } from "../../fixtures/history/parentReviews.ts";
 import { createStateDatabase } from "../source-boundary/fixtures.ts";
 
 const temporaryDirectories: string[] = [];
@@ -489,7 +491,11 @@ describe("static export pipeline", () => {
     const index = sessionIndexSchema.parse(
       JSON.parse(await readFile(join(outputRoot, "payloads", "sessions", "index.json"), "utf8")),
     );
-    const sessionId = index.sessions[0]!.id;
+    const firstSession = index.sessions[0];
+    if (!firstSession) {
+      throw new Error("Expected an exported session");
+    }
+    const sessionId = firstSession.id;
 
     expect(first).toMatchObject({
       discovered: 1,
@@ -796,5 +802,135 @@ describe("static export pipeline", () => {
         expect.objectContaining({ code: "cache.unavailable", area: "cache", path: source }),
       ]),
     );
+  });
+});
+
+it("preserves logical review visibility through fresh and cached exports and the actual static reader", async () => {
+  const root = await temporaryRoot();
+  const codexHome = join(root, "home");
+  const id = "11111111-1111-4111-8111-111111111111";
+  const records = cutoffReviewRecords(id);
+  await mkdir(join(codexHome, "sessions"), { recursive: true });
+  const sourcePath = join(codexHome, "sessions", "rollout-parent.jsonl");
+  await writeFile(sourcePath, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+  const bytes = await readFile(sourcePath);
+  const outputRoot = join(root, "output");
+  const paths = viewerPaths(root);
+  const options = {
+    cwd: root,
+    codexHome,
+    generatedRoot: join(root, "generated"),
+    outputRoot,
+    paths,
+    offline: true,
+    index: false,
+    async generate({ outputRoot: destination }: { outputRoot: string }) {
+      await mkdir(destination, { recursive: true });
+      await writeFile(join(destination, "index.html"), "cutoff review fixture");
+    },
+  };
+  async function verifyExport(cached: boolean) {
+    const result = await runStaticExport(options);
+    expect(result).toMatchObject({ transformed: cached ? 0 : 1, reused: cached ? 1 : 0 });
+    const repository = new StaticConversationRepository(async (path) =>
+      JSON.parse(await readFile(join(outputRoot, path.replace(/^\//u, "")), "utf8")),
+    );
+    const evidence = await repository.getApprovalEvidence(id);
+    expect(
+      evidence.matched.map((match) => [
+        match.activityId,
+        match.attempts.map((review) => review.reviewId),
+      ]),
+    ).toEqual([["visible-command", ["visible-review"]]]);
+    expect(evidence.unattached).toEqual([]);
+    expect(evidence.parentSource?.availability).toBe("partial");
+    const database = openCacheDatabase(paths.cacheDatabase);
+    try {
+      const conversation = getCachedSession(database, id);
+      const rawReviews = conversation?.rawEvents.filter(
+        (event) =>
+          event.payload !== null &&
+          typeof event.payload === "object" &&
+          Object.hasOwn(event.payload, "method"),
+      );
+      expect(rawReviews?.map((event) => event.logicalVisibility)).toEqual([
+        "context-only",
+        "context-only",
+        "context-only",
+        "context-only",
+        "context-only",
+        "visible",
+        "visible",
+      ]);
+      expect(rawReviews?.[0]?.payload).toMatchObject({ params: { reviewId: "review-a" } });
+    } finally {
+      database.close();
+    }
+  }
+  await verifyExport(false);
+  await verifyExport(true);
+  expect(Buffer.compare(await readFile(sourcePath), bytes)).toBe(0);
+});
+
+it("exports supplied parent native reviews and reads them through the actual static repository", async () => {
+  const root = await temporaryRoot();
+  const codexHome = join(root, "home");
+  const id = "11111111-1111-4111-8111-111111111111";
+  const records = parentReviewRecords(id);
+  await mkdir(join(codexHome, "sessions"), { recursive: true });
+  await writeFile(
+    join(codexHome, "sessions", "rollout-parent.jsonl"),
+    records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+  );
+  const outputRoot = join(root, "output");
+  await runStaticExport({
+    cwd: root,
+    codexHome,
+    generatedRoot: join(root, "generated"),
+    outputRoot,
+    paths: viewerPaths(root),
+    offline: true,
+    index: false,
+    async generate({ outputRoot: destination }) {
+      await mkdir(destination, { recursive: true });
+      await writeFile(join(destination, "index.html"), "parent review fixture");
+    },
+  });
+  const repository = new StaticConversationRepository(async (path) =>
+    JSON.parse(await readFile(join(outputRoot, path.replace(/^\//u, "")), "utf8")),
+  );
+  const evidence = await repository.getApprovalEvidence(id);
+  expect(evidence).toMatchObject({
+    sessionId: id,
+    parentSource: { availability: "partial", historyEpoch: null, coverage: null },
+    matched: [
+      {
+        activityId: "command",
+        attempts: [
+          { reviewId: "review-a", outcome: "allow" },
+          { reviewId: "review-b", outcome: null },
+        ],
+      },
+    ],
+  });
+  expect(evidence.parentSource?.contentRevision).toMatch(/^[a-f0-9]{64}$/u);
+  expect(evidence.unattached.map(({ review, reason }) => [review.reviewId, reason])).toEqual([
+    ["network", "missing-target"],
+    ["mcp-denied", "standalone-denial"],
+  ]);
+  const sources = evidence.matched[0]?.attempts[0]?.sourceRecords;
+  const expectedStart = Buffer.byteLength(
+    records
+      .slice(0, 5)
+      .map((record) => JSON.stringify(record))
+      .join("\n") + "\n",
+  );
+  expect(sources).toHaveLength(2);
+  expect(sources?.[0]?.identity.decodedByteStart).toBe(expectedStart);
+  expect(sources?.[1]?.identity.decodedByteStart).toBeGreaterThan(expectedStart);
+  expect(sources?.[0]?.identity.rangeSha256).toMatch(/^[a-f0-9]{64}$/u);
+  expect(sources?.[0]?.envelope).toMatchObject({
+    method: "item/autoApprovalReview/started",
+    params: { threadId: id, turnId: "turn", reviewId: "review-a" },
   });
 });

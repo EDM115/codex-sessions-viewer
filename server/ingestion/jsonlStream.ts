@@ -1,18 +1,20 @@
 import { createHash } from "node:crypto";
 
 import {
-  jsonValueSchema,
-  type JsonValue,
-  type RawEventIdentity,
-} from "../../shared/types/conversation.ts";
-import {
   stableRead,
   type ExpectedSourcePrefix,
   type StableReadChunk,
   type StableReadResult,
-} from "./stableRead.ts";
+} from "#server/ingestion/stableRead.ts";
+import {
+  jsonValueSchema,
+  type JsonValue,
+  type RawEventIdentity,
+} from "#shared/types/conversation.ts";
+import type { LogicalVisibility } from "#shared/types/history.ts";
 
 export interface JsonlRecord {
+  logicalVisibility?: LogicalVisibility;
   rangeSha256?: string;
   identity?: RawEventIdentity;
   ordinal?: number;

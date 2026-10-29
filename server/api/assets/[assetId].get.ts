@@ -1,7 +1,5 @@
-import { defineEventHandler } from "h3";
-
-import { useLiveViewerRuntime } from "../../live/requestContext.ts";
-import { assetId, notFound } from "../_validation.ts";
+import { assetId, notFound } from "#server/api/_validation.ts";
+import { useLiveViewerRuntime } from "#server/live/requestContext.ts";
 
 export default defineEventHandler(async (event) => {
   const runtime = useLiveViewerRuntime(event);

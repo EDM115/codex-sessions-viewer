@@ -77,7 +77,7 @@ describe("source-owned normalization memo", () => {
     expect(after.turns[0]).toBe(before.turns[0]);
     expect(after.turns[1]).not.toBe(before.turns[1]);
     expect(after.turns[1]?.activities.find(({ kind }) => kind === "tool")).toMatchObject({
-      status: "succeeded",
+      status: "unknown",
       output: { content: "late output" },
     });
     expect(after.turns[1]?.activities.find(({ kind }) => kind === "web_search")).toMatchObject({

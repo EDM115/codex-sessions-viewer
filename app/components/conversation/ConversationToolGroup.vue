@@ -1,14 +1,13 @@
 <script setup lang="ts">
-import { ref } from "vue";
-
-import type { ConversationActivity } from "#shared/types/conversation.ts";
+import type { ConversationActivity, DisclosureDefault } from "#shared/types/conversation.ts";
 import type { InspectorTarget, ResolvedAsset } from "#shared/types/repository.ts";
-
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import ConversationWorkEntry from "./ConversationWorkEntry.vue";
-import { groupLabel } from "./toolPresentation.ts";
-defineProps<{
+import { groupLabel } from "~/components/conversation/toolPresentation.ts";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
+const props = defineProps<{
   activities: ConversationActivity[];
+  disclosureKey?: string;
+  reasoningDefault?: DisclosureDefault;
+  toolCallsDefault?: DisclosureDefault;
   resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
   resolveFavicon?: (origin: string) => Promise<string | null>;
 }>();
@@ -17,15 +16,20 @@ const emit = defineEmits<{
   openMedia: [item: MediaViewerItem];
   openChild: [id: string];
 }>();
-const open = ref(false);
+const { open, toggle } = useWorkDisclosure(
+  () => `${props.disclosureKey ?? props.activities[0]?.id}:group`,
+  "unknown",
+  () => props.toolCallsDefault ?? "collapsed",
+);
 </script>
 <template>
   <details
     class="conversation-tool-group"
     :data-tool-group="activities[0]?.id"
-    @toggle="open = ($event.currentTarget as HTMLDetailsElement).open"
+    :open="open"
+    @toggle="toggle"
   >
-    <summary>
+    <summary :aria-expanded="open">
       {{ groupLabel(activities) }} <small>{{ activities.length }}</small>
     </summary>
     <div v-if="open" class="conversation-tool-group__entries">
@@ -33,6 +37,9 @@ const open = ref(false);
         v-for="activity in activities"
         :key="activity.id"
         :activity="activity"
+        :disclosure-key="`${disclosureKey ?? ''}:${activity.id}`"
+        :reasoning-default="reasoningDefault"
+        :tool-calls-default="toolCallsDefault"
         :resolve-asset="resolveAsset"
         :resolve-favicon="resolveFavicon"
         @inspect="emit('inspect', $event)"

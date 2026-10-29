@@ -1,7 +1,5 @@
-import { defineEventHandler } from "h3";
-
-import { useCatalogReadyLiveViewerRuntime } from "../../../live/requestContext.ts";
-import { notFound, sessionId } from "../../_validation.ts";
+import { notFound, sessionId } from "#server/api/_validation.ts";
+import { useCatalogReadyLiveViewerRuntime } from "#server/live/requestContext.ts";
 
 export default defineEventHandler(async (event) => {
   const id = await sessionId(event);

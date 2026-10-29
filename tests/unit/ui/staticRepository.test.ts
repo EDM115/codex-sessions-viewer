@@ -2,73 +2,119 @@ import { describe, expect, it, vi } from "vitest";
 
 import { StaticConversationRepository } from "../../../app/repositories/static.ts";
 import { conversationSummarySchema } from "../../../shared/types/conversation.ts";
+import { threadClassificationSchema } from "../../../shared/types/library.ts";
 
 describe("static conversation repository", () => {
-  it("reveals explicit children across inherited root filters with their original project", async () => {
-    const summary = conversationSummarySchema.parse({
-      id: "child",
-      title: "Child",
-      scope: "archived",
-      sourcePath: "D:/child.jsonl",
-      createdAt: "2026-09-14T10:00:00.000Z",
-      updatedAt: "2026-09-14T10:00:00.000Z",
-      cwd: "D:/child",
-      gitBranch: null,
-      gitSha: null,
-      gitOriginUrl: null,
-      models: [],
-      reasoningEfforts: [],
-      turnCount: 0,
-      assistantMessageCount: 0,
-      toolCallCount: 0,
-      toolCounts: {},
-      preview: "Child",
-      pinned: false,
-      sectionName: null,
-      parentThreadId: "parent",
-      childThreadIds: [],
-      hasMedia: false,
-      diagnosticCount: 0,
-      revision: "child-rev",
-    });
-    const repository = new StaticConversationRepository(async (path) =>
-      path.endsWith("index.json")
-        ? { version: 1, sessions: [summary] }
-        : {
-            version: 1,
-            projects: [],
-            entries: {
-              child: {
-                kind: "subagent",
-                projectId: "actual-child-project",
-                parentThreadId: "parent",
-                agentPath: "/root/child",
-                agentNickname: "Child",
-                agentDepth: 1,
-                childCount: 0,
+  it.each([true, false])(
+    "reveals children across inherited filters and qualifies their project only when its definition exists (%s)",
+    async (projectExists) => {
+      const summary = conversationSummarySchema.parse({
+        id: "child",
+        title: "Child",
+        scope: "archived",
+        sourcePath: "D:/child.jsonl",
+        createdAt: "2026-09-14T10:00:00.000Z",
+        updatedAt: "2026-09-14T10:00:00.000Z",
+        cwd: "D:/child",
+        gitBranch: null,
+        gitSha: null,
+        gitOriginUrl: null,
+        models: [],
+        reasoningEfforts: [],
+        turnCount: 0,
+        assistantMessageCount: 0,
+        toolCallCount: 0,
+        toolCounts: {},
+        preview: "Child",
+        pinned: false,
+        sectionName: null,
+        parentThreadId: "parent",
+        childThreadIds: [],
+        hasMedia: false,
+        diagnosticCount: 0,
+        revision: "child-rev",
+      });
+      const repository = new StaticConversationRepository(async (path) =>
+        path.endsWith("index.json")
+          ? { version: 1, sessions: [summary] }
+          : {
+              version: 1,
+              projects: projectExists
+                ? [
+                    {
+                      id: "actual-child-project",
+                      name: "Child project",
+                      source: "codex",
+                      hint: "D:/child",
+                      activeCount: 0,
+                      archivedCount: 1,
+                    },
+                  ]
+                : [],
+              entries: {
+                child: {
+                  kind: "subagent",
+                  ...(projectExists
+                    ? {
+                        classification: threadClassificationSchema.parse({
+                          visibility: "delegated-child",
+                          transportSource: null,
+                          threadSource: null,
+                          ephemeral: null,
+                          historyMode: null,
+                          relationship: "spawn",
+                          parentThreadId: "parent",
+                          attachedParentThreadId: null,
+                          agentPath: "/root/child",
+                          agentNickname: "Child",
+                          agentRole: "reviewer",
+                          agentDepth: 1,
+                          reasons: [],
+                        }),
+                      }
+                    : {}),
+                  projectId: "actual-child-project",
+                  parentThreadId: "parent",
+                  agentPath: "/root/child",
+                  agentNickname: "Child",
+                  agentDepth: 1,
+                  childCount: 0,
+                },
               },
             },
-          },
-    );
-    const page = await repository.listSessions({
-      scope: "active",
-      parentThreadId: "parent",
-      projectId: "parent-project",
-      query: "parent-only",
-      cwd: "C:/parent",
-      model: "parent-model",
-      tool: "parent-tool",
-      hasMedia: true,
-    });
-    expect(page.total).toBe(1);
-    expect(page.items[0]).toMatchObject({
-      projectId: "actual-child-project",
-      summary: { id: "child", scope: "archived", cwd: "D:/child" },
-    });
-    expect(
-      (await repository.listSessions({ scope: "archived", parentThreadId: "__root__" })).total,
-    ).toBe(0);
-  });
+      );
+      const page = await repository.listSessions({
+        scope: "active",
+        parentThreadId: "parent",
+        projectId: "parent-project",
+        query: "parent-only",
+        cwd: "C:/parent",
+        model: "parent-model",
+        tool: "parent-tool",
+        hasMedia: true,
+      });
+      expect(page.total).toBe(1);
+      expect(page.items[0]).toMatchObject({
+        projectId: projectExists ? "actual-child-project" : null,
+        id: "child",
+        scope: "archived",
+        parentThreadId: "parent",
+      });
+      expect(page.items[0]).not.toHaveProperty("summary");
+      expect(page.items[0]?.agent).toEqual({
+        name: "Child",
+        path: "/root/child",
+        role: projectExists ? "reviewer" : null,
+      });
+      expect(page.items[0]).not.toHaveProperty("status");
+      expect(
+        (await repository.listProjects()).some((project) => project.id === "actual-child-project"),
+      ).toBe(projectExists);
+      expect(
+        (await repository.listSessions({ scope: "archived", parentThreadId: "__root__" })).total,
+      ).toBe(0);
+    },
+  );
 
   it("preserves the exact message destination emitted by the Pagefind record", async () => {
     const repository = new StaticConversationRepository(
@@ -136,7 +182,7 @@ describe("static conversation repository", () => {
       diagnosticIds: [],
       rawRecords: [],
     } as const;
-    const requester = vi.fn(async (path: string) => {
+    const requester = vi.fn<(path: string) => Promise<unknown>>(async (path) => {
       if (path.endsWith("navigator.json")) {
         return {
           version: 2,

@@ -143,7 +143,7 @@ export interface ConversationMessage {
   turnId: string;
   role: MessageRole;
   phase: string | null;
-  createdAt: string;
+  createdAt: string | null;
   sourceMarkdown: string;
   body: RichTextDocument;
   attachmentIds: string[];
@@ -171,12 +171,27 @@ interface ConversationActivityBase {
   turnId: string;
   createdAt: string | null;
   rawEventIds: string[];
+  presentation?: ActivityPresentation;
+}
+
+export interface ActivityPresentation {
+  category: "shell" | "read" | "search" | "edit" | "web" | "app" | "agent" | "other";
+  label: string;
+  subject: string;
+  status: ActivityStatus;
+  evidenceKind: "native" | "direct" | "host-attempt" | "inference";
+  itemId: string | null;
+  callId: string | null;
+  cellId: string | null;
+  childIds: string[];
+  details: JsonValue;
 }
 
 export interface ReasoningActivity extends ConversationActivityBase {
   kind: "reasoning";
   summary: string;
   body: RichTextDocument | null;
+  bodyFromSummary?: boolean;
   encrypted: boolean;
 }
 
@@ -210,6 +225,17 @@ export interface ToolActivity extends ConversationActivityBase {
   approvalAttempts?: GuardianApprovalEvidence[];
   nativeItemId?: string | null;
   approvalReviewId?: string | null;
+  codeMode?: CodeModeEvidence;
+}
+
+export interface CodeModeEvidence {
+  cellId: string | null;
+  scopeId: string | null;
+  /** The host's inventory claim, not proof that the viewer loaded every cell output */
+  completeness: "absent" | "partial" | "complete";
+  loadedCoverage: "unknown" | "partial";
+  deltas: Array<{ sourceEventId: string; calls: JsonObject[] | null; complete: boolean | null }>;
+  outerActivityIds: string[];
 }
 
 export interface WebSearchActivity extends ConversationActivityBase {
@@ -232,8 +258,8 @@ export interface FileChange {
   previousPath: string | null;
   diff: string | null;
   content: string | null;
-  addedLines: number;
-  removedLines: number;
+  addedLines: number | null;
+  removedLines: number | null;
 }
 
 export interface FileChangeActivity extends ConversationActivityBase {
@@ -356,6 +382,7 @@ export interface ConversationTurn {
   activities: ConversationActivity[];
   entryOrder?: TurnEntryReference[];
   finalAssistantMessageId?: string | null;
+  status?: "inProgress" | "completed" | "failed" | "interrupted" | "unknown";
   startedAt: string | null;
   completedAt: string | null;
   durationMs: number | null;
@@ -485,7 +512,7 @@ export const conversationMessageSchema = z.strictObject({
   turnId: z.string().min(1),
   role: messageRoleSchema,
   phase: z.string().nullable(),
-  createdAt: isoTimestampSchema,
+  createdAt: isoTimestampSchema.nullable(),
   sourceMarkdown: z.string(),
   body: richTextDocumentSchema,
   attachmentIds: z.array(z.string()),
@@ -513,6 +540,20 @@ const activityBaseShape = {
   turnId: z.string().min(1),
   createdAt: nullableTimestampSchema,
   rawEventIds: z.array(z.string()),
+  presentation: z
+    .strictObject({
+      category: z.enum(["shell", "read", "search", "edit", "web", "app", "agent", "other"]),
+      label: z.string(),
+      subject: z.string(),
+      status: activityStatusSchema,
+      evidenceKind: z.enum(["native", "direct", "host-attempt", "inference"]),
+      itemId: z.string().nullable(),
+      callId: z.string().nullable(),
+      cellId: z.string().nullable(),
+      childIds: z.array(z.string()),
+      details: jsonValueSchema,
+    })
+    .optional(),
 };
 
 export const guardianApprovalEvidenceSchema = z.strictObject({
@@ -520,7 +561,7 @@ export const guardianApprovalEvidenceSchema = z.strictObject({
   outcome: z.enum(["allow", "deny"]).nullable(),
   riskLevel: z.string().min(1),
   userAuthorization: z.string().min(1).nullable(),
-  rationale: z.string().min(1),
+  rationale: z.string(),
   reviewedAt: nullableTimestampSchema,
   reviewId: z.string().nullable().optional(),
   targetItemId: z.string().nullable().optional(),
@@ -535,6 +576,7 @@ export const conversationActivitySchema = z.discriminatedUnion("kind", [
     kind: z.literal("reasoning"),
     summary: z.string(),
     body: richTextDocumentSchema.nullable(),
+    bodyFromSummary: z.boolean().optional(),
     encrypted: z.boolean(),
   }),
   z.strictObject({
@@ -554,6 +596,22 @@ export const conversationActivitySchema = z.discriminatedUnion("kind", [
     approvalAttempts: z.array(guardianApprovalEvidenceSchema).optional(),
     nativeItemId: z.string().nullable().optional(),
     approvalReviewId: z.string().nullable().optional(),
+    codeMode: z
+      .strictObject({
+        cellId: z.string().nullable(),
+        scopeId: z.string().nullable(),
+        completeness: z.enum(["absent", "partial", "complete"]),
+        loadedCoverage: z.enum(["unknown", "partial"]),
+        deltas: z.array(
+          z.strictObject({
+            sourceEventId: z.string(),
+            calls: z.array(z.record(z.string(), jsonValueSchema)).nullable(),
+            complete: z.boolean().nullable(),
+          }),
+        ),
+        outerActivityIds: z.array(z.string()),
+      })
+      .optional(),
   }),
   z.strictObject({
     ...activityBaseShape,
@@ -580,8 +638,8 @@ export const conversationActivitySchema = z.discriminatedUnion("kind", [
         previousPath: z.string().min(1).nullable(),
         diff: z.string().nullable(),
         content: z.string().nullable(),
-        addedLines: countSchema,
-        removedLines: countSchema,
+        addedLines: countSchema.nullable(),
+        removedLines: countSchema.nullable(),
       }),
     ),
   }),
@@ -650,6 +708,7 @@ export const conversationTurnSchema = z.strictObject({
     )
     .optional(),
   finalAssistantMessageId: z.string().min(1).nullable().optional(),
+  status: z.enum(["inProgress", "completed", "failed", "interrupted", "unknown"]).optional(),
   startedAt: nullableTimestampSchema,
   completedAt: nullableTimestampSchema,
   durationMs: z.number().nonnegative().nullable(),

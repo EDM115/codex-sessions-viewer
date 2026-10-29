@@ -1,7 +1,28 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type { SourceGeneration } from "../../shared/types/conversation.ts";
-import type { DeepSearchJob } from "../../shared/types/library.ts";
+import { getCachedAsset } from "#server/cache/assetStore.ts";
+import {
+  catalogSession,
+  listCatalogProjectGroups,
+  listCatalogSessions,
+} from "#server/cache/catalogStore.ts";
+import {
+  getCachedInspector,
+  getCachedSessionSummary,
+  getCachedTurnChunk,
+  getCachedTurnNavigator,
+} from "#server/cache/repositoryStore.ts";
+import { searchCachedSessions } from "#server/cache/searchStore.ts";
+import { prepareHistoryPresentation } from "#server/history/historyPresentation.ts";
+import { unavailableNativeHistory } from "#server/history/nativeHistoryService.ts";
+import type { NativeProjectionQualification } from "#server/history/nativeProjectionQualification.ts";
+import type { ResolvedRolloutLineage } from "#server/ingestion/rolloutLineage.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { cachedThreadClassification } from "#server/metadata/threadClassification.ts";
+import type { ApprovalEvidenceResult } from "#shared/types/approvals.ts";
+import type { SourceGeneration } from "#shared/types/conversation.ts";
+import { historyNavigatorPage } from "#shared/types/history.ts";
+import type { DeepSearchJob } from "#shared/types/library.ts";
 import {
   repositoryCapabilitiesForMode,
   type ConversationRepository,
@@ -13,35 +34,21 @@ import {
   type HistoryPageQuery,
   type HistoryItemQuery,
   type RepositoryRequestOptions,
-} from "../../shared/types/repository.ts";
-import { getCachedAsset } from "../cache/assetStore.ts";
-import {
-  catalogSession,
-  listCatalogProjectGroups,
-  listCatalogSessions,
-} from "../cache/catalogStore.ts";
-import {
-  getCachedInspector,
-  getCachedSessionSummary,
-  getCachedTurnChunk,
-  getCachedTurnNavigator,
-} from "../cache/repositoryStore.ts";
-import { searchCachedSessions } from "../cache/searchStore.ts";
-import { unavailableNativeHistory } from "../history/nativeHistoryService.ts";
-import type { NativeProjectionQualification } from "../history/nativeProjectionQualification.ts";
-import type { ResolvedRolloutLineage } from "../ingestion/rolloutLineage.ts";
-import { cachedThreadClassification } from "../metadata/threadClassification.ts";
-import type { ApprovalEvidenceResult } from "../normalization/guardianEvidence.ts";
-import { InvalidationBus } from "./invalidationBus.ts";
+} from "#shared/types/repository.ts";
 
 export interface LiveRepositoryMaterializer {
+  getHistoryPage?: ConversationRepository["getHistoryPage"];
+  getTurnItems?: ConversationRepository["getTurnItems"];
   readNativeHistory?(
     lineage: ResolvedRolloutLineage,
     source: SourceGeneration,
     query: HistoryPageQuery | HistoryItemQuery,
     options?: RepositoryRequestOptions,
   ): Promise<NativeProjectionQualification>;
-  getApprovalEvidence?(sessionId: string): Promise<ApprovalEvidenceResult>;
+  getApprovalEvidence?(
+    sessionId: string,
+    options?: RepositoryRequestOptions,
+  ): Promise<ApprovalEvidenceResult>;
   prepareSessions(ids: readonly string[]): ReturnType<ConversationRepository["prepareSessions"]>;
   ensureMaterialized(id: string): Promise<void>;
   prepareTurnChunk?(chunk: TurnChunk): Promise<TurnChunk>;
@@ -88,6 +95,10 @@ export class LiveConversationRepository implements ConversationRepository {
   capabilities() {
     return repositoryCapabilitiesForMode("live");
   }
+  prepareHistoryPresentation: ConversationRepository["prepareHistoryPresentation"] = (
+    query,
+    options,
+  ) => prepareHistoryPresentation(query, options?.signal);
 
   readNativeHistory(
     lineage: ResolvedRolloutLineage,
@@ -155,6 +166,45 @@ export class LiveConversationRepository implements ConversationRepository {
         };
   }
 
+  async getSessionMetadata(id: string, options: RepositoryRequestOptions = {}) {
+    options.signal?.throwIfAborted();
+    const record = catalogSession(this.#database, id);
+    if (record === null) {
+      throw new Error("Session not found");
+    }
+    return record.summary;
+  }
+
+  async getHistoryPage(
+    id: string,
+    query: HistoryPageQuery,
+    options: RepositoryRequestOptions = {},
+  ) {
+    const metadata = await this.getSessionMetadata(id, options);
+    if (!this.#materializer.getHistoryPage) {
+      throw new Error("Progressive history unavailable");
+    }
+    const page = await this.#materializer.getHistoryPage(id, query, options);
+    options.signal?.throwIfAborted();
+    return { ...page, metadataRevision: metadata.metadataRevision ?? metadata.revision };
+  }
+
+  async getTurnItems(id: string, query: HistoryItemQuery, options: RepositoryRequestOptions = {}) {
+    await this.getSessionMetadata(id, options);
+    if (!this.#materializer.getTurnItems) {
+      throw new Error("Progressive history unavailable");
+    }
+    return this.#materializer.getTurnItems(id, query, options);
+  }
+
+  async getHistoryNavigator(
+    id: string,
+    query: HistoryPageQuery,
+    options: RepositoryRequestOptions = {},
+  ) {
+    return historyNavigatorPage(await this.getHistoryPage(id, query, options));
+  }
+
   getClassification(id: string) {
     const record = catalogSession(this.#database, id);
     if (record === null) {
@@ -174,11 +224,11 @@ export class LiveConversationRepository implements ConversationRepository {
     };
   }
 
-  async getApprovalEvidence(id: string) {
+  async getApprovalEvidence(id: string, options: RepositoryRequestOptions = {}) {
     if (this.#materializer.getApprovalEvidence === undefined) {
       throw new Error("Approval evidence is unavailable");
     }
-    return this.#materializer.getApprovalEvidence(id);
+    return this.#materializer.getApprovalEvidence(id, options);
   }
 
   async getTurnNavigator(id: string) {

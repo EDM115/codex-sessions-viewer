@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 import { expect, test } from "@nuxt/test-utils/playwright";
 import type { Locator } from "@playwright/test";
 
@@ -9,6 +11,15 @@ import type {
 } from "../../shared/types/conversation.ts";
 import type { TurnChunk } from "../../shared/types/repository.ts";
 import type { RichTextNode } from "../../shared/types/richText.ts";
+
+test.use({
+  nuxt: {
+    rootDir: fileURLToPath(new URL("../fixtures/nuxt-viewport", import.meta.url)),
+    dev: false,
+    host: process.env["CODEX_VIEWER_TEST_URL"],
+    build: true,
+  },
+});
 
 const sessionId = "77777777-7777-4777-8777-777777777777";
 const timestamp = "2026-09-14T12:00:00.000Z";
@@ -190,15 +201,15 @@ for (const liveFollow of [true, false]) {
         if (url.searchParams.get("direction") === "before") {
           beforeRequested = true;
           await beforeGate;
-          return route.fulfill({ json: chunk(0, 20) });
+          return route.fulfill({ json: chunk(30, 50) });
         }
         if (url.searchParams.get("direction") === "after") {
           afterRequested = true;
-          return route.fulfill({ json: chunk(100, 120) });
+          return route.fulfill({ json: chunk(70, 90) });
         }
         if (refreshing) {
           refreshRequested = true;
-          const refreshed = chunk(40, 80);
+          const refreshed = chunk(50, 70);
           refreshed.revision = "fixture-2";
           refreshed.turns = refreshed.turns.map((item) =>
             item.index !== 60
@@ -212,7 +223,7 @@ for (const liveFollow of [true, false]) {
           );
           return route.fulfill({ json: refreshed });
         }
-        return route.fulfill({ json: chunk(20, 100) });
+        return route.fulfill({ json: chunk(50, 70) });
       }
       return route.fulfill({ json: summary });
     });
@@ -244,7 +255,7 @@ for (const liveFollow of [true, false]) {
       .getByRole("button", { name: "Load later turns" })
       .evaluate((button) => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     await expect.poll(() => afterRequested).toBe(true);
-    await expect(page.getByRole("button", { name: "Load later turns" })).toBeHidden();
+    await expect(scroller).toHaveAttribute("data-retained-turns", "40");
     await expect
       .poll(async () => Math.abs((await relativeTop(anchor)) - beforeAppend))
       .toBeLessThanOrEqual(3);
@@ -259,7 +270,7 @@ for (const liveFollow of [true, false]) {
     await expect(anchor).toBeInViewport();
     const beforePrepend = await relativeTop(anchor);
     releaseBefore();
-    await expect(page.getByRole("button", { name: "Load earlier turns" })).toBeHidden();
+    await expect(scroller).toHaveAttribute("data-retained-turns", "60");
     await expect(anchor).toBeVisible();
     await expect
       .poll(async () => Math.abs((await relativeTop(anchor)) - beforePrepend))
@@ -344,7 +355,7 @@ test("keeps the reading window when a wheel cancels a deferred deep target", asy
         await targetGate;
         return route.fulfill({ json: chunk(0, 5) });
       }
-      return route.fulfill({ json: chunk(20, 100) });
+      return route.fulfill({ json: chunk(50, 70) });
     }
     return route.fulfill({ json: summary });
   });

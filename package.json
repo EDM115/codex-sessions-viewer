@@ -3,6 +3,10 @@
   "version": "0.3.0",
   "private": true,
   "type": "module",
+  "imports": {
+    "#shared/*": "./shared/*",
+    "#server/*": "./server/*"
+  },
   "scripts": {
     "build": "cross-env CODEX_VIEWER_MODE=live nuxt build",
     "coverage": "vitest run --coverage --testTimeout=15000 --maxWorkers=1 --no-file-parallelism",
@@ -17,7 +21,7 @@
     "postinstall": "nuxt prepare",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "test:integration": "vitest run --project node tests/integration --passWithNoTests",
+    "test:integration": "vitest run --project node --project http tests/integration tests/http --passWithNoTests",
     "test:performance": "vitest run --project performance",
     "typecheck": "nuxt typecheck && tsc -p tsconfig.custom.json",
     "verify:output": "jiti scripts/verify-output.ts",
@@ -36,7 +40,6 @@
     "env-paths": "~4.0.0",
     "file-type": "~22.2.0",
     "gray-matter": "~4.0.3",
-    "h3": "~2.0.8",
     "mermaid": "~12.2.0",
     "nuxt": "~4.6.3",
     "pagefind": "~1.5.2",

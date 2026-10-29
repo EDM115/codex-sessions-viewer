@@ -33,6 +33,11 @@
     "target": "ESNext",
     "tsBuildInfoFile": "./.nuxt/tsconfig.custom.tsbuildinfo",
     "types": ["node"],
+    "paths": {
+      "#shared/*": ["./shared/*"],
+      "~/*": ["./app/*"],
+      "#server/*": ["./server/*"]
+    },
     "verbatimModuleSyntax": true
   },
   "include": ["./scripts/**/*.ts", "./tests/**/*.ts"],
@@ -44,6 +49,9 @@
     "./node_modules/**/*",
     "./tests/integration/export/pagefind.test.ts",
     "./tests/unit/content-rendering/**/*",
-    "./tests/unit/ui/**/*"
+    "./tests/unit/ui/**/*",
+    "./tests/nuxt/**/*",
+    "./tests/fixtures/nuxt-history/**/*",
+    "./tests/fixtures/nuxt-viewport/**/*"
   ]
 }

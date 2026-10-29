@@ -1,7 +1,5 @@
-import { defineEventHandler } from "h3";
-
-import { useCatalogReadyLiveViewerRuntime } from "../../live/requestContext.ts";
-import { sessionListQuery } from "../_validation.ts";
+import { sessionListQuery } from "#server/api/_validation.ts";
+import { useCatalogReadyLiveViewerRuntime } from "#server/live/requestContext.ts";
 
 export default defineEventHandler(async (event) => {
   const query = await sessionListQuery(event);

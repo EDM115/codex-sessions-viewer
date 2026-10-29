@@ -1,8 +1,6 @@
-import { getHeader, getMethod } from "h3";
-
-import { loadServerViewerConfig } from "../core/config.ts";
-import { attachLiveViewerRuntime } from "../live/requestContext.ts";
-import { LiveViewerRuntime } from "../live/viewerRuntime.ts";
+import { loadServerViewerConfig } from "#server/core/config.ts";
+import { attachLiveViewerRuntime } from "#server/live/requestContext.ts";
+import { LiveViewerRuntime } from "#server/live/viewerRuntime.ts";
 
 function configuredPort(): number | undefined {
   const source = process.env["CODEX_VIEWER_PORT"]?.trim();

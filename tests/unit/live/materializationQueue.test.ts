@@ -26,6 +26,22 @@ function ready(id: string): PreparationResult {
 }
 
 describe("MaterializationQueue", () => {
+  it("defers deliberate deep search while selected history owns priority without blocking open work", async () => {
+    const started: string[] = [];
+    const queue = new MaterializationQueue(async (id) => {
+      started.push(id);
+      return ready(id);
+    });
+    const release = queue.holdSelected();
+    const search = queue.enqueue(["search"], "deep-search", "search");
+    const open = queue.enqueue(["selected"], "open", "view");
+    await open;
+    expect(started).toEqual(["selected"]);
+    release();
+    await search;
+    expect(started).toEqual(["selected", "search"]);
+    await queue.close();
+  });
   it("runs one worker at a time and lets open work overtake queued visible work", async () => {
     const gates = new Map<string, Deferred>();
     const started: string[] = [];

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { useConversationTimeline } from "../../../app/composables/useConversationTimeline.ts";
-import type { ConversationTurn } from "../../../shared/types/conversation.ts";
-import type { ConversationRepository, TurnChunk } from "../../../shared/types/repository.ts";
+import type { ConversationTurn } from "#shared/types/conversation.ts";
+import type { ConversationRepository, TurnChunk } from "#shared/types/repository.ts";
+import { useConversationTimeline } from "~/composables/useConversationTimeline.ts";
 
 function turn(index: number): ConversationTurn {
   return {
@@ -394,4 +394,36 @@ describe("conversation timeline repository integration", () => {
     expect(timeline.canLoadAfter.value).toBe(false);
     expect(timeline.targetErrorTurnId.value).toBeNull();
   });
+});
+
+// oxlint-disable no-await-in-loop -- Each page request consumes the source cursor returned by the previous request
+it("keeps only adjacent static chunks and can reload an evicted range", async () => {
+  const chunk = (start: number): TurnChunk => ({
+    sessionId: "session-1",
+    turns: Array.from({ length: 20 }, (_, i) => turn(start + i)),
+    previousCursor: start > 0 ? String(start - 20) : null,
+    nextCursor: start < 100 ? String(start + 20) : null,
+    revision: "A",
+  });
+  const timeline = useConversationTimeline({
+    sessionId: "session-1",
+    initialChunk: chunk(100),
+    repository: {
+      getTurns: async (_id, query) =>
+        chunk(
+          query.targetTurnId
+            ? Math.floor(Number(query.targetTurnId.slice(5)) / 20) * 20
+            : Number(query.cursor),
+        ),
+    },
+  });
+  for (let i = 0; i < 5; i++) {
+    await timeline.loadBefore();
+  }
+  expect(timeline.turns.value.length).toBeLessThanOrEqual(60);
+  for (let i = 0; i < 5; i++) {
+    await timeline.loadAfter();
+  }
+  expect(timeline.turns.value.at(-1)?.id).toBe("turn-119");
+  expect(timeline.turns.value.length).toBeLessThanOrEqual(60);
 });

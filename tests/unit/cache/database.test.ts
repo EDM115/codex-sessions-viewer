@@ -168,7 +168,23 @@ describe("viewer cache database", () => {
       });
       const tables = ["source_files", "sessions", "session_catalog", "catalog_sidebar"];
       const before = tables.map((table) => database.prepare(`SELECT * FROM ${table}`).all());
+      const rawEnvelope = JSON.stringify({
+        method: "item/autoApprovalReview/started",
+        params: { reviewId: "old-review" },
+      });
+      database
+        .prepare(
+          "INSERT INTO raw_events (id, session_id, source_order, type, payload_json) VALUES ('old-review', 'session-v1', 0, 'native_notification', ?)",
+        )
+        .run(rawEnvelope);
       migrateCacheDatabase(database);
+      expect(
+        database
+          .prepare(
+            "SELECT payload_json, logical_visibility FROM raw_events WHERE id = 'old-review'",
+          )
+          .get(),
+      ).toEqual({ payload_json: rawEnvelope, logical_visibility: "unresolved" });
       expect(database.prepare("PRAGMA user_version").get()).toEqual({
         user_version: CACHE_SCHEMA_VERSION,
       });

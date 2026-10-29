@@ -1,11 +1,7 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-
 import type { JsonValue } from "#shared/types/conversation.ts";
-
-import CopyIconButton from "./CopyIconButton.vue";
-import { formattedJson } from "./format.ts";
-import { boundedJson } from "./toolPresentation.ts";
+import { formattedJson } from "~/components/conversation/format.ts";
+import { boundedJson } from "~/components/conversation/toolPresentation.ts";
 const props = defineProps<{ value: JsonValue; label: string }>();
 const open = ref(false);
 const complete = ref(false);
@@ -26,11 +22,14 @@ const matchingText = computed(() =>
     class="conversation-raw"
     @toggle="open = ($event.currentTarget as HTMLDetailsElement).open"
   >
-    <summary>{{ label }}</summary>
+    <summary :aria-expanded="open">{{ label }}</summary>
     <div v-if="open" class="conversation-raw__body">
       <div class="conversation-raw__controls">
         <label>Find in displayed record <input v-model="query" type="search" /></label>
-        <CopyIconButton :label="`Copy complete ${label}`" :text="() => formattedJson(value)" />
+        <ConversationCopyIconButton
+          :label="`Copy complete ${label}`"
+          :text="() => formattedJson(value)"
+        />
       </div>
       <p v-if="!complete && preview.partial">
         Partial preview. Copy includes the complete original value.

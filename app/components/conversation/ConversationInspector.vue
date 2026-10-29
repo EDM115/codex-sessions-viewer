@@ -1,17 +1,19 @@
 <script setup lang="ts">
 import { PhArrowClockwise, PhX } from "@phosphor-icons/vue";
-import { computed, onMounted, ref, useId, watch } from "vue";
 
 import type { ConversationActivity } from "#shared/types/conversation.ts";
 import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 import type { InspectorTarget, InspectorRecord } from "#shared/types/repository.ts";
-
-import UiButton from "../ui/UiButton.vue";
-import UiIconButton from "../ui/UiIconButton.vue";
-import ConversationRaw from "./ConversationRaw.vue";
-import CopyIconButton from "./CopyIconButton.vue";
-import { formatDuration, formattedJson, formatTimestamp } from "./format.ts";
-import { shortText, textField, toolPresentation } from "./toolPresentation.ts";
+import {
+  formatDuration,
+  formattedJson,
+  formatTimestamp,
+} from "~/components/conversation/format.ts";
+import {
+  shortText,
+  textField,
+  toolPresentation,
+} from "~/components/conversation/toolPresentation.ts";
 
 const props = defineProps<{
   activities?: ConversationActivity[];
@@ -112,6 +114,67 @@ onMounted(() => dialog.value?.focus());
           <dt>Target</dt>
           <dd>{{ record.target.type }} · {{ record.target.id }}</dd>
         </div>
+        <template v-if="record.historySnapshot">
+          <div>
+            <dt>Thread</dt>
+            <dd>{{ record.historySnapshot.threadId }}</dd>
+          </div>
+          <div>
+            <dt>Physical rollout</dt>
+            <dd>{{ record.historySnapshot.physicalRolloutId }}</dd>
+          </div>
+          <div>
+            <dt>Loaded turn</dt>
+            <dd>{{ record.historySnapshot.turnId }}</dd>
+          </div>
+          <div>
+            <dt>Source turn</dt>
+            <dd>{{ record.historySnapshot.sourceTurnId ?? "Unavailable" }}</dd>
+          </div>
+          <div>
+            <dt>History epoch</dt>
+            <dd>{{ record.historySnapshot.historyEpoch }}</dd>
+          </div>
+          <div>
+            <dt>Content revision</dt>
+            <dd>{{ record.historySnapshot.contentRevision }}</dd>
+          </div>
+          <div>
+            <dt>Detail availability</dt>
+            <dd>
+              {{
+                record.historySnapshot.detail === "unresolved"
+                  ? "Previously loaded, awaiting source verification"
+                  : record.historySnapshot.detail
+              }}
+            </dd>
+          </div>
+          <div>
+            <dt>Source evidence</dt>
+            <dd>
+              {{ record.historySnapshot.evidenceAvailable ? "Loaded snapshot" : "Unavailable" }}
+            </dd>
+          </div>
+          <div>
+            <dt>Original ordinal</dt>
+            <dd>{{ record.historySnapshot.ordinal ?? "Unavailable" }}</dd>
+          </div>
+          <div>
+            <dt>Update ordinal</dt>
+            <dd>{{ record.historySnapshot.updatedAtOrdinal ?? "Unavailable" }}</dd>
+          </div>
+          <div>
+            <dt>Original decoded bytes</dt>
+            <dd>
+              {{ record.historySnapshot.decodedByteStart ?? "Unavailable" }} –
+              {{ record.historySnapshot.decodedByteEnd ?? "Unavailable" }}
+            </dd>
+          </div>
+          <div>
+            <dt>Update decoded byte</dt>
+            <dd>{{ record.historySnapshot.updatedAtDecodedByte ?? "Unavailable" }}</dd>
+          </div>
+        </template>
         <div>
           <dt>Model</dt>
           <dd>{{ record.models.join(", ") || "Unavailable" }}</dd>
@@ -178,11 +241,15 @@ onMounted(() => dialog.value?.focus());
             <dd>{{ count }}</dd>
           </div>
         </dl>
-        <p v-else>No tool calls.</p>
+        <p v-else>
+          {{ record.historySnapshot ? "Complete turn counts unavailable" : "No tool calls." }}
+        </p>
       </section>
       <section>
         <h3>Related reasoning and work events</h3>
-        <p v-if="record.activityIds.length === 0">None</p>
+        <p v-if="record.activityIds.length === 0">
+          {{ record.historySnapshot ? "Unavailable" : "None" }}
+        </p>
         <ul v-else>
           <li v-for="id in record.activityIds" :key="id">
             <button type="button" @click="emit('inspect', { type: 'activity', id })">
@@ -193,11 +260,15 @@ onMounted(() => dialog.value?.focus());
       </section>
       <section>
         <h3>Event IDs</h3>
-        <p class="conversation-inspector__ids">{{ record.eventIds.join(" · ") || "None" }}</p>
+        <p class="conversation-inspector__ids">
+          {{ record.eventIds.join(" · ") || (record.historySnapshot ? "Unavailable" : "None") }}
+        </p>
       </section>
       <section>
         <h3>Diagnostics</h3>
-        <p v-if="record.diagnosticIds.length === 0">None</p>
+        <p v-if="record.diagnosticIds.length === 0">
+          {{ record.historySnapshot ? "Unavailable" : "None" }}
+        </p>
         <div v-for="id in record.diagnosticIds" :key="id">
           <p>
             {{
@@ -217,9 +288,12 @@ onMounted(() => dialog.value?.focus());
         :open="rawOpen"
         @toggle="rawOpen = ($event.currentTarget as HTMLDetailsElement).open"
       >
-        <summary>Preserved raw protocol records · {{ record.rawRecords.length }}</summary>
+        <summary>
+          {{ record.historySnapshot ? "Loaded source evidence" : "Preserved raw protocol records" }}
+          · {{ record.rawRecords.length }}
+        </summary>
         <div v-if="rawOpen">
-          <CopyIconButton
+          <ConversationCopyIconButton
             label="Copy complete raw protocol records"
             :text="() => formattedJson(record!.rawRecords)"
           />

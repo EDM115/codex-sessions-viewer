@@ -1,13 +1,11 @@
-import {
-  createError,
-  getHeader,
-  getRequestHost,
-  getValidatedQuery,
-  getValidatedRouterParams,
-  type H3Event,
-} from "h3";
+import type { H3Event } from "h3";
 import * as z from "zod";
 
+import {
+  validateSearchQuery,
+  validateSessionListQuery,
+  validateTurnChunkQuery,
+} from "#server/live/queryValidation.ts";
 import {
   deepSearchRequestSchema,
   inspectorTargetSchema,
@@ -16,12 +14,7 @@ import {
   type SearchQuery,
   type SessionListQuery,
   type TurnChunkQuery,
-} from "../../shared/types/repository.ts";
-import {
-  validateSearchQuery,
-  validateSessionListQuery,
-  validateTurnChunkQuery,
-} from "../live/queryValidation.ts";
+} from "#shared/types/repository.ts";
 
 const idSchema = z.string().min(1).max(512);
 const sessionParamsSchema = z.strictObject({ id: idSchema });
@@ -70,6 +63,14 @@ export function searchQuery(event: H3Event): Promise<SearchQuery> {
 }
 
 export function turnChunkQuery(event: H3Event): Promise<TurnChunkQuery> {
+  if (getQuery(event)["legacy"] === "1") {
+    const { legacy: _legacy, ...query } = getQuery(event);
+    const parsed = validateTurnChunkQuery(query);
+    if (parsed === false) {
+      throw createError({ statusCode: 400, statusMessage: "Invalid turn query" });
+    }
+    return Promise.resolve(parsed);
+  }
   return getValidatedQuery(event, validateTurnChunkQuery);
 }
 

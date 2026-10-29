@@ -162,3 +162,27 @@ describe("unknown event preservation", () => {
     });
   });
 });
+
+it("preserves separate native approval notification envelopes instead of manufacturing projection items", () => {
+  const value = {
+    method: "item/autoApprovalReview/started",
+    params: {
+      threadId: "thread",
+      turnId: "turn",
+      reviewId: "review",
+      targetItemId: null,
+      startedAtMs: 1000,
+      review: { status: "inProgress" },
+      action: { type: "networkAccess", host: "example.test", port: 443 },
+    },
+  };
+  const parsed = parseCodexEvent(record(value));
+  expect(parsed).toMatchObject({
+    success: true,
+    event: {
+      type: "native_notification",
+      payloadType: "item/autoApprovalReview/started",
+      raw: value,
+    },
+  });
+});

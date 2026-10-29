@@ -1,14 +1,15 @@
 import { pathToFileURL } from "node:url";
 
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import { fileLineCountLabel } from "#shared/timeline/fileChanges.ts";
 import type {
   ConversationActivity,
   ConversationMessage,
   ConversationTurn,
   MediaActivity,
   ToolActivity,
-} from "../../shared/types/conversation.ts";
-import type { RichTextCodeNode } from "../../shared/types/richText.ts";
-import type { NormalizedSession } from "../normalization/normalizeSession.ts";
+} from "#shared/types/conversation.ts";
+import type { RichTextCodeNode } from "#shared/types/richText.ts";
 
 function joinSections(sections: Array<string | null>): string {
   return sections
@@ -128,8 +129,14 @@ function serializeActivity(activity: ConversationActivity): string | null {
         .map((file) =>
           joinSections([
             `#### ${file.change === "add" ? "Created" : file.change === "delete" ? "Deleted" : file.change === "move" ? "Moved" : "Edited"} file — ${file.path}`,
-            `+${file.addedLines} −${file.removedLines}`,
-            file.diff === null ? null : fenced(file.diff, "diff"),
+            fileLineCountLabel(file),
+            file.diff !== null
+              ? fenced(file.diff, "diff")
+              : file.content !== null
+                ? fenced(file.content, "text")
+                : file.change === "add" || file.change === "delete"
+                  ? "Recorded file content unavailable."
+                  : null,
           ]),
         )
         .join("\n\n");

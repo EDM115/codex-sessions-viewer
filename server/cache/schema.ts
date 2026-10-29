@@ -1,4 +1,7 @@
-export const CACHE_SCHEMA_VERSION = 6;
+export const CACHE_SCHEMA_VERSION = 7;
+export const LOGICAL_VISIBILITY_SCHEMA_SQL = `
+  ALTER TABLE raw_events ADD COLUMN logical_visibility TEXT NOT NULL DEFAULT 'unresolved' CHECK (logical_visibility IN ('visible', 'context-only', 'unresolved'));
+`;
 export const VERIFIED_PROJECTION_SCHEMA_SQL = `
   CREATE TABLE verified_history_projections (
     association_key TEXT PRIMARY KEY,

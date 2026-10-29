@@ -1,11 +1,18 @@
 import * as z from "zod";
 
+import { approvalEvidenceResultSchema } from "#shared/types/approvals.ts";
 import {
   conversationSummarySchema,
   type ConversationSummary,
   type TurnNavigatorItem,
 } from "#shared/types/conversation.ts";
 import {
+  historyNavigatorPage,
+  type HistoryPage,
+  type HistoryTurnWindow,
+} from "#shared/types/history.ts";
+import {
+  catalogSessionMetadataSchema,
   deepSearchJobSchema,
   libraryEntryFromSummary,
   catalogProjectGroupFromLegacy,
@@ -16,9 +23,12 @@ import {
 } from "#shared/types/library.ts";
 import {
   repositoryCapabilitiesForMode,
+  UnsupportedHistoryError,
   resolvedAssetSchema,
   turnChunkSchema,
   type ConversationRepository,
+  type HistoryPageQuery,
+  type HistoryItemQuery,
   type InspectorRecord,
   type InspectorTarget,
   type RepositoryRequestOptions,
@@ -37,8 +47,7 @@ import {
   staticNavigatorPayloadSchema,
   type StaticLibraryPayload,
 } from "#shared/types/staticPayloads.ts";
-
-import type { RepositoryRequester } from "./live.ts";
+import type { RepositoryRequester } from "~/repositories/live.ts";
 
 interface PagefindResultData {
   excerpt?: unknown;
@@ -174,21 +183,19 @@ function staticProjection(
     )
     .map((group) =>
       ambiguousGroups.has(group.groupId)
-        ? {
-            ...group,
+        ? Object.assign({}, group, {
             activeCount: 0,
             archivedCount: 0,
             diagnostics: [
               "Static v1 does not distinguish the definitions sharing this project ID.",
             ],
-          }
+          })
         : group.sidebar?.kind === "section"
-          ? {
-              ...group,
+          ? Object.assign({}, group, {
               diagnostics: [
                 "Static v1 preserves this Section grouping but not its underlying project membership.",
               ],
-            }
+            })
           : group,
     );
   if (unresolvedActive + unresolvedArchived > 0) {
@@ -347,10 +354,15 @@ export class StaticConversationRepository implements ConversationRepository {
   private deepSearchSequence = 0;
   private readonly deepSearchJobs = new Map<string, DeepSearchJob>();
 
+  private readonly requester: RepositoryRequester;
+  private readonly pagefindLoader: PagefindLoader;
   constructor(
-    private readonly requester: RepositoryRequester = browserRequest,
-    private readonly pagefindLoader: PagefindLoader = loadBrowserPagefind,
-  ) {}
+    requester: RepositoryRequester = browserRequest,
+    pagefindLoader: PagefindLoader = loadBrowserPagefind,
+  ) {
+    this.requester = requester;
+    this.pagefindLoader = pagefindLoader;
+  }
 
   capabilities() {
     return repositoryCapabilitiesForMode("static");
@@ -454,11 +466,62 @@ export class StaticConversationRepository implements ConversationRepository {
     };
   }
 
+  async getApprovalEvidence(id: string, options: RepositoryRequestOptions = {}) {
+    const evidence = approvalEvidenceResultSchema.parse(
+      await this.requester(`/payloads/sessions/${encodeURIComponent(id)}/approvals.json`, options),
+    );
+    if (evidence.sessionId !== id) {
+      throw new Error("Approval evidence belongs to a different session");
+    }
+    return evidence;
+  }
+
   async getSession(id: string): Promise<ConversationSummary> {
     return summaryPayloadSchema.parse(
       await this.requester(`/payloads/sessions/${encodeURIComponent(id)}/summary.json`),
     ).summary;
   }
+
+  async getSessionMetadata(id: string, options: RepositoryRequestOptions = {}) {
+    return catalogSessionMetadataSchema.parse(
+      summaryPayloadSchema.parse(
+        await this.requester(`/payloads/sessions/${encodeURIComponent(id)}/summary.json`, options),
+      ).summary,
+    );
+  }
+
+  async getHistoryPage(
+    _id: string,
+    _query: HistoryPageQuery,
+    options: RepositoryRequestOptions = {},
+  ): Promise<HistoryPage> {
+    options.signal?.throwIfAborted();
+    throw new UnsupportedHistoryError();
+  }
+
+  async getTurnItems(
+    _id: string,
+    _query: HistoryItemQuery,
+    options: RepositoryRequestOptions = {},
+  ): Promise<HistoryTurnWindow> {
+    options.signal?.throwIfAborted();
+    throw new UnsupportedHistoryError();
+  }
+
+  async getHistoryNavigator(
+    id: string,
+    query: HistoryPageQuery,
+    options: RepositoryRequestOptions = {},
+  ) {
+    return historyNavigatorPage(await this.getHistoryPage(id, query, options));
+  }
+  prepareHistoryPresentation: ConversationRepository["prepareHistoryPresentation"] = async (
+    _query,
+    options,
+  ) => {
+    options?.signal?.throwIfAborted();
+    throw new Error("Static exports use their prepared rich-text payloads");
+  };
 
   async getTurnNavigator(id: string): Promise<TurnNavigatorItem[]> {
     return (await this.navigator(id)).items;

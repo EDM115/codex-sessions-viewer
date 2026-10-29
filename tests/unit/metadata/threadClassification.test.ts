@@ -34,6 +34,30 @@ async function rawSession(payload: JsonObject) {
 
 describe("structural visibility policy", () => {
   it.each([
+    {
+      subAgent: {
+        thread_spawn: { parent_thread_id: "parent", agent_role: "reviewer", agentNickname: "Ada" },
+      },
+    },
+    {
+      subagent: {
+        threadSpawn: { parentThreadId: "parent", agentRole: "reviewer", agent_nickname: "Ada" },
+      },
+    },
+  ] as JsonObject[])(
+    "preserves mixed native role shapes with explicit metadata precedence: %j",
+    (source) => {
+      expect(classifyCatalogThread({ source })).toMatchObject({
+        visibility: "delegated-child",
+        agentRole: "reviewer",
+        agentNickname: "Ada",
+      });
+      expect(
+        classifyCatalogThread({ source, agentRole: "builder", agentNickname: "Grace" }),
+      ).toMatchObject({ agentRole: "builder", agentNickname: "Grace" });
+    },
+  );
+  it.each([
     ["attached", "raw"],
     ["attached", "native"],
     ["fork", "raw"],

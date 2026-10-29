@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { normalizeSession } from "#server/normalization/normalizeSession.ts";
+
 import type { JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
 import {
   matchGuardianEvidence,
@@ -7,8 +9,11 @@ import {
   associateApprovalReviews,
   parseGuardianTurns,
   parseNativeApprovalReview,
+  parseParentNativeReviews,
+  parentNativeReviewAvailability,
 } from "../../../server/normalization/guardianEvidence.ts";
 import type { ToolActivity } from "../../../shared/types/conversation.ts";
+import { cutoffReviewRecords } from "../../fixtures/history/parentReviews.ts";
 
 function records(values: JsonlRecord["value"][]): JsonlRecord[] {
   return values.map((value, index) => ({
@@ -189,6 +194,9 @@ describe("guardian approval evidence", () => {
       { ...base, reviewId: "review-a", status: "denied" },
       { ...base, reviewId: "review-b", status: "approved", outcome: "allow" as const },
     ];
+    if (!reviews[1]) {
+      throw new Error("Expected the second review fixture");
+    }
     const result = associateApprovalReviews([target], reviews, { sessionId: "parent" });
     expect(result.matches.get("tool")).toEqual(reviews);
     expect(
@@ -204,7 +212,7 @@ describe("guardian approval evidence", () => {
           target,
           { ...target, id: "different", nativeItemId: "other-item", approvalReviewId: "review-b" },
         ],
-        [reviews[1]!],
+        [reviews[1]],
         { sessionId: "parent" },
       ).unattached,
     ).toEqual([{ review: reviews[1], reason: "conflicting-targets" }]);
@@ -301,4 +309,241 @@ describe("guardian approval evidence", () => {
     expect(attempts).toHaveLength(2);
     expect(attempts.map((review) => review.status)).toEqual(["pending", "pending"]);
   });
+});
+
+describe("source-shaped app-server approval notifications", () => {
+  it("ingests started/completed envelopes as one review, preserves repeated attempts and leaves unknown pending/network targets unattached", () => {
+    const base = {
+      threadId: "parent",
+      turnId: "turn-1",
+      startedAtMs: 1000,
+      targetItemId: "command",
+      action: {
+        type: "command",
+        source: "unifiedExec",
+        command: ["node", "job.js"],
+        cwd: "C:/repo",
+      },
+    };
+    const reviews = parseGuardianTurns(
+      records([
+        {
+          method: "item/autoApprovalReview/started",
+          params: {
+            ...base,
+            reviewId: "review-a",
+            review: {
+              status: "inProgress",
+              riskLevel: null,
+              userAuthorization: null,
+              rationale: null,
+            },
+          },
+        },
+        {
+          method: "item/autoApprovalReview/completed",
+          params: {
+            ...base,
+            reviewId: "review-a",
+            completedAtMs: 2000,
+            decisionSource: "agent",
+            review: {
+              status: "denied",
+              riskLevel: "high",
+              userAuthorization: "unknown",
+              rationale: "not authorized",
+            },
+          },
+        },
+        {
+          method: "item/autoApprovalReview/started",
+          params: { ...base, reviewId: "review-b", review: { status: "inProgress" } },
+        },
+        {
+          method: "item/autoApprovalReview/completed",
+          params: {
+            ...base,
+            reviewId: "network",
+            targetItemId: null,
+            completedAtMs: 3000,
+            decisionSource: "agent",
+            action: {
+              type: "networkAccess",
+              target: "example.test",
+              host: "example.test",
+              protocol: "https",
+              port: 443,
+            },
+            review: { status: "denied" },
+          },
+        },
+        {
+          method: "item/autoApprovalReview/completed",
+          params: {
+            ...base,
+            reviewId: "mcp-denied",
+            targetItemId: "missing-mcp",
+            completedAtMs: 4000,
+            decisionSource: "agent",
+            action: {
+              type: "mcpToolCall",
+              server: "service",
+              toolName: "delete",
+              connectorId: null,
+              connectorName: null,
+              toolTitle: null,
+            },
+            review: { status: "denied" },
+          },
+        },
+      ]),
+    );
+    expect(reviews).toHaveLength(4);
+    expect(reviews[0]).toMatchObject({
+      reviewId: "review-a",
+      outcome: "deny",
+      requestedAt: "1970-01-01T00:00:01.000Z",
+      reviewedAt: "1970-01-01T00:00:02.000Z",
+    });
+    expect(reviews[0]?.rawEventIds).toHaveLength(2);
+    expect(reviews[1]).toMatchObject({ reviewId: "review-b", outcome: null, reviewedAt: null });
+    const associations = associateApprovalReviews(
+      [{ ...tool("render-command", {}), nativeItemId: "command" }],
+      reviews,
+      { sessionId: "parent" },
+    );
+    expect(associations.matches.get("render-command")?.map((review) => review.reviewId)).toEqual([
+      "review-a",
+      "review-b",
+    ]);
+    expect(
+      associations.unattached.map(({ review, reason }) => [
+        review.reviewId,
+        reason,
+        review.outcome,
+      ]),
+    ).toEqual([
+      ["network", "missing-target", "deny"],
+      ["mcp-denied", "missing-target", "deny"],
+    ]);
+  });
+});
+
+it("rejects source notifications that reuse a review ID for conflicting native targets", () => {
+  const reviews = parseGuardianTurns(
+    records(
+      ["first", "second"].map((targetItemId) => ({
+        method: "item/autoApprovalReview/completed",
+        params: {
+          threadId: "parent",
+          turnId: "turn-1",
+          reviewId: "conflict",
+          targetItemId,
+          startedAtMs: 1000,
+          completedAtMs: 2000,
+          review: { status: "approved" },
+          action: { type: "command", command: ["node"], cwd: "C:/repo" },
+        },
+      })),
+    ),
+  );
+  const result = associateApprovalReviews([tool("first", {}), tool("second", {})], reviews, {
+    sessionId: "parent",
+  });
+  expect(result.matches.size).toBe(0);
+  expect(result.unattached.map(({ reason }) => reason)).toEqual([
+    "conflicting-targets",
+    "conflicting-targets",
+  ]);
+});
+
+it("retains denied native MCP reviews as standalone evidence even when their exact target exists", () => {
+  const reviews = parseGuardianTurns(
+    records([
+      {
+        method: "item/autoApprovalReview/completed",
+        params: {
+          threadId: "parent",
+          turnId: "turn-1",
+          reviewId: "denied-mcp",
+          targetItemId: "mcp",
+          startedAtMs: 1000,
+          completedAtMs: 2000,
+          decisionSource: "agent",
+          review: { status: "denied" },
+          action: {
+            type: "mcpToolCall",
+            server: "service",
+            toolName: "delete",
+            connectorId: null,
+            connectorName: null,
+            toolTitle: null,
+          },
+        },
+      },
+    ]),
+  );
+  const result = associateApprovalReviews(
+    [{ ...tool("render-mcp", {}), nativeItemId: "mcp", namespace: "service", name: "delete" }],
+    reviews,
+    { sessionId: "parent" },
+  );
+  expect(result.matches.size).toBe(0);
+  expect(result.unattached).toMatchObject([
+    {
+      reason: "standalone-denial",
+      review: { reviewId: "denied-mcp", targetItemId: "mcp", outcome: "deny" },
+    },
+  ]);
+});
+
+it("retains context-only native envelopes for inspection without publishing them as selected reviews", () => {
+  const source = records(cutoffReviewRecords()).map((record, index) =>
+    Object.assign(record, {
+      contextOnly: index > 0 && index < 10,
+      ordinal: index,
+    }),
+  );
+  const session = normalizeSession({
+    records: source,
+    sourcePath: "C:/fixture/parent.jsonl",
+    scope: "active",
+    sessionIndexEntries: [],
+    stateSnapshot: null,
+  }).session!;
+  expect(parseParentNativeReviews(session).map((review) => review.reviewId)).toEqual([
+    "visible-review",
+  ]);
+  expect(
+    session.rawEvents
+      .filter((event) => event.type.startsWith("native_notification"))
+      .map((event) => event.logicalVisibility),
+  ).toEqual([
+    "context-only",
+    "context-only",
+    "context-only",
+    "context-only",
+    "context-only",
+    "visible",
+    "visible",
+  ]);
+  expect(session.rawEvents).toHaveLength(source.length);
+});
+
+it("keeps review availability unresolved when a required cutoff has no ordinal proof", () => {
+  const source = records(cutoffReviewRecords());
+  const session = normalizeSession({
+    records: source,
+    sourcePath: "C:/fixture/parent.jsonl",
+    scope: "active",
+    sessionIndexEntries: [],
+    stateSnapshot: null,
+  }).session!;
+  expect(parseParentNativeReviews(session)).toEqual([]);
+  expect(parentNativeReviewAvailability(session)).toBe("unresolved");
+  expect(
+    session.rawEvents
+      .filter((event) => event.type.startsWith("native_notification"))
+      .map((event) => event.logicalVisibility),
+  ).toEqual(Array.from({ length: 7 }, () => "unresolved"));
 });

@@ -1,17 +1,12 @@
 <script setup lang="ts">
 import { PhCaretDown, PhCheck, PhCopy, PhInfo } from "@phosphor-icons/vue";
-import { computed, onBeforeUnmount, ref } from "vue";
 
 import type { ConversationMessage } from "#shared/types/conversation.ts";
 import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type { PresentationSettings } from "#shared/types/settings.ts";
-
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import RichTextRenderer from "../content/RichTextRenderer.vue";
-import ConversationAttachment from "./ConversationAttachment.vue";
-import CopyIconButton from "./CopyIconButton.vue";
-import { formatDuration, formatTimestamp } from "./format.ts";
-import { bodyAssetIds } from "./toolPresentation.ts";
+import { formatDuration, formatTimestamp } from "~/components/conversation/format.ts";
+import { bodyAssetIds } from "~/components/conversation/toolPresentation.ts";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = withDefaults(
   defineProps<{
@@ -36,6 +31,28 @@ const attachmentIds = computed(() =>
   ),
 );
 const menuOpen = ref(false);
+const copyMenuButton = useTemplateRef<HTMLButtonElement>("copyMenuButton");
+const copyMenuItem = useTemplateRef<HTMLButtonElement>("copyMenuItem");
+let restoreCopyMenuFocus = true;
+watch(menuOpen, async (open, previous) => {
+  await nextTick();
+  if (open) {
+    restoreCopyMenuFocus = true;
+    copyMenuItem.value?.focus();
+  } else if (previous && restoreCopyMenuFocus) {
+    copyMenuButton.value?.focus();
+  }
+});
+function copyMenuFocusOut(event: FocusEvent) {
+  if (
+    menuOpen.value &&
+    event.currentTarget instanceof Node &&
+    (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget))
+  ) {
+    restoreCopyMenuFocus = false;
+    menuOpen.value = false;
+  }
+}
 const workCopyState = ref<"default" | "error" | "success">("default");
 let resetTimer: ReturnType<typeof setTimeout> | null = null;
 const isAssistant = computed(() => props.message.role === "assistant");
@@ -76,7 +93,7 @@ onBeforeUnmount(() => {
   >
     <p class="conversation-message__role">{{ isAssistant ? "Assistant" : "You" }}</p>
     <div class="conversation-message__prose">
-      <RichTextRenderer
+      <ContentRichTextRenderer
         :document="message.body"
         :resolve-asset="resolveAsset"
         :resolve-favicon="resolveFavicon"
@@ -91,20 +108,31 @@ onBeforeUnmount(() => {
       @open-media="emit('openMedia', $event)"
     />
     <footer class="conversation-message__footer">
-      <time :datetime="message.createdAt" data-allow-mismatch="text">{{ timestamp }}</time>
+      <time :datetime="message.createdAt ?? undefined" data-allow-mismatch="text">{{
+        timestamp
+      }}</time>
       <span v-if="duration !== null" class="tabular">{{ duration }}</span>
       <span class="conversation-message__actions">
-        <CopyIconButton
+        <ConversationCopyIconButton
           :label="isAssistant ? 'Copy assistant message' : 'Copy prompt'"
           :text="message.sourceMarkdown"
         />
-        <span v-if="isAssistant" class="conversation-copy-menu" @keydown.esc="menuOpen = false">
+        <span
+          v-if="isAssistant"
+          class="conversation-copy-menu"
+          @keydown.esc.stop.prevent="menuOpen = false"
+          @focusout="copyMenuFocusOut"
+        >
           <button
+            ref="copyMenuButton"
             type="button"
             class="ui-icon-button interactive-control"
             aria-label="Assistant copy options"
             :aria-expanded="menuOpen"
+            aria-haspopup="menu"
             @click="menuOpen = !menuOpen"
+            @keydown.down.stop.prevent="menuOpen = true"
+            @keydown.up.stop.prevent="menuOpen = true"
           >
             <PhCheck
               v-if="workCopyState === 'success'"
@@ -115,7 +143,14 @@ onBeforeUnmount(() => {
             <PhCaretDown v-else :size="17" weight="regular" aria-hidden="true" />
           </button>
           <span v-if="menuOpen" class="ui-menu__surface" role="menu">
-            <button type="button" role="menuitem" @click="copyAgentWork">
+            <button
+              ref="copyMenuItem"
+              type="button"
+              role="menuitem"
+              @click="copyAgentWork"
+              @keydown.down.stop.prevent
+              @keydown.up.stop.prevent
+            >
               <PhCopy :size="17" weight="regular" aria-hidden="true" />
               Copy agent work since prompt
             </button>

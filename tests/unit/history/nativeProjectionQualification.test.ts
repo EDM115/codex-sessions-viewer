@@ -910,6 +910,9 @@ describe("source to projection qualification", () => {
     expect(next.page?.turns[0]?.items[1]).toMatchObject({
       ordinal: 3,
       updatedAtOrdinal: 5,
+      decodedByteStart: Buffer.byteLength(fixture.raw.split("\n").slice(0, 3).join("\n") + "\n"),
+      decodedByteEnd: Buffer.byteLength(fixture.raw.split("\n").slice(0, 4).join("\n") + "\n"),
+      updatedAtDecodedByte: Buffer.byteLength(fixture.raw),
       item: { text: "new output" },
     });
     expect(next.historyEpoch).toBe(first.historyEpoch);

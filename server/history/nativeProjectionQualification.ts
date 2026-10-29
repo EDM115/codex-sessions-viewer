@@ -150,11 +150,15 @@ interface CanonicalItem {
   item: HistoryItem;
   ordinal: number;
   updated: number;
+  decodedByteStart: number;
+  decodedByteEnd: number;
+  updatedAtDecodedByte: number;
 }
 interface CanonicalTurn {
   id: string;
   segment: number;
   ordinal: number;
+  decodedByteStart: number;
   status: string;
   startedAt: number | null;
   completedAt: number | null;
@@ -453,7 +457,13 @@ async function replay(
       fail("projection-only", "native.verification_budget");
     }
     const local = new Map<string, CanonicalTurn>();
+    const bomBytes =
+      replayBytes[0] === 0xef && replayBytes[1] === 0xbb && replayBytes[2] === 0xbf ? 3 : 0;
+    let decodedByte =
+      loadedSegment.dependency.start - (loadedSegment.metadata?.length ?? 0) + bomBytes;
     for (const [index, line] of lines.entries()) {
+      const decodedByteStart = decodedByte;
+      decodedByte += Buffer.byteLength(line, "utf8") + 1;
       if (records % 128 === 0) {
         // oxlint-disable-next-line no-await-in-loop -- Cooperative replay yields keep selected serving responsive without reordering lifecycle updates
         await setImmediate();
@@ -516,6 +526,7 @@ async function replay(
           id: turnId,
           segment: segmentIndex,
           ordinal,
+          decodedByteStart,
           status: "inProgress",
           startedAt: typeof payload["started_at"] === "number" ? payload["started_at"] : null,
           completedAt: null,
@@ -543,6 +554,9 @@ async function replay(
               : item,
             ordinal: previous?.ordinal ?? ordinal,
             updated: ordinal,
+            decodedByteStart: previous?.decodedByteStart ?? decodedByteStart,
+            decodedByteEnd: previous?.decodedByteEnd ?? decodedByte,
+            updatedAtDecodedByte: decodedByteStart,
           });
           if (item.type === "agentMessage" && item.phase === "final_answer") {
             turn.finalAnswerItemId = item.id;
@@ -866,6 +880,35 @@ export async function qualifyNativeProjection(
       verifiedAssociations.epochAuthority!.publish(epochSelection, epochProofs(loaded, source));
     }
     const page = qualifyPageCursors(structuredClone(candidate.page), key, historyEpoch);
+    for (const window of page.turns) {
+      const observed = turns.find(
+        (turn) =>
+          turn.id === window.turnId &&
+          lineage.segments[turn.segment]?.ref.physicalRolloutId === window.physicalRolloutId,
+      );
+      if (!observed) {
+        continue;
+      }
+      window.decodedByteOrder = observed.decodedByteStart;
+      for (const item of window.items) {
+        const original = observed.items.get(item.itemId);
+        if (!original) {
+          continue;
+        }
+        item.decodedByteStart = original.decodedByteStart;
+        item.decodedByteEnd = original.decodedByteEnd;
+        item.updatedAtDecodedByte = original.updatedAtDecodedByte;
+      }
+      for (const range of window.loadedRanges) {
+        const values = [...observed.items.values()];
+        const first = values.find((item) => item.ordinal === range.startOrdinal);
+        const last = values.find((item) => item.ordinal + 1 === range.endOrdinalExclusive);
+        if (first && last) {
+          range.startDecodedByte = first.decodedByteStart;
+          range.endDecodedByteExclusive = last.decodedByteEnd;
+        }
+      }
+    }
     for (const [index, segment] of page.coverage.segments.entries()) {
       segment.sourceWatermark = {
         nextOrdinal: result.dependencies[index]!.nextOrdinal,

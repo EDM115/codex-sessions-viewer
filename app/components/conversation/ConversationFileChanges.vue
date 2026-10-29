@@ -1,20 +1,37 @@
 <script setup lang="ts">
 import { PhPencilSimple } from "@phosphor-icons/vue";
-import { computed, ref } from "vue";
 
-import type { FileChange, FileChangeActivity } from "#shared/types/conversation.ts";
+import { fullFileLines, fileLineCountLabel } from "#shared/timeline/fileChanges.ts";
+import { statusLabel } from "#shared/timeline/toolSemantics.ts";
+import type {
+  DisclosureDefault,
+  FileChange,
+  FileChangeActivity,
+} from "#shared/types/conversation.ts";
 
-import DiffBlock from "../content/DiffBlock.client.vue";
-import { statusLabel } from "./toolPresentation.ts";
-
-const props = defineProps<{ activities: FileChangeActivity[] }>();
+const props = defineProps<{
+  activities: FileChangeActivity[];
+  disclosureKey?: string;
+  toolCallsDefault?: DisclosureDefault;
+}>();
 type PresentedFile = FileChange & { presentationKey: string };
 const files = computed(() =>
   props.activities.flatMap((activity) =>
     activity.files.map((file, index) => ({ ...file, presentationKey: `${activity.id}:${index}` })),
   ),
 );
-const open = ref(false);
+const { open, toggle } = useWorkDisclosure(
+  () => `${props.disclosureKey ?? props.activities[0]?.id}:files`,
+  () =>
+    props.activities.some((activity) => activity.status === "failed")
+      ? "error"
+      : props.activities.some((activity) => activity.status === "cancelled")
+        ? "cancelled"
+        : props.activities.some((activity) => activity.status === "running")
+          ? "running"
+          : "unknown",
+  () => props.toolCallsDefault ?? "collapsed",
+);
 const openedFiles = ref(new Set<string>());
 const label = computed(() => {
   const count = files.value.length;
@@ -34,9 +51,22 @@ const label = computed(() => {
     if (file.change === "move") {
       return `Moved ${name}`;
     }
-    return `Edited ${name} +${file.addedLines} −${file.removedLines}`;
+    return `Edited ${name} (${fileLineCountLabel(file)})`;
   }
   return `${created ? "Created" : "Edited"} ${count} files`;
+});
+
+const totals = computed(() => {
+  let added = 0;
+  let removed = 0;
+  for (const file of files.value) {
+    if (file.addedLines === null || file.removedLines === null) {
+      return "Line counts unavailable";
+    }
+    added += file.addedLines;
+    removed += file.removedLines;
+  }
+  return `${added} added · ${removed} removed`;
 });
 
 function diffSource(file: FileChange): string | null {
@@ -49,8 +79,10 @@ function diffSource(file: FileChange): string | null {
     return `--- ${before}\n+++ ${after}\n${file.diff}`;
   }
   const content = file.content ?? "";
-  const lines = content === "" ? [] : content.split("\n");
-  return `--- ${before}\n+++ ${after}\n@@ -0,0 +1,${lines.length} @@\n${lines.map((line) => `+${line}`).join("\n")}`;
+  const lines = fullFileLines(content);
+  const deleted = file.change === "delete";
+  const hunk = deleted ? `@@ -1,${lines.length} +0,0 @@` : `@@ -0,0 +1,${lines.length} @@`;
+  return `--- ${before}\n+++ ${after}\n${hunk}\n${lines.map((line) => `${deleted ? "-" : "+"}${line}`).join("\n")}`;
 }
 
 function fileKey(file: PresentedFile): string {
@@ -73,9 +105,10 @@ function onFileToggle(event: Event, file: PresentedFile): void {
   <details
     class="conversation-file-changes"
     :data-entry-id="activities[0]?.id"
-    @toggle="open = ($event.currentTarget as HTMLDetailsElement).open"
+    :open="open"
+    @toggle="toggle"
   >
-    <summary>
+    <summary :aria-expanded="open">
       <PhPencilSimple :size="18" aria-hidden="true" />
       <strong>{{ label }}</strong>
       <span
@@ -83,19 +116,16 @@ function onFileToggle(event: Event, file: PresentedFile): void {
         :key="status"
         >{{ statusLabel(status) }}</span
       >
-      <span class="tabular"
-        >{{ files.reduce((total, file) => total + file.addedLines, 0) }} added ·
-        {{ files.reduce((total, file) => total + file.removedLines, 0) }} removed</span
-      >
+      <span class="tabular">{{ totals }}</span>
     </summary>
     <div v-if="open" class="conversation-file-changes__files">
       <details v-for="file in files" :key="fileKey(file)" @toggle="onFileToggle($event, file)">
-        <summary>
+        <summary :aria-expanded="openedFiles.has(fileKey(file))">
           <span>{{ file.path }}</span>
-          <span class="tabular">+{{ file.addedLines }} −{{ file.removedLines }}</span>
+          <span class="tabular">{{ fileLineCountLabel(file) }}</span>
         </summary>
         <template v-if="openedFiles.has(fileKey(file))">
-          <DiffBlock v-if="diffSource(file) !== null" :source="diffSource(file)!" wrapped />
+          <ContentDiffBlock v-if="diffSource(file) !== null" :source="diffSource(file)!" wrapped />
           <p v-else>No textual diff was recorded for this file.</p>
         </template>
       </details>

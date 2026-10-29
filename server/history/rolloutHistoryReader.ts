@@ -2,46 +2,60 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import {
+  type HistoryEpochAuthority,
+  type HistoryEpochProof,
+} from "#server/history/historyEpochAuthority.ts";
+import {
+  legacyWindowOverlap,
+  planLegacyWindow,
+  stableRecordKey,
+  type LegacyTurnWindowIdentity,
+} from "#server/history/legacyTurnWindows.ts";
+import {
+  adaptCoreTurnItem,
+  adaptNativeThreadItem,
+  adaptCommandEvent,
+  adaptGuardianReviewEnvelope,
+} from "#server/history/nativeItemAdapter.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import {
+  readJsonlWindow,
+  readOpeningJsonlWindow,
+  readForwardJsonlWindow,
+  type JsonlWindow,
+} from "#server/ingestion/reverseJsonl.ts";
+import { qualifyRawRecord } from "#server/ingestion/rolloutIdentity.ts";
+import type {
+  ResolvedRolloutLineage,
+  ResolvedRolloutSegment,
+} from "#server/ingestion/rolloutLineage.ts";
+import { openRollout, type SeekableRollout } from "#server/ingestion/rolloutStream.ts";
+import { observeSessionMetaSource } from "#server/ingestion/sessionMetaPrefix.ts";
+import { isFinalAnswerEligible, isFinalAnswerPhase } from "#shared/timeline/finalAnswer.ts";
+import {
+  logicalRecordVisibility,
+  unverifiedReviewRecord,
+} from "#shared/timeline/reviewVisibility.ts";
+import {
   jsonValueSchema,
   type JsonValue,
   type RolloutRef,
   type SourceGeneration,
-} from "../../shared/types/conversation.ts";
+} from "#shared/types/conversation.ts";
 import {
   historyPageSchema,
   type HistoryCoverage,
   type HistoryItem,
   type HistoryPage,
   type HistoryTurnWindow,
-} from "../../shared/types/history.ts";
+  type ReviewSourceRecord,
+} from "#shared/types/history.ts";
 import {
   historyPageQuerySchema,
   historyItemQuerySchema,
   type HistoryPageQuery,
   type HistoryItemQuery,
-} from "../../shared/types/repository.ts";
-import type { JsonlRecord } from "../ingestion/jsonlStream.ts";
-import {
-  readJsonlWindow,
-  readOpeningJsonlWindow,
-  readForwardJsonlWindow,
-  type JsonlWindow,
-} from "../ingestion/reverseJsonl.ts";
-import { qualifyRawRecord } from "../ingestion/rolloutIdentity.ts";
-import type {
-  ResolvedRolloutLineage,
-  ResolvedRolloutSegment,
-} from "../ingestion/rolloutLineage.ts";
-import { openRollout, type SeekableRollout } from "../ingestion/rolloutStream.ts";
-import { observeSessionMetaSource } from "../ingestion/sessionMetaPrefix.ts";
-import { type HistoryEpochAuthority, type HistoryEpochProof } from "./historyEpochAuthority.ts";
-import {
-  legacyWindowOverlap,
-  planLegacyWindow,
-  stableRecordKey,
-  type LegacyTurnWindowIdentity,
-} from "./legacyTurnWindows.ts";
-import { adaptCoreTurnItem, adaptNativeThreadItem } from "./nativeItemAdapter.ts";
+} from "#shared/types/repository.ts";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 function object(value: JsonValue | undefined): Record<string, JsonValue> | null {
@@ -115,6 +129,7 @@ interface RawTurn {
   completedAt: number | null;
   durationMs: number | null;
   boundary: boolean;
+  completion?: { text: string; record: JsonlRecord };
   context: NonNullable<HistoryTurnWindow["context"]>;
 }
 interface AssemblyContext {
@@ -163,24 +178,42 @@ function legacyItem(
       phase: payload["phase"] ?? null,
     });
   }
+  if (type === "task_complete") {
+    const supplied = text(payload["last_agent_message"]);
+    return supplied === null || supplied.trim() === ""
+      ? null
+      : adaptNativeThreadItem({ id, type: "agentMessage", text: supplied, phase: "final" });
+  }
   if (type === "reasoning" || type === "agent_reasoning") {
+    const plaintext = (value: JsonValue | undefined) =>
+      Array.isArray(value)
+        ? value.flatMap((part) => {
+            const supplied = typeof part === "string" ? part : text(object(part)?.["text"]);
+            return supplied === null ? [] : [supplied];
+          })
+        : [];
     return adaptNativeThreadItem({
       id,
       type: "reasoning",
-      summary: typeof payload["text"] === "string" ? [payload["text"]] : [],
-      content: [],
+      summary:
+        typeof payload["text"] === "string" ? [payload["text"]] : plaintext(payload["summary"]),
+      content: plaintext(payload["content"]),
     });
   }
   if (type === "context_compacted" || envelope["type"] === "compacted") {
     return adaptNativeThreadItem({ id, type: "contextCompaction" });
   }
+  const command = adaptCommandEvent(payload);
+  if (command) {
+    return command;
+  }
   const callId = text(payload["call_id"]);
   if (callId && (type === "function_call" || type === "custom_tool_call")) {
     calls.set(callId, payload);
     return adaptNativeThreadItem({
-      id: callId,
+      id: stableRecordKey(ref, record),
       type: "dynamicToolCall",
-      namespace: null,
+      namespace: payload["namespace"] ?? null,
       tool: text(payload["name"]) ?? "unknown",
       arguments: payload["arguments"] ?? payload["input"] ?? null,
       status: "inProgress",
@@ -194,7 +227,7 @@ function legacyItem(
       id,
       type: "functionCallOutput",
       name: text(call?.["name"]) ?? "unknown",
-      namespace: null,
+      namespace: call?.["namespace"] ?? null,
       output: payload["output"] ?? null,
     });
   }
@@ -206,7 +239,13 @@ function contextTargetId(payload: Record<string, JsonValue>, turn: RawTurn | nul
 function assemble(
   loaded: Loaded,
   inherited?: AssemblyContext,
-): { turns: RawTurn[]; unsupported: boolean; unresolvedCutoff: boolean; carried: AssemblyContext } {
+): {
+  turns: RawTurn[];
+  unsupported: boolean;
+  unresolvedCutoff: boolean;
+  carried: AssemblyContext;
+  reviewRecords: ReviewSourceRecord[];
+} {
   const { segment, opening, tail } = loaded;
   const records = [
     ...new Map(
@@ -222,6 +261,7 @@ function assemble(
     ).values(),
   ].toSorted((a, b) => a.byteStart - b.byteStart);
   const turns = new Map<string, RawTurn>();
+  const reviewRecords: ReviewSourceRecord[] = [];
   const calls = new Map<string, Record<string, JsonValue>>(inherited?.calls);
   const contextOnlyCalls = new Set(calls.keys());
   const pairedCanonicalMessages = new Set<string>();
@@ -255,7 +295,32 @@ function assemble(
     }
     previousEnd = sourceRecord.byteEnd;
     const record = qualifyRawRecord(sourceRecord, segment.ref);
+    const logicalVisibility = logicalRecordVisibility({
+      ordinal: record.ordinal ?? null,
+      bodyStartOrdinal: segment.bodyStartOrdinal,
+      displayStartOrdinal: segment.displayStartOrdinal,
+    });
     const envelope = object(record.value);
+    if (
+      ["item/autoApprovalReview/started", "item/autoApprovalReview/completed"].includes(
+        text(envelope?.["method"]) ?? "",
+      )
+    ) {
+      const review = adaptGuardianReviewEnvelope(envelope?.["params"]);
+      if (review && record.identity && review.parentThreadId === segment.ref.stableThreadId) {
+        reviewRecords.push({
+          envelope: record.value,
+          identity: record.identity,
+          logicalVisibility,
+        });
+        if (logicalVisibility === "unresolved") {
+          unresolvedCutoff = true;
+        }
+      } else {
+        unsupported = true;
+      }
+      continue;
+    }
     const payload = object(envelope?.["payload"]);
     if (!envelope || !payload) {
       unsupported = true;
@@ -309,9 +374,8 @@ function assemble(
     if (type === "thread_rolled_back" || envelope["type"] === "compacted") {
       unsupported = true;
     }
-    const cutoffRequired = segment.displayStartOrdinal > segment.bodyStartOrdinal;
-    const hidden = record.ordinal !== undefined && record.ordinal < segment.displayStartOrdinal;
-    if (cutoffRequired && record.ordinal === undefined) {
+    const hidden = logicalVisibility === "context-only";
+    if (logicalVisibility === "unresolved") {
       unresolvedCutoff = true;
       continue;
     }
@@ -418,15 +482,28 @@ function assemble(
       active.startedAt = number(payload["started_at"]) ?? active.startedAt;
       active.completedAt = number(payload["completed_at"]);
       active.durationMs = number(payload["duration_ms"]);
+      const completionText = type === "task_complete" ? text(payload["last_agent_message"]) : null;
+      if (completionText !== null && completionText.trim() !== "") {
+        active.completion = { text: completionText, record };
+      }
     }
     const canonical = type === "item_completed";
     const callId = text(payload["call_id"]);
-    if (!canonical && callId && active.items.get(callId)?.canonical) {
-      continue;
-    }
     let item = canonical
       ? adaptCoreTurnItem(payload["item"], payload)
       : legacyItem(segment.ref, record, payload, calls);
+    const completionItem = item?.type === "agentMessage" ? item : null;
+    if (
+      type === "task_complete" &&
+      completionItem &&
+      [...active.items.values()].some(
+        (entry) =>
+          entry.item.type === "agentMessage" &&
+          isFinalAnswerEligible(entry.item.phase, entry.item.text, completionItem.text),
+      )
+    ) {
+      item = null;
+    }
     if (canonical && item === null) {
       unsupported = true;
     }
@@ -457,16 +534,6 @@ function assemble(
     if (prior?.canonical && !canonical) {
       pairedCanonicalMessages.add(`${active.id}:${item.id}`);
       continue;
-    }
-    if (canonical && ["commandExecution", "dynamicToolCall", "mcpToolCall"].includes(item.type)) {
-      for (const [key, entry] of active.items) {
-        if (
-          !entry.canonical &&
-          text(object(object(entry.record.value)?.["payload"])?.["call_id"]) === item.id
-        ) {
-          active.items.delete(key);
-        }
-      }
     }
     if (canonical || prior === undefined) {
       if (!canonical) {
@@ -517,6 +584,7 @@ function assemble(
   }
   return {
     turns: [...turns.values()],
+    reviewRecords,
     unsupported,
     unresolvedCutoff,
     carried: { context, contextTurnId, calls },
@@ -592,11 +660,19 @@ export class RolloutHistoryReader {
           };
       page.stale = retained !== undefined;
       page.coverage = coverage;
+      page.reviewEvidence = {
+        availability: "unresolved",
+        records: (page.reviewEvidence?.records ?? []).map(unverifiedReviewRecord),
+      };
       page.preparation = retained ? "partial" : "unavailable";
       page.beforeCursor = null;
       page.afterCursor = null;
       for (const turn of page.turns) {
         turn.coverage = structuredClone(coverage);
+        turn.reviewEvidence = {
+          availability: "unresolved",
+          records: (turn.reviewEvidence?.records ?? []).map(unverifiedReviewRecord),
+        };
         turn.itemsView = "summary";
         turn.beforeCursor = null;
         turn.afterCursor = null;
@@ -987,6 +1063,7 @@ export class RolloutHistoryReader {
         }
       }
       const turns: HistoryTurnWindow[] = [];
+      const reviewRecords: ReviewSourceRecord[] = [];
       const stagedLegacyWindows: LegacyTurnWindowIdentity[] = [];
       const boundaries = new Map<string, { start: number; end: number }>();
       const selectedItems = new Map<string, ItemEntry[]>();
@@ -1078,6 +1155,7 @@ export class RolloutHistoryReader {
         previousSegmentIndex = currentSegmentIndex;
         const physical = segment.ref.physicalRolloutId!;
         const assembled = assemble(entry, inherited);
+        reviewRecords.push(...assembled.reviewRecords);
         inherited = tail.reachedStart && tail.errors.length === 0 ? assembled.carried : undefined;
         const full =
           tail.reachedStart &&
@@ -1243,6 +1321,25 @@ export class RolloutHistoryReader {
               qualifiedThrough >= (segment.endByteOffset ?? entry.lease.size);
             return { ...item, current };
           });
+          const explicitFinal = all.findLast(
+            (finalRecord) =>
+              finalRecord.item.type === "agentMessage" &&
+              isFinalAnswerPhase(finalRecord.item.phase),
+          );
+          const completionFinal =
+            explicitFinal || !turn.completion
+              ? undefined
+              : currentItems.findLast(
+                  (finalRecord) =>
+                    finalRecord.current &&
+                    finalRecord.item.type === "agentMessage" &&
+                    isFinalAnswerEligible(
+                      finalRecord.item.phase,
+                      finalRecord.item.text,
+                      turn.completion!.text,
+                    ),
+                );
+          const finalAnswerItemId = (explicitFinal ?? completionFinal)?.item.id ?? null;
           const turnCoverage: HistoryCoverage = structuredClone(coverage);
           const itemComplete =
             full &&
@@ -1272,6 +1369,7 @@ export class RolloutHistoryReader {
             turnId: turn.id,
             physicalRolloutId: physical,
             order: turn.start.ordinal ?? turn.start.byteStart,
+            decodedByteOrder: turn.start.byteStart,
             orderKind: turn.start.ordinal === undefined ? "decodedByte" : "ordinal",
             boundary:
               entry.legacy?.id === turn.id
@@ -1315,17 +1413,26 @@ export class RolloutHistoryReader {
               updatedAtDecodedByte: updatedRecord.byteStart,
               detail: current ? "full" : "unresolved",
               itemId: item.id,
-              item,
+              item:
+                completionFinal?.item.id === item.id && turn.completion
+                  ? {
+                      ...item,
+                      evidence: {
+                        ...object(item.evidence),
+                        finalAnswerEvidence: {
+                          envelope: turn.completion.record.value,
+                          identity: jsonValueSchema.parse(turn.completion.record.identity ?? null),
+                        },
+                      },
+                    }
+                  : item,
             })),
             itemsView: chosen.length === 0 ? "notLoaded" : itemComplete ? "full" : "summary",
             beforeCursor: null,
             afterCursor: null,
             loadedRanges: ranges,
             coverage: turnCoverage,
-            finalAnswerItemId:
-              all.findLast(
-                (item) => item.item.type === "agentMessage" && item.item.phase === "final_answer",
-              )?.item.id ?? null,
+            finalAnswerItemId,
             historyEpoch: epochState.epoch,
             contentRevision: "pending",
           });
@@ -1354,6 +1461,7 @@ export class RolloutHistoryReader {
           turnId: target,
           physicalRolloutId: physical,
           order: start,
+          decodedByteOrder: start,
           orderKind: "decodedByte",
           boundary: {
             status: "unresolved",
@@ -1427,6 +1535,14 @@ export class RolloutHistoryReader {
           afterOrdinal: null,
         });
       }
+      if (staleEpoch) {
+        for (let index = 0; index < reviewRecords.length; index += 1) {
+          reviewRecords[index] = unverifiedReviewRecord(reviewRecords[index]!);
+        }
+      }
+      const unresolvedReviewScope = reviewRecords.some(
+        (record) => record.logicalVisibility === "unresolved",
+      );
       const revision = hash(JSON.stringify(proofs));
       const limit =
         "turnId" in query ? 1 : (query.limit ?? (query.anchor.kind === "latest" ? 5 : 20));
@@ -1434,6 +1550,23 @@ export class RolloutHistoryReader {
       for (const turn of selected) {
         turn.historyEpoch = epochState.epoch;
         turn.contentRevision = revision;
+        turn.reviewEvidence = {
+          availability:
+            staleEpoch ||
+            unresolvedReviewScope ||
+            coverage.status === "unresolved" ||
+            coverage.status === "unsupported"
+              ? "unresolved"
+              : coverage.status === "complete"
+                ? "complete"
+                : "partial",
+          records: reviewRecords.filter(
+            (record) =>
+              record.identity.physicalRolloutId === turn.physicalRolloutId &&
+              text(object(object(record.envelope)?.["params"])?.["turnId"]) ===
+                (turn.boundary?.sourceTurnId ?? turn.turnId),
+          ),
+        };
         if (staleEpoch) {
           turn.itemsView = "summary";
           turn.coverage = structuredClone(coverage);
@@ -1670,6 +1803,18 @@ export class RolloutHistoryReader {
         afterCursor,
         coverage,
         preparation: coverage.status === "complete" ? "ready" : "partial",
+        reviewEvidence: {
+          availability:
+            staleEpoch ||
+            unresolvedReviewScope ||
+            coverage.status === "unresolved" ||
+            coverage.status === "unsupported"
+              ? "unresolved"
+              : coverage.status === "complete"
+                ? "complete"
+                : "partial",
+          records: reviewRecords,
+        },
       });
     } finally {
       await Promise.all(leases.map((lease) => lease.close()));

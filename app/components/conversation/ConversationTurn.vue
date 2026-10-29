@@ -1,17 +1,16 @@
 <script setup lang="ts">
-import { computed } from "vue";
-
 import type { ConversationTurn } from "#shared/types/conversation.ts";
 import type { InspectorTarget, ResolvedAsset } from "#shared/types/repository.ts";
 import type { PresentationSettings } from "#shared/types/settings.ts";
-
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import ConversationMessage from "./ConversationMessage.vue";
-import ConversationWorkStream from "./ConversationWorkStream.vue";
-import { agentWorkText } from "./format.ts";
+import { agentWorkText } from "~/components/conversation/format.ts";
+import { finalAssistantId } from "~/components/conversation/toolPresentation.ts";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = defineProps<{
+  unloadedBefore?: readonly string[];
   anchorPrefix?: string;
+  disclosureKey?: string;
+  messageKeys?: Readonly<Record<string, string>>;
   reasoningDefault: PresentationSettings["reasoningDefault"];
   resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
   resolveFavicon?: (origin: string) => Promise<string | null>;
@@ -30,10 +29,7 @@ const emit = defineEmits<{
 
 const workText = () => agentWorkText(props.turn);
 const finalAssistant = computed(
-  () =>
-    props.turn.assistantMessages.find(({ id }) => id === props.turn.finalAssistantMessageId) ??
-    props.turn.assistantMessages.at(-1) ??
-    null,
+  () => props.turn.assistantMessages.find(({ id }) => id === finalAssistantId(props.turn)) ?? null,
 );
 </script>
 
@@ -52,7 +48,12 @@ const finalAssistant = computed(
       @open-media="emit('openMedia', $event)"
     />
     <ConversationWorkStream
+      :disclosure-key="disclosureKey"
+      :message-keys="messageKeys"
+      :unloaded-before="unloadedBefore"
       :turn="turn"
+      :reasoning-default="reasoningDefault"
+      :tool-calls-default="toolCallsDefault"
       :resolve-asset="resolveAsset"
       :resolve-favicon="resolveFavicon"
       @before-resize="emit('beforeResize')"
@@ -61,9 +62,16 @@ const finalAssistant = computed(
       @inspect="emit('inspect', $event)"
       @open-child="emit('openChild', $event)"
     />
+    <p
+      v-if="finalAssistant && unloadedBefore?.includes(finalAssistant.id)"
+      class="history-gap"
+      role="status"
+    >
+      History between these items is not loaded.
+    </p>
     <ConversationMessage
       v-if="finalAssistant !== null"
-      :key="finalAssistant.id"
+      :key="messageKeys?.[finalAssistant.id] ?? finalAssistant.id"
       :message="finalAssistant"
       :resolve-asset="resolveAsset"
       :resolve-favicon="resolveFavicon"
@@ -72,6 +80,23 @@ const finalAssistant = computed(
       :agent-work="workText"
       @inspect="emit('inspect', { type: 'message', id: $event })"
       @open-media="emit('openMedia', $event)"
+    />
+    <ConversationWorkStream
+      v-if="finalAssistant !== null"
+      after-final
+      :disclosure-key="disclosureKey"
+      :message-keys="messageKeys"
+      :unloaded-before="unloadedBefore"
+      :turn="turn"
+      :reasoning-default="reasoningDefault"
+      :tool-calls-default="toolCallsDefault"
+      :resolve-asset="resolveAsset"
+      :resolve-favicon="resolveFavicon"
+      @before-resize="emit('beforeResize')"
+      @resized="emit('resized')"
+      @open-media="emit('openMedia', $event)"
+      @inspect="emit('inspect', $event)"
+      @open-child="emit('openChild', $event)"
     />
   </section>
 </template>

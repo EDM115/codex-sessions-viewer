@@ -1,5 +1,42 @@
 import { createHash } from "node:crypto";
 
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import {
+  qualifyRawRecord,
+  rolloutRefFromSource,
+  parseRolloutFilename,
+} from "#server/ingestion/rolloutIdentity.ts";
+import { parseSessionMetaBytes } from "#server/ingestion/sessionMetaPrefix.ts";
+import { SOURCE_GENERATION_PARSER_VERSION } from "#server/ingestion/sourceGeneration.ts";
+import type { SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import type { StateMetadataSnapshot } from "#server/metadata/stateSnapshot.ts";
+import {
+  codexEventType,
+  eventOrder,
+  isUnknownCodexEvent,
+  parseCodexEvent,
+  payloadObject,
+  sessionMetaPayloadSchema,
+  type CodexEvent,
+  type TurnScopedEvent,
+} from "#server/normalization/eventSchema.ts";
+import { mergeSessionMetadata } from "#server/normalization/metadataMerge.ts";
+import { classifySessionStructure } from "#server/normalization/subagentTopology.ts";
+import { pairToolCalls, type ToolPairingMemo } from "#server/normalization/toolPairing.ts";
+import {
+  assembleTurnEvents,
+  type AssembledTurnEvents,
+} from "#server/normalization/turnAssembler.ts";
+import {
+  createUnknownActivity,
+  sanitizeUnknownPayload,
+} from "#server/normalization/unknownEvents.ts";
+import {
+  isFinalAnswerEligible,
+  selectFinalAssistantMessageId,
+} from "#shared/timeline/finalAnswer.ts";
+import { logicalRecordVisibility } from "#shared/timeline/reviewVisibility.ts";
+import type { ApprovalEvidenceResult } from "#shared/types/approvals.ts";
 import {
   conversationSummarySchema,
   conversationTurnSchema,
@@ -27,35 +64,11 @@ import {
   type WebSearchActivity,
   type RolloutRef,
   type RawEventIdentity,
-} from "../../shared/types/conversation.ts";
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { ThreadClassification } from "../../shared/types/library.ts";
-import type { RichTextDocument } from "../../shared/types/richText.ts";
-import type { JsonlRecord } from "../ingestion/jsonlStream.ts";
-import {
-  qualifyRawRecord,
-  rolloutRefFromSource,
-  parseRolloutFilename,
-} from "../ingestion/rolloutIdentity.ts";
-import { SOURCE_GENERATION_PARSER_VERSION } from "../ingestion/sourceGeneration.ts";
-import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
-import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
-import {
-  codexEventType,
-  eventOrder,
-  isUnknownCodexEvent,
-  parseCodexEvent,
-  payloadObject,
-  sessionMetaPayloadSchema,
-  type CodexEvent,
-  type TurnScopedEvent,
-} from "./eventSchema.ts";
-import type { ApprovalEvidenceResult } from "./guardianEvidence.ts";
-import { mergeSessionMetadata } from "./metadataMerge.ts";
-import { classifySessionStructure } from "./subagentTopology.ts";
-import { pairToolCalls, type ToolPairingMemo } from "./toolPairing.ts";
-import { assembleTurnEvents, type AssembledTurnEvents } from "./turnAssembler.ts";
-import { createUnknownActivity, sanitizeUnknownPayload } from "./unknownEvents.ts";
+} from "#shared/types/conversation.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import type { LogicalVisibility } from "#shared/types/history.ts";
+import type { ThreadClassification } from "#shared/types/library.ts";
+import type { RichTextDocument } from "#shared/types/richText.ts";
 
 const epochTimestamp = "1970-01-01T00:00:00.000Z";
 export const NORMALIZATION_PARSER_VERSION = SOURCE_GENERATION_PARSER_VERSION;
@@ -72,6 +85,7 @@ export interface NormalizeSessionInput {
 }
 
 export interface NormalizedRawEvent {
+  logicalVisibility?: LogicalVisibility;
   identity?: RawEventIdentity;
   id: string;
   turnId: string | null;
@@ -508,6 +522,14 @@ function mergedMessageCandidates(
   role: "user" | "assistant",
   fallbackTimestamp: string,
 ): MergedMessageCandidate[] {
+  const explicitIdentity = (event: CodexEvent) => {
+    const payload = payloadObject(event);
+    return (
+      stringValue(payload?.["id"]) ??
+      stringValue(payload?.["item_id"]) ??
+      stringValue(payload?.["message_id"])
+    );
+  };
   const merged: MergedMessageCandidate[] = [];
   for (const { event } of turn.events) {
     const candidate = messageCandidate(event, role, fallbackTimestamp);
@@ -515,10 +537,15 @@ function mergedMessageCandidates(
       continue;
     }
     const previous = merged.at(-1);
+    const previousIdentity = previous === undefined ? null : explicitIdentity(previous.event);
+    const candidateIdentity = explicitIdentity(candidate.event);
     if (
       previous !== undefined &&
       previous.source !== candidate.source &&
       previous.text === candidate.text &&
+      (previousIdentity === null ||
+        candidateIdentity === null ||
+        previousIdentity === candidateIdentity) &&
       (previous.phase === candidate.phase || previous.phase === null || candidate.phase === null)
     ) {
       previous.rawEventIds.push(candidate.rawEventId);
@@ -542,6 +569,7 @@ function normalizeMessages(
   userMessage: ConversationMessage | null;
   steeringMessages: ConversationMessage[];
   assistantMessages: ConversationMessage[];
+  completionText: string | null;
   media: MediaActivity[];
 } {
   const media: MediaActivity[] = [];
@@ -589,21 +617,32 @@ function normalizeMessages(
       rawEventIds: [...candidate.rawEventIds],
     }),
   );
-  if (assistantMessages.length === 0) {
-    const completion = turn.events.find(
-      ({ event }) => event.type === "event_msg" && event.payloadType === "task_complete",
-    )?.event;
-    const payload = completion === undefined ? null : payloadObject(completion);
-    const text = stringValue(payload?.["last_agent_message"]);
-    if (completion !== undefined && text !== null) {
+  const completion = turn.events.findLast(
+    ({ event }) => event.type === "event_msg" && event.payloadType === "task_complete",
+  )?.event;
+  const payload = completion === undefined ? null : payloadObject(completion);
+  const completionText = stringValue(payload?.["last_agent_message"]);
+  if (
+    selectFinalAssistantMessageId(assistantMessages) === null &&
+    completion !== undefined &&
+    completionText !== null &&
+    completionText.trim() !== ""
+  ) {
+    const existing = assistantMessages.findLast((message) =>
+      isFinalAnswerEligible(message.phase, message.sourceMarkdown, completionText),
+    );
+    if (existing) {
+      existing.rawEventIds = [...new Set([...existing.rawEventIds, completion.id])];
+    }
+    if (!existing) {
       assistantMessages.push({
         id: `message-${completion.id}`,
         turnId: turn.id,
         role: "assistant",
         phase: "final",
         createdAt: eventTimestamp(completion, fallbackTimestamp),
-        sourceMarkdown: text,
-        body: plainDocument(text),
+        sourceMarkdown: completionText,
+        body: plainDocument(completionText),
         attachmentIds: [],
         rawEventIds: [completion.id],
       });
@@ -613,6 +652,7 @@ function normalizeMessages(
     userMessage: users[0] ?? null,
     steeringMessages: users.slice(1),
     assistantMessages,
+    completionText,
     media,
   };
 }
@@ -633,13 +673,18 @@ function normalizeReasoning(
       const summary = stringValue(payload["text"]);
       summaries = summary === null ? [] : [summary];
     } else if (event.type === "response_item" && event.payloadType === "reasoning") {
-      const source = Array.isArray(payload["summary"]) ? payload["summary"] : payload["content"];
-      summaries = Array.isArray(source)
-        ? source.flatMap((item) => {
+      const source = [
+        ...(Array.isArray(payload["summary"]) ? payload["summary"] : []),
+        ...(Array.isArray(payload["content"]) ? payload["content"] : []),
+      ];
+      summaries = [
+        ...new Set(
+          source.flatMap((item) => {
             const text = stringValue(objectValue(item)?.["text"]);
-            return text === null ? [] : [text];
-          })
-        : [];
+            return text === null || text.trim() === "" ? [] : [text];
+          }),
+        ),
+      ];
       encrypted = stringValue(payload["encrypted_content"]) !== null;
     } else {
       continue;
@@ -671,6 +716,7 @@ function normalizeReasoning(
         kind: "reasoning",
         summary: text,
         body: text === "" ? null : plainDocument(text),
+        bodyFromSummary: text !== "",
         encrypted,
         source,
       });
@@ -1239,13 +1285,37 @@ export function normalizeSession(
   const diagnostics: ViewerDiagnostic[] = [];
   const events: CodexEvent[] = [];
   const contextOnlyIds = new Set<string>();
+  const logicalVisibilities = new Map<string, LogicalVisibility>();
   const physicalRef = input.rolloutRef ?? rolloutRefFromSource(input.sourcePath, null);
+  const firstRecord = input.records[0];
+  const sourceMeta = firstRecord
+    ? parseSessionMetaBytes(input.sourcePath, Buffer.from(firstRecord.raw + "\n")).meta
+    : null;
+  const bodyStartOrdinal = (physicalRef.historyBase ?? sourceMeta?.historyBase)
+    ?.endOrdinalExclusive;
+  const bodyStart = bodyStartOrdinal === undefined ? 1 : bodyStartOrdinal + 1;
+  const displayStart = Math.max(
+    bodyStart,
+    physicalRef.subagentHistoryStartOrdinal ?? sourceMeta?.subagentHistoryStartOrdinal ?? 0,
+  );
   for (const record of input.records) {
     const parsed =
       memo?.records.get(record) ?? parseCodexEvent(qualifyRawRecord(record, physicalRef));
     memo?.records.set(record, parsed);
     if (parsed.success) {
       events.push(parsed.event);
+      logicalVisibilities.set(
+        parsed.event.id,
+        record.logicalVisibility ??
+          (parsed.event.type === "session_meta" && !record.contextOnly
+            ? "visible"
+            : logicalRecordVisibility({
+                ...(record.contextOnly === undefined ? {} : { contextOnly: record.contextOnly }),
+                ordinal: record.ordinal ?? record.identity?.ordinal ?? null,
+                bodyStartOrdinal: bodyStart,
+                displayStartOrdinal: displayStart,
+              })),
+      );
       if (record.contextOnly) {
         contextOnlyIds.add(parsed.event.id);
       }
@@ -1292,6 +1362,7 @@ export function normalizeSession(
   const pairedTools = pairToolCalls(
     assembly.turns.flatMap(({ events: turnEvents }) => turnEvents),
     memo?.tools,
+    sessionId,
   );
   const consumedToolEventIds = new Set(pairedTools.consumedEventIds);
   const seenActivities = new Map<string, ConversationActivity>();
@@ -1312,7 +1383,10 @@ export function normalizeSession(
     const key = JSON.stringify([
       fallbackTimestamp,
       assembled.events.map(({ event }) => eventIdentities.get(event.id)),
-      tools.map(({ id, rawEventIds }) => [id, rawEventIds.map((id) => eventIdentities.get(id))]),
+      tools.map(({ id, rawEventIds }) => [
+        id,
+        rawEventIds.map((eventId) => eventIdentities.get(eventId)),
+      ]),
     ]);
     const cached = memo?.turns.get(assembled.id);
     const reusable = cached?.key === key ? cached : undefined;
@@ -1323,7 +1397,7 @@ export function normalizeSession(
     nextMemoTurns.set(assembled.id, { key, messages, activities: localActivities });
     // Reconciliation mutates only the outer activity and its raw-event list, never memoized payloads.
     const activities = localActivities
-      .map((activity) => ({ ...activity, rawEventIds: [...activity.rawEventIds] }))
+      .map((activity) => Object.assign({}, activity, { rawEventIds: [...activity.rawEventIds] }))
       .flatMap((activity) => {
         const reconciled = reconcileActivity(activity, seenActivities, eventOffsets);
         return reconciled === null ? [] : [reconciled];
@@ -1368,7 +1442,19 @@ export function normalizeSession(
         activities,
         eventOffsets,
       ),
-      finalAssistantMessageId: messages.assistantMessages.at(-1)?.id ?? null,
+      finalAssistantMessageId: selectFinalAssistantMessageId(
+        messages.assistantMessages,
+        messages.completionText,
+      ),
+      status: assembled.events.some(
+        ({ event }) => event.type === "event_msg" && event.payloadType === "turn_aborted",
+      )
+        ? "interrupted"
+        : assembled.events.some(
+              ({ event }) => event.type === "event_msg" && event.payloadType === "task_complete",
+            )
+          ? "completed"
+          : "unknown",
       ...metrics,
       tokenDelta: delta,
       models: evidence.models,
@@ -1465,14 +1551,18 @@ export function normalizeSession(
   const rawEvents = events.map((event): NormalizedRawEvent => {
     const payload = memo?.raw.get(event) ?? sanitizeUnknownPayload(event.raw);
     memo?.raw.set(event, payload);
-    return {
+    const rawEvent: NormalizedRawEvent = {
       id: event.id,
+      logicalVisibility: logicalVisibilities.get(event.id) ?? "unresolved",
       turnId: turnIds.get(event.id) ?? null,
-      ...(event.identity === undefined ? {} : { identity: event.identity }),
       type: codexEventType(event),
       timestamp: event.timestamp,
       payload,
     };
+    if (event.identity !== undefined) {
+      rawEvent.identity = event.identity;
+    }
+    return rawEvent;
   });
 
   if (memo !== undefined) {

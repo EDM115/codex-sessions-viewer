@@ -1,15 +1,29 @@
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 
+import { withCacheTransaction } from "#server/cache/database.ts";
+import { SEED_CATALOG_FROM_SESSIONS_SQL } from "#server/cache/schema.ts";
+import {
+  CATALOG_EVIDENCE_VERSION,
+  parseSessionMetaBytes,
+  sessionMetaEvidenceSchema,
+  type SessionMetaEvidence,
+} from "#server/ingestion/sessionMetaPrefix.ts";
+import {
+  catalogVisibilitySql,
+  cachedThreadClassification,
+  classifyNormalizedSession,
+  classificationKind,
+  normalizedSessionMeta,
+} from "#server/metadata/threadClassification.ts";
+import { catalogMetadataRevision } from "#server/metadata/threadFields.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
 import {
   resolveConversationProject,
   type ResolvedConversationProject,
-} from "../../shared/library/projectIdentity.ts";
-import { buildSidebarGroups } from "../../shared/library/sidebarGroups.ts";
-import {
-  conversationSummarySchema,
-  type ConversationSummary,
-} from "../../shared/types/conversation.ts";
+} from "#shared/library/projectIdentity.ts";
+import { buildSidebarGroups } from "#shared/library/sidebarGroups.ts";
+import { conversationSummarySchema, type ConversationSummary } from "#shared/types/conversation.ts";
 import {
   libraryEntrySchema,
   catalogSessionMetadataSchema,
@@ -25,25 +39,8 @@ import {
   type ConversationProject,
   type MaterializationState,
   type ThreadClassification,
-} from "../../shared/types/library.ts";
-import type { CursorPage, SessionListQuery } from "../../shared/types/repository.ts";
-import {
-  CATALOG_EVIDENCE_VERSION,
-  parseSessionMetaBytes,
-  sessionMetaEvidenceSchema,
-  type SessionMetaEvidence,
-} from "../ingestion/sessionMetaPrefix.ts";
-import {
-  catalogVisibilitySql,
-  cachedThreadClassification,
-  classifyNormalizedSession,
-  classificationKind,
-  normalizedSessionMeta,
-} from "../metadata/threadClassification.ts";
-import { catalogMetadataRevision } from "../metadata/threadFields.ts";
-import type { NormalizedSession } from "../normalization/normalizeSession.ts";
-import { withCacheTransaction } from "./database.ts";
-import { SEED_CATALOG_FROM_SESSIONS_SQL } from "./schema.ts";
+} from "#shared/types/library.ts";
+import type { CursorPage, SessionListQuery } from "#shared/types/repository.ts";
 
 export type CatalogSessionKind = "root" | "subagent" | "auxiliary";
 
@@ -503,6 +500,12 @@ export function listCatalogSessions(
       throw new Error("An auxiliary session crossed the public catalog boundary.");
     }
     const metadata = library?.threads.find((thread) => thread.id === record.summary.id);
+    const classification = record.structuralEvidence?.classification ?? metadata?.classification;
+    const agent = {
+      name: classification?.agentNickname ?? record.agentNickname,
+      path: classification?.agentPath ?? record.agentPath,
+      role: classification?.agentRole ?? null,
+    };
     return libraryEntrySchema.parse({
       id: record.summary.id,
       title: record.summary.title,
@@ -519,6 +522,7 @@ export function listCatalogSessions(
           : record.project.id,
       parentThreadId: record.parentThreadId,
       childCount: record.childCount,
+      ...(record.kind === "subagent" && (agent.name || agent.path || agent.role) ? { agent } : {}),
     });
   });
   const nextOffset = offset + items.length;
