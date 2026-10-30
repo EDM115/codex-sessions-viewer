@@ -1,5 +1,5 @@
-import type { CatalogMetadataSnapshot } from "../../../server/metadata/catalogMetadata.ts";
-import type { StateThreadMetadata } from "../../../server/metadata/schemaCapabilities.ts";
+import type { CatalogMetadataSnapshot } from "#server/metadata/catalogMetadata.ts";
+import type { StateThreadMetadata } from "#server/metadata/schemaCapabilities.ts";
 
 export function metadata(
   overrides: Partial<CatalogMetadataSnapshot> = {},

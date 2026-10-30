@@ -4,9 +4,10 @@ import {
   parseCodexEvent,
   type CodexEvent,
   type TurnScopedEvent,
-} from "../../../server/normalization/eventSchema.ts";
-import { pairToolCalls } from "../../../server/normalization/toolPairing.ts";
-import { jsonValueSchema } from "../../../shared/types/conversation.ts";
+} from "#server/normalization/eventSchema.ts";
+import { pairToolCalls } from "#server/normalization/toolPairing.ts";
+import { jsonValueSchema } from "#shared/types/conversation.ts";
+
 import { expectedRawIdentity } from "../../helpers/rawIdentity.ts";
 
 const expectedIds = new Map<number, string>();

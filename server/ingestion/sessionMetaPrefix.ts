@@ -2,16 +2,16 @@ import { lstat, open } from "node:fs/promises";
 
 import * as z from "zod";
 
+import { rawThreadStructureSchema } from "#server/metadata/rawThreadMetadata.ts";
 import {
   isoTimestampSchema,
   jsonValueSchema,
   type JsonValue,
   rolloutHistoryBaseSchema,
   type RolloutHistoryBase,
-} from "../../shared/types/conversation.ts";
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import { threadClassificationSchema } from "../../shared/types/library.ts";
-import { rawThreadStructureSchema } from "../metadata/rawThreadMetadata.ts";
+} from "#shared/types/conversation.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import { threadClassificationSchema } from "#shared/types/library.ts";
 
 export interface SessionMetaPrefixObservation {
   device: bigint;

@@ -1,7 +1,7 @@
 import type { Properties, RootContent } from "hast";
 import { codeToHast } from "shiki";
 
-import { createBoundedWorkQueue } from "#shared/timeline/boundedWork.ts";
+import { canRenderRichCode, createBoundedWorkQueue } from "#shared/timeline/boundedWork.ts";
 import {
   highlightedCodeRootSchema,
   type HighlightedCodeNode,
@@ -54,12 +54,7 @@ export async function highlightCode(
   source: string,
   language: string | null,
 ): Promise<HighlightedCodeRoot | null> {
-  if (
-    language === null ||
-    language.trim() === "" ||
-    source.length > 100_000 ||
-    source.split("\n").length > 1_000
-  ) {
+  if (language === null || language.trim() === "" || !canRenderRichCode(source)) {
     return null;
   }
   try {

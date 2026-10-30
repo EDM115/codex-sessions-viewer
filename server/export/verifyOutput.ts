@@ -4,31 +4,40 @@ import { join, relative, resolve, sep } from "node:path";
 
 import * as z from "zod";
 
+import { assertSafeOutputComponent } from "#server/export/outputFiles.ts";
+import { isThreadVisible } from "#server/metadata/threadClassification.ts";
+import { selectFinalAssistantMessageId } from "#shared/timeline/finalAnswer.ts";
 import {
   conversationSummarySchema,
   sha256Schema,
   type ConversationTurn,
-} from "../../shared/types/conversation.ts";
-import { viewerDiagnosticSchema } from "../../shared/types/diagnostics.ts";
-import { resolvedAssetSchema, turnChunkSchema } from "../../shared/types/repository.ts";
+} from "#shared/types/conversation.ts";
+import { viewerDiagnosticSchema } from "#shared/types/diagnostics.ts";
+import type { CatalogSessionMetadata } from "#shared/types/library.ts";
+import { linkPreviewSchema } from "#shared/types/linkPreview.ts";
+import {
+  resolvedAssetSchema,
+  turnChunkSchema,
+  type InspectorRecord,
+} from "#shared/types/repository.ts";
+import {
+  staticHistoryManifestSchema,
+  staticHistoryChunkSchema,
+} from "#shared/types/staticHistory.ts";
 import {
   hydrateStaticInspectorRecords,
   staticInspectorChunkSchema,
   staticLibraryPayloadSchema,
   staticNavigatorPayloadSchema,
-} from "../../shared/types/staticPayloads.ts";
-import { isThreadVisible } from "../metadata/threadClassification.ts";
-import { assertSafeOutputComponent } from "./outputFiles.ts";
+  staticSessionIndexSchema,
+} from "#shared/types/staticPayloads.ts";
 
 const exportManifestSchema = z.strictObject({
   version: z.literal(1),
   pagefind: z.boolean(),
 });
 
-const sessionIndexSchema = z.strictObject({
-  version: z.literal(1),
-  sessions: z.array(conversationSummarySchema),
-});
+const sessionIndexSchema = staticSessionIndexSchema;
 
 const sessionSummarySchema = z.strictObject({
   summary: conversationSummarySchema,
@@ -195,10 +204,39 @@ function assertEqualOrdered(
   }
 }
 
-function assertTurnOrdering(turn: ConversationTurn, path: string): void {
-  const expectedFinal = turn.assistantMessages.at(-1)?.id ?? null;
-  if (turn.finalAssistantMessageId !== expectedFinal) {
-    throw new Error(`Turn final assistant ID does not match its last response: ${path}`);
+function assertTurnOrdering(
+  turn: ConversationTurn,
+  path: string,
+  inspectorRecords: InspectorRecord[],
+): void {
+  let completionText: string | null = null;
+  const record = inspectorRecords.find(
+    (entry) => entry.target.type === "turn" && entry.target.id === turn.id,
+  );
+  for (const raw of record?.rawRecords ?? []) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      continue;
+    }
+    const envelope = raw["payload"];
+    if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope)) {
+      continue;
+    }
+    const payload = envelope["payload"] ?? envelope;
+    if (
+      payload !== null &&
+      typeof payload === "object" &&
+      !Array.isArray(payload) &&
+      payload["type"] === "task_complete" &&
+      typeof payload["last_agent_message"] === "string"
+    ) {
+      completionText = payload["last_agent_message"];
+    }
+  }
+  if (
+    turn.finalAssistantMessageId !==
+    selectFinalAssistantMessageId(turn.assistantMessages, completionText)
+  ) {
+    throw new Error(`Turn final assistant ID does not match qualified response evidence: ${path}`);
   }
   if (turn.entryOrder === undefined) {
     throw new Error(`Turn is missing chronological entry order: ${path}`);
@@ -219,24 +257,45 @@ function assertTurnOrdering(turn: ConversationTurn, path: string): void {
 }
 
 function assertLibraryTopology(
-  sessions: readonly z.infer<typeof conversationSummarySchema>[],
+  sessions: readonly CatalogSessionMetadata[],
   library: z.infer<typeof staticLibraryPayloadSchema>,
 ): void {
   const summaries = new Map(sessions.map((summary) => [summary.id, summary]));
-  const projectIds = new Set(library.projects.map(({ id }) => id));
+  const projectIds = new Set(
+    (library.version === 1 ? library.projects : library.catalog.projects).map(({ id }) => id),
+  );
+  const entries =
+    library.version === 1
+      ? library.entries
+      : Object.fromEntries(
+          library.catalog.threads.map((thread) => [
+            thread.id,
+            {
+              projectId: thread.projectId,
+              classification: thread.classification,
+              kind: isThreadVisible(thread.classification, "child") ? "subagent" : "root",
+              parentThreadId: thread.classification.parentThreadId,
+              childCount: library.catalog.threads.filter(
+                (child) =>
+                  isThreadVisible(child.classification, "child") &&
+                  child.classification.parentThreadId === thread.id,
+              ).length,
+            },
+          ]),
+        );
   assertEqualOrdered(
-    Object.keys(library.entries).toSorted(),
+    Object.keys(entries).toSorted(),
     [...summaries.keys()].toSorted(),
     "Generated project payload does not match the public session index.",
   );
   for (const summary of sessions) {
-    const entry = library.entries[summary.id]!;
+    const entry = entries[summary.id]!;
     if (entry.classification !== undefined && !isThreadVisible(entry.classification)) {
       throw new Error(
         `Internal or unresolved thread crossed the public output boundary: ${summary.id}`,
       );
     }
-    if (!projectIds.has(entry.projectId)) {
+    if (entry.projectId !== null && !projectIds.has(entry.projectId)) {
       throw new Error(`Session references a missing generated project: ${summary.id}`);
     }
     if (
@@ -272,10 +331,9 @@ function assertLibraryTopology(
       ancestorId = summaries.get(ancestorId)?.parentThreadId ?? null;
     }
   }
-  for (const project of library.projects) {
+  for (const project of library.version === 1 ? library.projects : []) {
     const roots = sessions.filter(
-      (summary) =>
-        summary.parentThreadId === null && library.entries[summary.id]?.projectId === project.id,
+      (summary) => summary.parentThreadId === null && entries[summary.id]?.projectId === project.id,
     );
     const activeCount = roots.filter(({ scope }) => scope === "active").length;
     const archivedCount = roots.filter(({ scope }) => scope === "archived").length;
@@ -288,7 +346,7 @@ function assertLibraryTopology(
 async function verifySession(
   publicRoot: string,
   tree: VerifiedTree,
-  indexedSummary: z.infer<typeof conversationSummarySchema>,
+  indexedSummary: CatalogSessionMetadata,
 ): Promise<number> {
   const { id } = indexedSummary;
   assertSafeOutputComponent(id);
@@ -301,7 +359,7 @@ async function verifySession(
   ) {
     throw new Error(`Session summary does not match the session index: ${id}`);
   }
-  if (summaryPayload.diagnostics.length !== indexedSummary.diagnosticCount) {
+  if (summaryPayload.diagnostics.length !== summaryPayload.summary.diagnosticCount) {
     throw new Error(`Session diagnostics do not match the indexed diagnostic count: ${id}`);
   }
   const navigator = await parseJson(
@@ -312,7 +370,7 @@ async function verifySession(
   if (navigator.sessionId !== id || navigator.revision !== indexedSummary.revision) {
     throw new Error(`Session navigator does not match the indexed session: ${id}`);
   }
-  if (navigator.items.length !== indexedSummary.turnCount) {
+  if (navigator.items.length !== summaryPayload.summary.turnCount) {
     throw new Error(`Session navigator does not match the indexed turn count: ${id}`);
   }
   assertUnique(
@@ -367,7 +425,7 @@ async function verifySession(
       if (turn.sessionId !== id) {
         throw new Error(`Turn chunk contains a turn from another session: ${turnPath}`);
       }
-      assertTurnOrdering(turn, turnPath);
+      assertTurnOrdering(turn, turnPath, inspectorRecords);
       chunkTurnIds.push(turn.id);
       expectedTurnChunks[turn.id] = chunkIndex;
     }
@@ -435,10 +493,79 @@ async function verifySession(
   );
   requireFile(tree, `downloads/${indexedSummary.scope}/${id}.md`);
   requireFile(tree, `session/${id}/index.html`);
+  await verifySavedHistory(publicRoot, tree, id);
   return navigator.items.length;
 }
 
-function localManifestPath(url: string, directory: "assets" | "favicons"): string {
+async function verifySavedHistory(
+  publicRoot: string,
+  tree: VerifiedTree,
+  id: string,
+): Promise<void> {
+  const base = `payloads/sessions/${id}`;
+  if (!tree.files.has(`${base}/history-index.json`)) {
+    return;
+  }
+  const manifest = await parseJson(
+    publicRoot,
+    `${base}/history-index.json`,
+    staticHistoryManifestSchema,
+  );
+  if (manifest.threadId !== id) {
+    throw new Error(`Saved history belongs to another session: ${id}`);
+  }
+  assertUnique(
+    manifest.turns.map((turn) => turn.turnId),
+    `saved history turns for ${id}`,
+  );
+  // oxlint-disable no-await-in-loop -- Validate one bounded saved history chunk at a time
+  for (const [turnIndex, turn] of manifest.turns.entries()) {
+    const items: string[] = [];
+    for (let chunk = 0; chunk < turn.chunks; chunk += 1) {
+      const path = `${base}/history-${turnIndex}-${chunk}.json`;
+      requireFile(tree, path);
+      const saved = await parseJson(publicRoot, path, staticHistoryChunkSchema);
+      if (
+        saved.threadId !== id ||
+        saved.window.turnId !== turn.turnId ||
+        saved.window.physicalRolloutId !== turn.physicalRolloutId ||
+        saved.window.historyEpoch !== manifest.historyEpoch ||
+        saved.window.contentRevision !== manifest.contentRevision
+      ) {
+        throw new Error(`Saved history chunk identity does not match its manifest: ${path}`);
+      }
+      for (const item of saved.window.items) {
+        items.push(item.itemId);
+        if (turn.itemChunks[item.itemId] !== chunk) {
+          throw new Error(`Saved history item index does not match its chunk: ${path}`);
+        }
+      }
+      const ids = new Set([
+        ...saved.window.items.map((item) => item.itemId),
+        saved.window.opening.itemId,
+      ]);
+      for (const presentation of saved.presentations) {
+        if (
+          presentation.threadId !== id ||
+          presentation.turnId !== turn.turnId ||
+          presentation.physicalRolloutId !== turn.physicalRolloutId ||
+          presentation.historyEpoch !== manifest.historyEpoch ||
+          presentation.contentRevision !== manifest.contentRevision ||
+          !ids.has(presentation.itemId)
+        ) {
+          throw new Error(`Saved rich content identity does not match its history window: ${path}`);
+        }
+      }
+    }
+    assertUnique(items, `saved history item IDs for ${id}/${turn.turnId}`);
+    if (items.length !== turn.itemCount) {
+      throw new Error(`Saved history item count does not match its manifest: ${id}/${turn.turnId}`);
+    }
+  }
+  // oxlint-enable no-await-in-loop
+}
+
+function localManifestPath(url: string, directory: "assets" | "favicons" | "previews"): string {
   if (!url.startsWith(`/${directory}/`) || url.includes("?") || url.includes("#")) {
     throw new Error(`Generated ${directory} manifest contains a non-local URL: ${url}`);
   }
@@ -587,6 +714,29 @@ export async function verifyGeneratedOutput(
       favicon.sha256,
       favicon.byteSize,
     );
+  }
+  if (tree.files.has("payloads/link-previews.json")) {
+    const previews = await parseJson(
+      publicRoot,
+      "payloads/link-previews.json",
+      z.strictObject({ version: z.literal(1), previews: z.array(linkPreviewSchema) }),
+    );
+    assertUnique(
+      previews.previews.map((preview) => preview.url),
+      "saved preview URLs",
+    );
+    for (const preview of previews.previews) {
+      if (preview.image) {
+        // oxlint-disable-next-line no-await-in-loop -- Verify one saved local image at a time
+        await assertContentIntegrity(
+          publicRoot,
+          tree,
+          localManifestPath(preview.image.url, "previews"),
+          preview.image.sha256,
+          preview.image.byteSize,
+        );
+      }
+    }
   }
   if (exportManifest.pagefind) {
     requireFile(tree, "pagefind/pagefind.js");

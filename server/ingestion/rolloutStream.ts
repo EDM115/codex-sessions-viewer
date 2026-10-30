@@ -6,21 +6,24 @@ import { DatabaseSync } from "node:sqlite";
 
 import * as z from "zod";
 
+import { resolveViewerPaths } from "#server/core/paths.ts";
+import { sourceHomePath } from "#server/ingestion/rolloutIdentity.ts";
 import {
-  sourceGenerationSchema,
-  type RolloutRef,
-  type SourceGeneration,
-} from "../../shared/types/conversation.ts";
-import { resolveViewerPaths } from "../core/paths.ts";
-import { sourceHomePath } from "./rolloutIdentity.ts";
-import { observeSessionMetaSource, readSessionMetaPrefix } from "./sessionMetaPrefix.ts";
+  observeSessionMetaSource,
+  readSessionMetaPrefix,
+} from "#server/ingestion/sessionMetaPrefix.ts";
 import {
   completeDecodedGeneration,
   validateSourceGeneration,
   validateSourceRanges,
-} from "./sourceGeneration.ts";
-import { readStableBytes } from "./stableRead.ts";
-import { decodeZstdRollout, ZSTD_DECODER_VERSION } from "./zstdRollout.ts";
+} from "#server/ingestion/sourceGeneration.ts";
+import { readStableBytes } from "#server/ingestion/stableRead.ts";
+import { decodeZstdRollout, ZSTD_DECODER_VERSION } from "#server/ingestion/zstdRollout.ts";
+import {
+  sourceGenerationSchema,
+  type RolloutRef,
+  type SourceGeneration,
+} from "#shared/types/conversation.ts";
 
 export interface SeekableRollout {
   ref: RolloutRef;
@@ -53,6 +56,29 @@ interface Job {
 const families = new Map<string, string>();
 const liveArtifacts = new Map<string, Artifact>();
 const cacheOwners = new Map<string, { database: DatabaseSync; references: number }>();
+function inertOwnerJournal(path: string, size: number): boolean {
+  if (size === 0) {
+    return true;
+  }
+  if (![512, 1024, 2048, 4096].includes(size)) {
+    return false;
+  }
+  const bytes = readFileSync(path);
+  if (
+    bytes.length !== size ||
+    bytes.subarray(0, 12).some((byte) => byte !== 0) ||
+    bytes.readUInt32BE(16) !== 0 ||
+    bytes.subarray(28).some((byte) => byte !== 0)
+  ) {
+    return false;
+  }
+  const sector = bytes.readUInt32BE(20);
+  const page = bytes.readUInt32BE(24);
+  return (
+    (sector === 0 || sector === size) &&
+    (page === 0 || (page >= 512 && page <= 65536 && (page & (page - 1)) === 0))
+  );
+}
 /** One OS-backed owner covers attachment, preparation, reclamation and current leases */
 function acquireCacheOwner(directory: string): () => void {
   let owner = cacheOwners.get(directory);
@@ -84,8 +110,9 @@ function acquireCacheOwner(directory: string): () => void {
           sidecarInfo.isFile() &&
           !sidecarInfo.isSymbolicLink() &&
           sidecarInfo.nlink === 1 &&
-          sidecarInfo.size <= 512 &&
-          realpathSync(sidecar) === sidecar
+          sidecarInfo.size <= 4096 &&
+          realpathSync(sidecar) === sidecar &&
+          inertOwnerJournal(sidecar, sidecarInfo.size)
         ) {
           continue;
         }
@@ -99,7 +126,7 @@ function acquireCacheOwner(directory: string): () => void {
     }
     const database = new DatabaseSync(path, { timeout: 0 });
     try {
-      // No schema or data writes, SQLite holds a zero-byte database and at most its 512-byte uncommitted header journal
+      // No schema/data writes, only an inert zero-page journal header (bounded to a 4096-byte sector) is admitted
       database.exec("BEGIN EXCLUSIVE");
     } catch (error) {
       database.close();

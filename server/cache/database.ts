@@ -2,8 +2,8 @@ import { lstatSync, mkdirSync, rmSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { cachedThreadClassification } from "../metadata/threadClassification.ts";
-import { migrateCacheDatabase } from "./migrations.ts";
+import { migrateCacheDatabase } from "#server/cache/migrations.ts";
+import { cachedThreadClassification } from "#server/metadata/threadClassification.ts";
 
 export interface OpenCacheDatabaseOptions {
   rebuildOnMigrationFailure?: boolean | undefined;

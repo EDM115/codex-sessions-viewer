@@ -1,14 +1,7 @@
 <script setup lang="ts">
 import { PhCaretRight, PhFolder, PhFolderOpen } from "@phosphor-icons/vue";
-import { computed } from "vue";
 
 import type { CatalogProjectGroup } from "#shared/types/library.ts";
-
-import { useLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
-import UiButton from "../ui/UiButton.vue";
-import LibraryEmptyState from "./LibraryEmptyState.vue";
-import LibrarySessionTree from "./LibrarySessionTree.vue";
-import LibrarySkeleton from "./LibrarySkeleton.vue";
 
 const props = defineProps<{ project: CatalogProjectGroup; label?: string | undefined }>();
 const workspace = useLibraryWorkspace();

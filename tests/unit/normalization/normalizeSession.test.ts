@@ -3,13 +3,14 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { JsonlStreamParser, type JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
-import { normalizeSession as actualNormalizeSession } from "../../../server/normalization/normalizeSession.ts";
+import { JsonlStreamParser, type JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import { normalizeSession as actualNormalizeSession } from "#server/normalization/normalizeSession.ts";
 import {
   conversationSummarySchema,
   conversationTurnSchema,
   mediaReferenceSchema,
-} from "../../../shared/types/conversation.ts";
+} from "#shared/types/conversation.ts";
+
 import { expectedRawIdentity } from "../../helpers/rawIdentity.ts";
 
 const expectedIds = new Map<number, string>();
@@ -46,6 +47,34 @@ function jsonlRecords(values: JsonlRecord["value"][]): JsonlRecord[] {
 }
 
 describe("session normalization", () => {
+  it("preserves retained generated PNG bytes independently of a missing saved path", () => {
+    const png =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const result = normalizeSession({
+      sourcePath: "retained-generated.jsonl",
+      scope: "active",
+      sessionIndexEntries: [],
+      stateSnapshot: null,
+      records: jsonlRecords([
+        { type: "session_meta", payload: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } },
+        { type: "event_msg", payload: { type: "user_message", message: "Draw an image" } },
+        {
+          type: "response_item",
+          payload: {
+            type: "image_generation_call",
+            id: "image",
+            result: png,
+            saved_path: "C:/deleted/image.png",
+          },
+        },
+      ]),
+    });
+    expect(
+      result.session?.turns[0]?.activities.find((activity) => activity.kind === "media"),
+    ).toMatchObject({
+      reference: { kind: "data", mimeType: "image/png", encoding: "base64", payload: png },
+    });
+  });
   it("I3 keeps the completion-backed original in source order before later commentary", () => {
     const result = normalizeSession({
       sourcePath: "completion-source-order.jsonl",

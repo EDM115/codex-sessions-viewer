@@ -4,14 +4,14 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import { selectSessionSources } from "../../../server/ingestion/selectSessionSources.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { selectSessionSources } from "#server/ingestion/selectSessionSources.ts";
 import {
   readSessionMetaPrefix,
   parseSessionMetaBytes,
   type SessionMetaPrefixFile,
-} from "../../../server/ingestion/sessionMetaPrefix.ts";
-import { rawThreadMetadata } from "../../../server/metadata/rawThreadMetadata.ts";
+} from "#server/ingestion/sessionMetaPrefix.ts";
+import { rawThreadMetadata } from "#server/metadata/rawThreadMetadata.ts";
 
 const fixtureRoot = join(process.cwd(), "tests", "fixtures", "catalog");
 

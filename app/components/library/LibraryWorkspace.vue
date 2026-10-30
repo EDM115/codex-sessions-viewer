@@ -1,13 +1,5 @@
 <script setup lang="ts">
 import { PhSidebarSimple } from "@phosphor-icons/vue";
-import { onBeforeUnmount, onMounted, watch } from "vue";
-
-import {
-  createLibraryWorkspace,
-  provideLibraryWorkspace,
-} from "../../composables/useLibraryWorkspace.ts";
-import UiIconButton from "../ui/UiIconButton.vue";
-import LibrarySidebar from "./LibrarySidebar.vue";
 
 const workspace = createLibraryWorkspace();
 provideLibraryWorkspace(workspace);

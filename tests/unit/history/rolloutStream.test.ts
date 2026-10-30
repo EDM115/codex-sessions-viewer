@@ -20,9 +20,10 @@ import { constants, zstdCompressSync } from "node:zlib";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { RolloutStore } from "../../../server/ingestion/rolloutStream.ts";
-import * as stableRead from "../../../server/ingestion/stableRead.ts";
-import * as decoder from "../../../server/ingestion/zstdRollout.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
+import * as stableRead from "#server/ingestion/stableRead.ts";
+import * as decoder from "#server/ingestion/zstdRollout.ts";
+
 import { canonicalRecords, fixtureRef } from "../../fixtures/history/nativeHistory.ts";
 
 const roots: string[] = [];
@@ -210,6 +211,48 @@ describe("owned seekable rollout generations", () => {
       await store.close();
     },
   );
+  it.each([512, 4096])(
+    "admits only an inert header-only %i-byte ownership journal",
+    async (size) => {
+      const f = await fixture();
+      await mkdir(f.cache);
+      await writeFile(join(f.cache, ".rollout-owner.sqlite"), "");
+      const header = Buffer.alloc(size);
+      header.writeUInt32BE(size, 20);
+      header.writeUInt32BE(4096, 24);
+      await writeFile(join(f.cache, ".rollout-owner.sqlite-journal"), header);
+      const store = new RolloutStore({ cacheDirectory: f.cache });
+      try {
+        const lease = await store.open(f.ref);
+        expect(await lease.read(0, lease.size)).toEqual(f.bytes);
+        await lease.close();
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  it("rejects an apparently sized journal containing page data or a hot header", async () => {
+    const f = await fixture();
+    await mkdir(f.cache);
+    await writeFile(join(f.cache, ".rollout-owner.sqlite"), "");
+    const header = Buffer.alloc(512);
+    header.writeUInt32BE(512, 20);
+    header.writeUInt32BE(4096, 24);
+    header[100] = 1;
+    await writeFile(join(f.cache, ".rollout-owner.sqlite-journal"), header);
+    const store = new RolloutStore({ cacheDirectory: f.cache });
+    try {
+      await expect(
+        store.open(f.ref).then(async (lease) => {
+          await lease.close();
+          return lease;
+        }),
+      ).rejects.toThrow("unsafe_cache_owner");
+    } finally {
+      await store.close();
+    }
+  });
   it("I5 reclaims a cold persisted generation in a fresh process while preserving a separately leased generation", async () => {
     const f = await fixture();
     const moduleUrl = pathToFileURL(resolvePath("server/ingestion/rolloutStream.ts")).href;

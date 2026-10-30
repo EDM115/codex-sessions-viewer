@@ -6,9 +6,12 @@ import { DatabaseSync } from "node:sqlite";
 
 import * as z from "zod";
 
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import { stableRead } from "../ingestion/stableRead.ts";
-import { readStateMetadata, type StateMetadataSnapshot } from "./schemaCapabilities.ts";
+import { stableRead } from "#server/ingestion/stableRead.ts";
+import {
+  readStateMetadata,
+  type StateMetadataSnapshot,
+} from "#server/metadata/schemaCapabilities.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 
 const quickCheckSchema = z.array(z.strictObject({ quick_check: z.literal("ok") })).length(1);
 const currentSnapshotSchema = z.strictObject({ generationPath: z.string().min(1) });
@@ -17,7 +20,7 @@ export type {
   StateSectionMetadata,
   StateSpawnEdgeMetadata,
   StateMetadataSnapshot,
-} from "./schemaCapabilities.ts";
+} from "#server/metadata/schemaCapabilities.ts";
 
 export interface StateSnapshotOptions {
   sourceDatabase: string;

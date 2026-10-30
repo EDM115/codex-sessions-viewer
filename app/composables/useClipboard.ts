@@ -1,5 +1,3 @@
-import { computed, onScopeDispose, readonly, ref } from "vue";
-
 export type ClipboardState = "default" | "error" | "success";
 
 export function useClipboard(resetAfterMs = 2_500) {

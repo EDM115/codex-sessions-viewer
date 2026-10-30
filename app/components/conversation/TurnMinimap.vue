@@ -1,13 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-
 import type { TurnNavigatorItem } from "#shared/types/conversation.ts";
-
-import {
-  markerWidthForBucket,
-  minimapDestinationIndex,
-  minimapPreview,
-} from "../../composables/useTurnMinimap.ts";
 
 const props = defineProps<{
   currentTurnId: string | null;

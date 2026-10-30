@@ -1,7 +1,7 @@
 import {
   InvalidStaticPayloadPathError,
   readStaticPayloadInput,
-} from "../../export/staticPayloadInput.ts";
+} from "#server/export/staticPayloadInput.ts";
 
 function isMissingFile(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";

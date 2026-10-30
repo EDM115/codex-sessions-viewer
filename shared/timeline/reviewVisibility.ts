@@ -1,4 +1,4 @@
-import type { LogicalVisibility, ReviewSourceRecord } from "../types/history.ts";
+import type { LogicalVisibility, ReviewSourceRecord } from "#shared/types/history.ts";
 
 /** Explicit contextOnly decisions come from the full logical-lineage reader */
 export function logicalRecordVisibility(input: {

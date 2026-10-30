@@ -4,10 +4,10 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import { LiveReconciler } from "../../../server/live/reconciler.ts";
-import { LiveConversationRepository } from "../../../server/live/repository.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { LiveReconciler } from "#server/live/reconciler.ts";
+import { LiveConversationRepository } from "#server/live/repository.ts";
 
 describe("deep search child discovery", () => {
   it("indexes a cold child-only match, preserves parent navigation and excludes guardian sources", async () => {

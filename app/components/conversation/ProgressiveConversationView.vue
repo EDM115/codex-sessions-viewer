@@ -11,6 +11,7 @@ import type {
   InspectorRecord,
   InspectorTarget,
 } from "#shared/types/repository.ts";
+import type { ScrollAnchorSnapshot } from "~/composables/useScrollAnchoring.ts";
 
 const props = defineProps<{
   metadata: CatalogSessionMetadata;
@@ -24,7 +25,7 @@ const canvas = useTemplateRef<HTMLElement>("historyCanvas");
 const mediaViewer = useMediaViewer();
 const resolveAsset = (id: string) => props.repository.resolveAsset(id);
 const resolveFavicon = (origin: string) => props.repository.resolveFavicon(origin);
-let revealGeneration = 0;
+provideLinkPreviewResolver(props.repository.resolveLinkPreview?.bind(props.repository));
 const selectionId = props.metadata.id;
 const timeline = useProgressiveHistoryTimeline({
   sessionId: selectionId,
@@ -44,6 +45,14 @@ const viewport = useMeasuredConversationViewport({
   canvas,
   storageKey: props.metadata.id,
   followEnabled: () => settings.liveFollow,
+  sourceIdentity: (key) => {
+    const window = timeline.windows.value.find(
+      (entry) => JSON.stringify([entry.physicalRolloutId, entry.turnId]) === key,
+    );
+    return window
+      ? JSON.stringify([selectionId, window.physicalRolloutId, window.turnId, window.historyEpoch])
+      : null;
+  },
 });
 timeline.setVisible([]);
 watch(
@@ -51,14 +60,22 @@ watch(
   (keys) => timeline.setVisible(keys),
 );
 function readInput(event: Event) {
-  revealGeneration++;
-  viewport.readInput(event);
-  timeline.cancelTarget();
+  if (viewport.readInput(event)) {
+    timeline.cancelTarget();
+  }
 }
 async function latest() {
+  const owner = viewport.beginNavigation();
   timeline.setVisible([]);
-  await timeline.refresh();
-  await viewport.latest();
+  try {
+    await timeline.refresh(owner);
+    if (owner.isCurrent()) {
+      await viewport.latest(owner);
+    }
+  } finally {
+    timeline.releaseTarget(owner);
+    viewport.finishNavigation(owner);
+  }
 }
 
 async function expandedDetailsChanged() {
@@ -66,7 +83,10 @@ async function expandedDetailsChanged() {
   const entries = surface.value?.querySelectorAll<HTMLElement>("[data-entry-id]") ?? [];
   timeline.setExpanded(
     [...entries].flatMap((entry) => {
-      if (!entry.querySelector(".rich-text-document")) {
+      if (
+        !entry.querySelector(".rich-text-document") &&
+        !entry.matches(".conversation-attachment")
+      ) {
         return [];
       }
       const key = entry.closest<HTMLElement>("[data-anchor-turn-id]")?.dataset["anchorTurnId"];
@@ -137,6 +157,20 @@ const presented = computed(() => {
   return entries;
 });
 const inspection = shallowRef<InspectorRecord | null>(null);
+let inspectionOpener: HTMLElement | null = null;
+let inspectionAction = 0;
+let inspectionDisposed = false;
+function closeInspection() {
+  const action = ++inspectionAction;
+  const opener = inspectionOpener;
+  inspectionOpener = null;
+  inspection.value = null;
+  void nextTick().then(() => {
+    if (!inspectionDisposed && action === inspectionAction && opener?.isConnected) {
+      opener.focus();
+    }
+  });
+}
 function inspect(window: HistoryTurnWindow, target: InspectorTarget) {
   if (props.metadata.id !== selectionId) {
     inspection.value = null;
@@ -154,6 +188,11 @@ function inspect(window: HistoryTurnWindow, target: InspectorTarget) {
     return;
   }
   const record = historyWindowInspector(selectionId, current, target);
+  inspectionAction += 1;
+  if (inspection.value === null) {
+    inspectionOpener =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
   inspection.value = record ? structuredClone(record) : null;
 }
 function inspectRelated(target: InspectorTarget) {
@@ -176,27 +215,43 @@ watch(
     () => timeline.page.value?.contentRevision,
     () => timeline.stale.value,
   ],
-  () => {
+  (current, previous) => {
+    if (current.slice(0, 3).some((value, index) => value !== previous[index])) {
+      inspectionAction += 1;
+    }
+    inspectionOpener = null;
     inspection.value = null;
   },
   { flush: "sync" },
 );
 const navigator = shallowRef<HistoryNavigatorPage | null>(null);
 const navigatorController = new AbortController();
-async function revealTarget(turnId: string) {
-  const generation = ++revealGeneration;
-  await timeline.loadTarget(turnId);
-  if (generation !== revealGeneration) {
-    return;
+async function revealTarget(turnId: string, restored?: ScrollAnchorSnapshot) {
+  const owner = viewport.beginNavigation();
+  try {
+    await timeline.loadTarget(turnId, owner);
+    if (!owner.isCurrent()) {
+      return;
+    }
+    await nextTick();
+    if (!owner.isCurrent()) {
+      return;
+    }
+    const target = timeline.windows.value.find(
+      (window) => window.turnId === turnId || window.boundary?.identityAliases.includes(turnId),
+    );
+    if (target) {
+      await viewport.target(
+        JSON.stringify([target.physicalRolloutId, target.turnId]),
+        restored?.top ?? 0,
+        owner,
+        restored,
+      );
+    }
+  } finally {
+    timeline.releaseTarget(owner);
+    viewport.finishNavigation(owner);
   }
-  await nextTick();
-  const target = timeline.windows.value.find(
-    (window) => window.turnId === turnId || window.boundary?.identityAliases.includes(turnId),
-  );
-  if (!target) {
-    return;
-  }
-  await viewport.target(JSON.stringify([target.physicalRolloutId, target.turnId]));
 }
 async function loadNavigator(cursor?: string) {
   try {
@@ -219,9 +274,9 @@ onMounted(() => {
     void revealTarget(props.targetTurnId);
   } else if (restored) {
     const [, turnId] = JSON.parse(restored.turnId) as [string, string];
-    void timeline.loadTarget(turnId).then(() => viewport.target(restored.turnId, restored.top));
+    void revealTarget(turnId, restored);
   } else {
-    void timeline.refresh().then(() => viewport.latest());
+    void latest();
   }
   void loadNavigator();
   unsubscribe = props.repository.subscribe((event) => {
@@ -240,6 +295,9 @@ watch(
   },
 );
 onBeforeUnmount(() => {
+  inspectionDisposed = true;
+  inspectionAction += 1;
+  inspectionOpener = null;
   unsubscribe();
   timeline.dispose();
   navigatorController.abort();
@@ -329,6 +387,14 @@ onBeforeUnmount(() => {
           class="history-row"
           :data-index="entry.row.index"
           :data-anchor-turn-id="String(entry.row.key)"
+          :data-anchor-source="
+            JSON.stringify([
+              metadata.id,
+              entry.window.physicalRolloutId,
+              entry.window.turnId,
+              entry.window.historyEpoch,
+            ])
+          "
           :style="{ transform: `translateY(${entry.row.start - viewport.origin.value}px)` }"
           :data-history-turn="entry.window.turnId"
           :data-history-physical="entry.window.physicalRolloutId"
@@ -436,7 +502,7 @@ onBeforeUnmount(() => {
       :record="inspection"
       :loading="false"
       :error="null"
-      @close="inspection = null"
+      @close="closeInspection"
       @inspect="inspectRelated"
     />
   </section>

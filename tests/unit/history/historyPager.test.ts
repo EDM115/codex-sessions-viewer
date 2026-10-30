@@ -4,16 +4,17 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { CanonicalRolloutIndex } from "../../../server/history/canonicalRolloutIndex.ts";
-import { HistoryEpochAuthority } from "../../../server/history/historyEpochAuthority.ts";
-import { HistoryPager } from "../../../server/history/historyPager.ts";
-import { NativeHistoryService } from "../../../server/history/nativeHistoryService.ts";
-import { RolloutHistoryReader } from "../../../server/history/rolloutHistoryReader.ts";
-import { RolloutStore } from "../../../server/ingestion/rolloutStream.ts";
-import * as sourceGeneration from "../../../server/ingestion/sourceGeneration.ts";
-import { HistorySnapshotManager } from "../../../server/metadata/historySnapshot.ts";
-import { mergeHistoryWindows } from "../../../shared/timeline/history.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { CanonicalRolloutIndex } from "#server/history/canonicalRolloutIndex.ts";
+import { HistoryEpochAuthority } from "#server/history/historyEpochAuthority.ts";
+import { HistoryPager } from "#server/history/historyPager.ts";
+import { NativeHistoryService } from "#server/history/nativeHistoryService.ts";
+import { RolloutHistoryReader } from "#server/history/rolloutHistoryReader.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
+import * as sourceGeneration from "#server/ingestion/sourceGeneration.ts";
+import { HistorySnapshotManager } from "#server/metadata/historySnapshot.ts";
+import { mergeHistoryWindows } from "#shared/timeline/history.ts";
+
 import {
   canonicalRecords,
   fixtureRef,

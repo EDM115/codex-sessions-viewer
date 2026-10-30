@@ -247,6 +247,9 @@ function toggled(event: Event): void {
         />
         <ConversationWorkEntry
           v-else
+          :data-anchor-entry="
+            node.message ? `message:${messageKeys?.[node.id] ?? node.id}` : `activity:${node.id}`
+          "
           :message="node.message"
           :activity="node.activity"
           :disclosure-key="`${disclosureKey ?? `${turn.sessionId}:${turn.id}`}:${node.id}`"

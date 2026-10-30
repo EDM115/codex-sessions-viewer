@@ -1,14 +1,9 @@
 <script setup lang="ts">
 import { PhCaretDown, PhCheck, PhCopy, PhWarning } from "@phosphor-icons/vue";
-import { computed, ref } from "vue";
 
 import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type { RichTextElementNode, RichTextNode } from "#shared/types/richText.ts";
-
-import { useClipboard } from "../../composables/useClipboard.ts";
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import UiIconButton from "../ui/UiIconButton.vue";
-import RichTextNodeComponent from "./RichTextNode.vue";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = withDefaults(
   defineProps<{
@@ -109,7 +104,7 @@ async function copy(value: string): Promise<void> {
     </figcaption>
     <div class="rich-table__scroller" tabindex="0">
       <table>
-        <RichTextNodeComponent
+        <ContentRichTextNode
           v-for="(child, index) in node.children"
           :key="index"
           :node="child"

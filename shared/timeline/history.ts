@@ -1,5 +1,5 @@
-import type { HistoryTurnWindow } from "../types/history.ts";
-import { unverifiedReviewRecord } from "./reviewVisibility.ts";
+import { unverifiedReviewRecord } from "#shared/timeline/reviewVisibility.ts";
+import type { HistoryTurnWindow } from "#shared/types/history.ts";
 
 function compareCoordinates(
   leftByte: number | undefined,

@@ -5,7 +5,7 @@ import { Worker } from "node:worker_threads";
 
 import * as z from "zod";
 
-import { HISTORY_SNAPSHOT_WORKER } from "./historySnapshotWorker.ts";
+import { HISTORY_SNAPSHOT_WORKER } from "#server/metadata/historySnapshotWorker.ts";
 
 export interface HistorySnapshotOptions {
   sourceDatabase: string;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { getCachedAsset, upsertCachedAsset } from "../../../server/cache/assetStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
+import { getCachedAsset, upsertCachedAsset } from "#server/cache/assetStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
 
 describe("cached asset metadata", () => {
   it("upserts asset state and returns only the resolver contract", () => {

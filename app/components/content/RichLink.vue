@@ -1,15 +1,11 @@
 <script setup lang="ts">
 import { PhCheck, PhCopy, PhFile, PhGlobe, PhWarning } from "@phosphor-icons/vue";
-import { computed, onMounted, ref, watch } from "vue";
 
+import { canonicalWebsiteUrl, type LinkPreview } from "#shared/types/linkPreview.ts";
 import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type { RichTextLinkNode, RichTextNode as RichNode } from "#shared/types/richText.ts";
-
-import { useClipboard } from "../../composables/useClipboard.ts";
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import UiIconButton from "../ui/UiIconButton.vue";
-import { faviconRevision } from "./faviconAvailability.ts";
-import RichTextNode from "./RichTextNode.vue";
+import { faviconRevision } from "~/components/content/faviconAvailability.ts";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = withDefaults(
   defineProps<{
@@ -94,6 +90,172 @@ const copyLabel = computed(() =>
   state.value === "success" ? "Copied: Copy file path" : "Copy file path",
 );
 const external = computed(() => props.node.origin !== null);
+const previewResolver = useLinkPreviewResolver();
+const previewTrigger = ref<HTMLAnchorElement | null>(null);
+const previewCard = ref<HTMLElement | null>(null);
+const previewOpenLink = ref<HTMLAnchorElement | null>(null);
+const previewId = useId();
+const preview = shallowRef<LinkPreview | null>(null);
+const previewOpen = ref(false);
+const previewLoading = ref(false);
+const previewImageFailed = ref(false);
+const previewPosition = ref({ left: "12px", top: "12px", maxHeight: "320px" });
+let previewController: AbortController | null = null;
+let prefetchTimer: ReturnType<typeof setTimeout> | undefined;
+let openTimer: ReturnType<typeof setTimeout> | undefined;
+let closeTimer: ReturnType<typeof setTimeout> | undefined;
+let previewGeneration = 0;
+let previewDismissed = false;
+const previewUrl = computed(() => {
+  try {
+    return external.value && previewResolver ? canonicalWebsiteUrl(props.node.url) : null;
+  } catch {
+    return null;
+  }
+});
+const previewHostname = computed(() => {
+  try {
+    return new URL(props.node.url).hostname;
+  } catch {
+    return "Website";
+  }
+});
+function positionPreview() {
+  if (!previewOpen.value || !previewTrigger.value) {
+    return;
+  }
+  const rect = previewTrigger.value.getBoundingClientRect();
+  const width = Math.min(360, window.innerWidth - 24);
+  const height = Math.min(previewCard.value?.offsetHeight || 200, 320, window.innerHeight - 24);
+  const top =
+    rect.top >= height + 16
+      ? rect.top - height - 8
+      : Math.min(rect.bottom + 8, window.innerHeight - height - 12);
+  previewPosition.value = {
+    left: `${Math.max(12, Math.min(rect.left, window.innerWidth - width - 12))}px`,
+    top: `${Math.max(12, top)}px`,
+    maxHeight: `${Math.max(80, Math.min(320, window.innerHeight - 24))}px`,
+  };
+}
+function clearPreviewTimers() {
+  clearTimeout(prefetchTimer);
+  clearTimeout(openTimer);
+  clearTimeout(closeTimer);
+}
+function closePreview(restoreFocus = false) {
+  clearPreviewTimers();
+  previewOpen.value = false;
+  previewLoading.value = false;
+  previewGeneration += 1;
+  previewController?.abort();
+  previewController = null;
+  if (restoreFocus) {
+    previewDismissed = true;
+    previewTrigger.value?.focus();
+  }
+}
+async function fetchPreview() {
+  const url = previewUrl.value;
+  if (!url || !previewResolver || previewLoading.value || preview?.value?.url === url) {
+    return;
+  }
+  const generation = ++previewGeneration;
+  const controller = new AbortController();
+  previewController = controller;
+  previewLoading.value = true;
+  try {
+    const value = await previewResolver(url, { signal: controller.signal });
+    if (
+      generation === previewGeneration &&
+      !controller.signal.aborted &&
+      previewUrl.value === url
+    ) {
+      preview.value = value;
+      previewImageFailed.value = false;
+    }
+  } catch {
+    /* Keep the usable hostname and original destination */
+  } finally {
+    if (generation === previewGeneration) {
+      previewLoading.value = false;
+      previewController = null;
+      await nextTick();
+      positionPreview();
+    }
+  }
+}
+function showPreview() {
+  if (!previewUrl.value) {
+    return;
+  }
+  previewOpen.value = true;
+  void fetchPreview();
+  void nextTick(positionPreview);
+}
+function enterPreview(event: PointerEvent) {
+  if (event.pointerType === "touch" || event.buttons || !previewUrl.value) {
+    return;
+  }
+  clearPreviewTimers();
+  previewDismissed = false;
+  prefetchTimer = setTimeout(() => {
+    void fetchPreview();
+  }, 200);
+  openTimer = setTimeout(showPreview, 700);
+}
+function leavePreview() {
+  clearTimeout(prefetchTimer);
+  clearTimeout(openTimer);
+  closeTimer = setTimeout(() => {
+    if (
+      !previewCard.value?.contains(document.activeElement) &&
+      document.activeElement !== previewTrigger.value
+    ) {
+      closePreview();
+    }
+  }, 120);
+}
+function focusPreview() {
+  clearPreviewTimers();
+  if (!previewDismissed) {
+    showPreview();
+  }
+}
+function previewKey(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    previewDismissed = true;
+    closePreview(previewCard.value?.contains(document.activeElement));
+  } else if (
+    event.key === "Tab" &&
+    previewOpen.value &&
+    !event.shiftKey &&
+    event.target === previewTrigger.value
+  ) {
+    event.preventDefault();
+    previewOpenLink.value?.focus();
+  } else if (event.key === "Tab" && event.shiftKey && event.target === previewOpenLink.value) {
+    event.preventDefault();
+    previewTrigger.value?.focus();
+  }
+}
+watch(
+  () => props.node.url,
+  () => {
+    closePreview();
+    preview.value = null;
+    previewDismissed = false;
+  },
+);
+onMounted(() => {
+  window.addEventListener("resize", positionPreview);
+  window.addEventListener("scroll", positionPreview, true);
+});
+onBeforeUnmount(() => {
+  closePreview();
+  window.removeEventListener("resize", positionPreview);
+  window.removeEventListener("scroll", positionPreview, true);
+});
 
 onMounted(() => {
   watch(
@@ -136,7 +298,7 @@ onMounted(() => {
   <span v-if="file !== null" class="rich-file-reference">
     <PhFile :size="16" weight="regular" aria-hidden="true" />
     <span class="rich-file-reference__label">
-      <RichTextNode
+      <ContentRichTextNode
         v-for="(child, index) in node.children"
         :key="index"
         :node="child"
@@ -156,7 +318,7 @@ onMounted(() => {
     </UiIconButton>
   </span>
   <span v-else-if="hasMedia" class="rich-linked-media">
-    <RichTextNode
+    <ContentRichTextNode
       v-for="(child, index) in node.children"
       :key="index"
       :node="child"
@@ -174,33 +336,96 @@ onMounted(() => {
       >Open linked destination</a
     >
   </span>
-  <a
+  <span
     v-else
-    class="rich-link"
-    v-bind="linkAttributes"
-    :href="node.url"
-    :title="node.title ?? undefined"
-    :target="external ? '_blank' : undefined"
-    :rel="external ? 'noreferrer noopener' : undefined"
+    class="rich-link-shell"
+    @pointerenter="enterPreview"
+    @pointerleave="leavePreview"
+    @keydown="previewKey"
   >
-    <span v-if="external" class="rich-link__icon" aria-hidden="true">
-      <img
-        v-if="faviconUrl !== null && !faviconFailed"
-        :src="faviconUrl"
-        alt=""
-        width="16"
-        height="16"
-        @error="faviconFailed = true"
+    <a
+      ref="previewTrigger"
+      class="rich-link"
+      v-bind="linkAttributes"
+      :href="node.url"
+      :title="node.title ?? undefined"
+      :target="external ? '_blank' : undefined"
+      :rel="external ? 'noreferrer noopener' : undefined"
+      :aria-haspopup="previewUrl ? 'dialog' : undefined"
+      :aria-expanded="previewUrl ? previewOpen : undefined"
+      :aria-controls="previewOpen ? previewId : undefined"
+      @focus="focusPreview"
+      @blur="leavePreview"
+      @pointerdown="closePreview()"
+      @click="closePreview()"
+      @dragstart="closePreview()"
+    >
+      <span v-if="external" class="rich-link__icon" aria-hidden="true">
+        <img
+          v-if="faviconUrl !== null && !faviconFailed"
+          :src="faviconUrl"
+          alt=""
+          width="16"
+          height="16"
+          @error="faviconFailed = true"
+        />
+        <PhGlobe v-else :size="16" weight="regular" />
+      </span>
+      <ContentRichTextNode
+        v-for="(child, index) in node.children"
+        :key="index"
+        :node="child"
+        :resolve-asset="resolveAsset"
+        :resolve-favicon="resolveFavicon"
+        @open-media="emit('openMedia', $event)"
       />
-      <PhGlobe v-else :size="16" weight="regular" />
-    </span>
-    <RichTextNode
-      v-for="(child, index) in node.children"
-      :key="index"
-      :node="child"
-      :resolve-asset="resolveAsset"
-      :resolve-favicon="resolveFavicon"
-      @open-media="emit('openMedia', $event)"
-    />
-  </a>
+    </a>
+    <Teleport to="body">
+      <aside
+        v-if="previewOpen"
+        :id="previewId"
+        ref="previewCard"
+        class="website-preview"
+        role="dialog"
+        :aria-label="`Website preview for ${previewHostname}`"
+        :style="previewPosition"
+        @pointerenter="clearPreviewTimers"
+        @pointerleave="leavePreview"
+        @focusin="clearPreviewTimers"
+        @focusout="leavePreview"
+        @keydown="previewKey"
+      >
+        <div class="website-preview__header">
+          <span>{{ previewHostname }}</span
+          ><a ref="previewOpenLink" :href="node.url" target="_blank" rel="noreferrer noopener"
+            >Open<span class="visually-hidden"> {{ previewHostname }}</span></a
+          >
+        </div>
+        <p v-if="previewLoading" role="status">Loading preview…</p>
+        <template v-else>
+          <img
+            v-if="preview?.image && !previewImageFailed"
+            :class="
+              preview.image.width / preview.image.height >= 1.2
+                ? 'website-preview__hero'
+                : 'website-preview__thumbnail'
+            "
+            :src="preview.image.url"
+            :width="preview.image.width"
+            :height="preview.image.height"
+            alt=""
+            decoding="async"
+            referrerpolicy="no-referrer"
+            @load="positionPreview"
+            @error="previewImageFailed = true"
+          />
+          <strong v-if="preview?.title" class="website-preview__title">{{ preview.title }}</strong>
+          <p v-if="preview?.description" class="website-preview__description">
+            {{ preview.description }}
+          </p>
+          <small v-if="preview?.fetchedAt">Saved website preview</small>
+        </template>
+      </aside>
+    </Teleport>
+  </span>
 </template>

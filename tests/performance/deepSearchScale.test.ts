@@ -5,12 +5,12 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { openCacheDatabase } from "../../server/cache/database.ts";
-import type { StableJsonlReader } from "../../server/cache/sourceManifest.ts";
-import { readStableJsonl } from "../../server/ingestion/jsonlStream.ts";
-import { InvalidationBus } from "../../server/live/invalidationBus.ts";
-import { LiveReconciler } from "../../server/live/reconciler.ts";
-import type { SearchQuery, ViewerInvalidation } from "../../shared/types/repository.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import type { StableJsonlReader } from "#server/cache/sourceManifest.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { LiveReconciler } from "#server/live/reconciler.ts";
+import type { SearchQuery, ViewerInvalidation } from "#shared/types/repository.ts";
 
 const temporaryRoots: string[] = [];
 

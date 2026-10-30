@@ -1,10 +1,6 @@
 <script setup lang="ts">
 import { PhGear, PhHouse } from "@phosphor-icons/vue";
 
-import LibraryWorkspace from "../components/library/LibraryWorkspace.vue";
-import UiIconLink from "../components/ui/UiIconLink.vue";
-import { usePresentationSettings } from "../composables/usePresentationSettings.ts";
-
 const route = useRoute();
 const { settings } = usePresentationSettings();
 
@@ -26,14 +22,9 @@ const context = computed(() =>
   >
     <a class="skip-link" href="#main-content">Skip to content</a>
     <header class="app-chrome">
-      <NuxtLink
-        class="app-chrome__brand"
-        to="/"
-        :prefetch="false"
-        aria-label="Codex Sessions Viewer home"
-      >
+      <NuxtLink class="app-chrome__brand" to="/" :prefetch="false">
         <span class="app-chrome__sigil" aria-hidden="true">C</span>
-        <span>Codex Sessions Viewer</span>
+        <span>Codex Sessions Viewer</span><span class="visually-hidden"> home</span>
       </NuxtLink>
       <p class="app-chrome__context">{{ context }}</p>
       <nav class="app-chrome__actions" aria-label="Application">

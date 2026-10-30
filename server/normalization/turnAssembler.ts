@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
-import { payloadObject, type CodexEvent, type TurnScopedEvent } from "./eventSchema.ts";
+import {
+  payloadObject,
+  type CodexEvent,
+  type TurnScopedEvent,
+} from "#server/normalization/eventSchema.ts";
 
 export interface AssembledTurnEvents {
   id: string;

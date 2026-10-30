@@ -1,6 +1,6 @@
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
-import { resolvedAssetSchema, type ResolvedAsset } from "../../shared/types/repository.ts";
+import { resolvedAssetSchema, type ResolvedAsset } from "#shared/types/repository.ts";
 
 export interface CachedAssetWrite extends ResolvedAsset {
   sessionId: string | null;

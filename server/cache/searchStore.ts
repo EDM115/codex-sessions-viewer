@@ -1,17 +1,18 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 
-import type { ConversationActivity, ConversationTurn } from "../../shared/types/conversation.ts";
-import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+import { searchMembershipFilter } from "#server/cache/searchMembership.ts";
+import { catalogVisibilitySql } from "#server/metadata/threadClassification.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import type { ConversationActivity, ConversationTurn } from "#shared/types/conversation.ts";
+import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 import {
   searchQuerySchema,
   searchResponseSchema,
   type CursorPage,
   type SearchHit,
   type SearchQuery,
-} from "../../shared/types/repository.ts";
-import type { RichTextDocument } from "../../shared/types/richText.ts";
-import { catalogVisibilitySql } from "../metadata/threadClassification.ts";
-import type { NormalizedSession } from "../normalization/normalizeSession.ts";
+} from "#shared/types/repository.ts";
+import type { RichTextDocument } from "#shared/types/richText.ts";
 
 interface SearchColumns {
   reasoning: string[];
@@ -189,6 +190,7 @@ function cursorOffset(cursor: string | undefined): number {
 }
 
 function buildFilters(
+  database: DatabaseSync,
   query: SearchQuery,
   expression: string,
 ): { sql: string; values: SQLInputValue[] } {
@@ -199,12 +201,9 @@ function buildFilters(
     `NOT EXISTS (SELECT 1 FROM session_catalog c WHERE c.id = s.id AND NOT (${catalogVisibilitySql("ordinary", "c")}))`,
   ];
   const values: SQLInputValue[] = [expression, query.scope];
-  if (query.projectId !== undefined) {
-    clauses.push(
-      "EXISTS (SELECT 1 FROM session_catalog AS c WHERE c.id = s.id AND c.project_id = ?)",
-    );
-    values.push(query.projectId ?? "none");
-  }
+  const membership = searchMembershipFilter(database, query, "s");
+  clauses.push(membership.sql);
+  values.push(...membership.values);
   if (query.model !== undefined) {
     clauses.push("EXISTS (SELECT 1 FROM json_each(s.models_json) WHERE value = ?)");
     values.push(query.model);
@@ -232,7 +231,7 @@ export function countCachedSearchResults(database: DatabaseSync, input: SearchQu
   if (expression === "") {
     return 0;
   }
-  const filters = buildFilters(query, expression);
+  const filters = buildFilters(database, query, expression);
   const totalRow = database
     .prepare(`
       SELECT count(*) AS total
@@ -255,7 +254,7 @@ export function searchCachedSessions(
   if (expression === "") {
     return { items: [], nextCursor: null, total: 0 };
   }
-  const filters = buildFilters(query, expression);
+  const filters = buildFilters(database, query, expression);
   const total = countCachedSearchResults(database, query);
   const rows = database
     .prepare(`

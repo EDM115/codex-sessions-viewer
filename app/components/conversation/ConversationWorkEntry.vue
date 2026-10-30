@@ -124,6 +124,7 @@ function activityLabel(activity: ConversationActivity): string {
   />
   <ConversationAttachment
     v-else-if="activity?.kind === 'media'"
+    :data-entry-id="entryId"
     :asset-id="activity.assetId"
     :resolve-asset="resolveAsset"
     @open-media="emit('openMedia', $event)"

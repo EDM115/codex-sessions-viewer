@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { parseCodexEvent, type CodexEvent } from "../../../server/normalization/eventSchema.ts";
-import { assembleTurnEvents } from "../../../server/normalization/turnAssembler.ts";
-import { jsonValueSchema } from "../../../shared/types/conversation.ts";
+import { parseCodexEvent, type CodexEvent } from "#server/normalization/eventSchema.ts";
+import { assembleTurnEvents } from "#server/normalization/turnAssembler.ts";
+import { jsonValueSchema } from "#shared/types/conversation.ts";
 
 function event(lineNumber: number, type: string, payload: Record<string, unknown>): CodexEvent {
   const value = jsonValueSchema.parse({

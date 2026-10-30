@@ -1,7 +1,6 @@
 import { mountSuspended } from "@nuxt/test-utils/runtime";
 import { flushPromises, type DOMWrapper } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { h } from "vue";
 
 import type {
   ConversationMessage as Message,

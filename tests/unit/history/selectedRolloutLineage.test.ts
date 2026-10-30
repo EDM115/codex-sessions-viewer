@@ -5,11 +5,12 @@ import { zstdCompressSync } from "node:zlib";
 
 import { expect, it, vi } from "vitest";
 
-import { HistoryEpochAuthority } from "../../../server/history/historyEpochAuthority.ts";
-import { RolloutHistoryReader } from "../../../server/history/rolloutHistoryReader.ts";
-import * as discovery from "../../../server/ingestion/discoverSources.ts";
-import { RolloutStore } from "../../../server/ingestion/rolloutStream.ts";
-import { resolveSelectedRolloutLineage } from "../../../server/ingestion/selectedRolloutLineage.ts";
+import { HistoryEpochAuthority } from "#server/history/historyEpochAuthority.ts";
+import { RolloutHistoryReader } from "#server/history/rolloutHistoryReader.ts";
+import * as discovery from "#server/ingestion/discoverSources.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
+import { resolveSelectedRolloutLineage } from "#server/ingestion/selectedRolloutLineage.ts";
+
 import { fixtureRef, canonicalRecords } from "../../fixtures/history/nativeHistory.ts";
 it("publishes a plain leaf without opening its unready compressed ancestor", async () => {
   const root = await mkdtemp(join(tmpdir(), "plain-leaf-"));

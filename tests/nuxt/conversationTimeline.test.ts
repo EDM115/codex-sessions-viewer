@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ConversationTurn } from "#shared/types/conversation.ts";
 import type { ConversationRepository, TurnChunk } from "#shared/types/repository.ts";
 import { useConversationTimeline } from "~/composables/useConversationTimeline.ts";
+import { StaticConversationRepository } from "~/repositories/static.ts";
 
 function turn(index: number): ConversationTurn {
   return {
@@ -426,4 +427,67 @@ it("keeps only adjacent static chunks and can reload an evicted range", async ()
   }
   expect(timeline.turns.value.at(-1)?.id).toBe("turn-119");
   expect(timeline.turns.value.length).toBeLessThanOrEqual(60);
+});
+
+it("reloads the missing part of an evicted static chunk through its observed turn mapping", async () => {
+  const turns = Array.from({ length: 85 }, (_, index) => turn(index));
+  const paths: string[] = [];
+  const chunk = (index: number): TurnChunk => ({
+    sessionId: "session-1",
+    turns: turns.slice(index * 20, (index + 1) * 20),
+    previousCursor: index > 0 ? String(index - 1) : null,
+    nextCursor: index < 4 ? String(index + 1) : null,
+    revision: "A",
+  });
+  const repository = new StaticConversationRepository(async (path) => {
+    paths.push(path);
+    if (path.endsWith("navigator.json")) {
+      return {
+        version: 2,
+        sessionId: "session-1",
+        revision: "A",
+        chunkSize: 20,
+        chunkCount: 5,
+        items: turns.map((entry) => ({
+          turnId: entry.id,
+          index: entry.index,
+          userMessageId: null,
+          promptPreview: "",
+          assistantPreview: "",
+          proseLengthBucket: 1,
+          createdAt: null,
+        })),
+        turnChunks: Object.fromEntries(
+          turns.map((entry) => [entry.id, Math.floor(entry.index / 20)]),
+        ),
+        inspectorChunks: {},
+      };
+    }
+    const index = Number(path.match(/turn-(\d+)\.json$/u)?.[1]);
+    if (!Number.isInteger(index)) {
+      throw new Error(`Unexpected static request ${path}`);
+    }
+    return chunk(index);
+  });
+  const timeline = useConversationTimeline({
+    sessionId: "session-1",
+    initialChunk: chunk(4),
+    repository,
+  });
+  for (let index = 0; index < 3; index++) {
+    await timeline.loadBefore();
+  }
+  expect(timeline.turns.value.map((entry) => entry.index)).toEqual(
+    Array.from({ length: 60 }, (_, index) => 20 + index),
+  );
+  await timeline.loadAfter();
+  expect(timeline.turns.value.map((entry) => entry.index)).toEqual(
+    Array.from({ length: 60 }, (_, index) => 25 + index),
+  );
+  await timeline.loadBefore();
+  expect(paths.at(-1)).toBe("/payloads/sessions/session-1/turn-1.json");
+  expect(timeline.turns.value.map((entry) => entry.index)).toEqual(
+    Array.from({ length: 60 }, (_, index) => 20 + index),
+  );
+  expect(timeline.error.value).toBeNull();
 });

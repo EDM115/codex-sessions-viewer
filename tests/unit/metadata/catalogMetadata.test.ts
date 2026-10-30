@@ -4,9 +4,10 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { discoverMetadataSources } from "../../../server/ingestion/discoverSources.ts";
-import { readGlobalState } from "../../../server/metadata/globalState.ts";
-import { snapshotStateDatabase } from "../../../server/metadata/stateSnapshot.ts";
+import { discoverMetadataSources } from "#server/ingestion/discoverSources.ts";
+import { readGlobalState } from "#server/metadata/globalState.ts";
+import { snapshotStateDatabase } from "#server/metadata/stateSnapshot.ts";
+
 import { createStateDatabase } from "../../integration/source-boundary/fixtures.ts";
 
 const roots: string[] = [];
@@ -409,7 +410,7 @@ describe("metadata-only catalog facade", () => {
     legacy.exec("UPDATE threads SET id='legacy-only'");
     legacy.close();
     const snapshots = join(home, "viewer");
-    const { readCatalogMetadata } = await import("../../../server/metadata/catalogMetadata.ts");
+    const { readCatalogMetadata } = await import("#server/metadata/catalogMetadata.ts");
     const first = await readCatalogMetadata(home, snapshots);
     expect(first.stateAuthority).toBe("root");
     expect(first.freshness.state).toBe("fresh");
@@ -434,7 +435,7 @@ describe("metadata-only catalog facade", () => {
     legacy.exec("UPDATE threads SET id='legacy-only'");
     legacy.close();
     const snapshots = join(home, "viewer");
-    const { readCatalogMetadata } = await import("../../../server/metadata/catalogMetadata.ts");
+    const { readCatalogMetadata } = await import("#server/metadata/catalogMetadata.ts");
     const first = await readCatalogMetadata(home, snapshots);
     expect(first.threads.map(({ id }) => id)).toEqual(["legacy-only"]);
     expect(first.stateAuthority).toBe("legacy");
@@ -451,7 +452,7 @@ describe("metadata-only catalog facade", () => {
   it("does not retain another Codex home's catalog when a cache root is reused", async () => {
     const home = await root();
     const otherHome = await root();
-    const { readCatalogMetadata } = await import("../../../server/metadata/catalogMetadata.ts");
+    const { readCatalogMetadata } = await import("#server/metadata/catalogMetadata.ts");
     const db = createStateDatabase(join(home, "state_5.sqlite"));
     db.close();
     const snapshots = join(home, "viewer");
@@ -476,7 +477,7 @@ describe("metadata-only catalog facade", () => {
     const discovery = await discoverMetadataSources(home);
     expect(discovery.metadata.stateDatabase).toBe(join(home, "state_5.sqlite"));
     expect(discovery.metadata.legacyStateDatabase).toBe(join(home, "sqlite", "state_5.sqlite"));
-    const { readCatalogMetadata } = await import("../../../server/metadata/catalogMetadata.ts");
+    const { readCatalogMetadata } = await import("#server/metadata/catalogMetadata.ts");
     const result = await readCatalogMetadata(home, join(home, "viewer"));
     expect(result.threads.map(({ id }) => id)).toEqual(["thread-1"]);
     expect(result.freshness.state).toBe("fresh");
@@ -491,7 +492,7 @@ describe("metadata-only catalog facade", () => {
   });
 
   it("honors cancellation before touching an unavailable source home", async () => {
-    const { readCatalogMetadata } = await import("../../../server/metadata/catalogMetadata.ts");
+    const { readCatalogMetadata } = await import("#server/metadata/catalogMetadata.ts");
     const controller = new AbortController();
     controller.abort();
     await expect(

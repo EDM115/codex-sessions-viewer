@@ -1,9 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { writeConversationExport } from "../../server/export/writeConversationExport.ts";
-import { writeStaticPayloads } from "../../server/export/writeStaticPayloads.ts";
-import { classifyCatalogThread } from "../../server/metadata/threadClassification.ts";
+import { writeConversationExport } from "#server/export/writeConversationExport.ts";
+import { writeStaticPayloads } from "#server/export/writeStaticPayloads.ts";
+import { classifyCatalogThread } from "#server/metadata/threadClassification.ts";
+
 import { normalizedRolloutFixture } from "./cache/normalized.ts";
 
 export async function writeValidOutputFixture(
@@ -48,8 +49,14 @@ export async function rewriteOutputJson(
 }
 
 export async function driftOutputDiagnosticCount(root: string): Promise<void> {
-  await rewriteOutputJson(join(root, "payloads", "sessions", "index.json"), (value) => {
-    const summary = (value["sessions"] as Array<Record<string, unknown>>)[0]!;
-    summary["diagnosticCount"] = Number(summary["diagnosticCount"]) + 1;
-  });
+  const index = JSON.parse(
+    await readFile(join(root, "payloads", "sessions", "index.json"), "utf8"),
+  ) as { sessions: Array<{ id: string }> };
+  await rewriteOutputJson(
+    join(root, "payloads", "sessions", index.sessions[0]!.id, "summary.json"),
+    (value) => {
+      const summary = value["summary"] as Record<string, unknown>;
+      summary["diagnosticCount"] = Number(summary["diagnosticCount"]) + 1;
+    },
+  );
 }

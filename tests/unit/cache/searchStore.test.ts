@@ -1,18 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { listCatalogProjects, listCatalogSessions } from "../../../server/cache/catalogStore.ts";
-import { replaceCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import {
-  countCachedSearchResults,
-  searchCachedSessions,
-} from "../../../server/cache/searchStore.ts";
+import { listCatalogProjects, listCatalogSessions } from "#server/cache/catalogStore.ts";
+import { replaceCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { countCachedSearchResults, searchCachedSessions } from "#server/cache/searchStore.ts";
 import {
   classifyCatalogThread,
   cachedThreadClassification,
-} from "../../../server/metadata/threadClassification.ts";
-import { createViewerDiagnostic } from "../../../shared/types/diagnostics.ts";
-import { searchResponseSchema } from "../../../shared/types/repository.ts";
+} from "#server/metadata/threadClassification.ts";
+import { createViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import { searchResponseSchema } from "#shared/types/repository.ts";
+
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 describe("cached full-text search", () => {

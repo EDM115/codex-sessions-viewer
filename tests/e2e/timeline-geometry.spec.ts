@@ -8,9 +8,9 @@ import type {
   ConversationSummary,
   ConversationTurn,
   TurnNavigatorItem,
-} from "../../shared/types/conversation.ts";
-import type { TurnChunk } from "../../shared/types/repository.ts";
-import type { RichTextNode } from "../../shared/types/richText.ts";
+} from "#shared/types/conversation.ts";
+import type { TurnChunk } from "#shared/types/repository.ts";
+import type { RichTextNode } from "#shared/types/richText.ts";
 
 test.use({
   nuxt: {
@@ -325,74 +325,123 @@ for (const liveFollow of [true, false]) {
     await expect
       .poll(async () => Math.abs((await relativeTop(anchor)) - beforePrepend))
       .toBeLessThanOrEqual(3);
+    const readingMessageId = await anchor.locator("[data-message-id]").evaluateAll((elements) =>
+      elements
+        .find((element) => {
+          const readingLine = element
+            .closest(".conversation-timeline")!
+            .getBoundingClientRect().top;
+          const rect = element.getBoundingClientRect();
+          return rect.top <= readingLine && rect.bottom > readingLine;
+        })
+        ?.getAttribute("data-message-id"),
+    );
+    expect(readingMessageId).toBeTruthy();
+    const readingMessage = anchor.locator(`[data-message-id="${readingMessageId}"]`);
+    const measureReading = () =>
+      readingMessage.evaluate((element) => {
+        const surfaceTop = element.closest(".conversation-timeline")!.getBoundingClientRect().top;
+        const turnElement = element.closest(".conversation-turn")!;
+        const rect = element.getBoundingClientRect();
+        return {
+          id: element.getAttribute("data-message-id"),
+          top: rect.top - surfaceTop,
+          bottom: rect.bottom - surfaceTop,
+          turnTop: turnElement.getBoundingClientRect().top - surfaceTop,
+          padding: getComputedStyle(turnElement).paddingTop,
+        };
+      });
+    const beforeResize = await measureReading();
+    expect(beforeResize.top).toBeLessThanOrEqual(0);
+    expect(beforeResize.bottom).toBeGreaterThan(0);
     await page.setViewportSize({ width: 900, height: 900 });
     await expect(anchor).toBeInViewport();
     await expect
-      .poll(async () => Math.abs((await relativeTop(anchor)) - beforePrepend))
+      .poll(async () => Math.abs((await relativeTop(readingMessage)) - beforeResize.top))
       .toBeLessThanOrEqual(3);
+    const afterResize = await measureReading();
+    expect(afterResize.id).toBe(beforeResize.id);
+    expect(afterResize.top).toBeLessThanOrEqual(0);
+    expect(afterResize.bottom).toBeGreaterThan(0);
+    console.log(
+      JSON.stringify({
+        liveFollow,
+        responsiveReading: { before: beforeResize, after: afterResize },
+      }),
+    );
     expect(await scroller.locator(".conversation-turn").count()).toBeLessThan(20);
     expect(await page.locator(".turn-minimap__target").count()).toBeLessThan(80);
   });
 }
 
-test("keeps the reading window when a wheel cancels a deferred deep target", async ({
-  page,
-  goto,
-}) => {
-  let releaseTarget!: () => void;
-  let targetRequested = false;
-  const targetGate = new Promise<void>((resolve) => {
-    releaseTarget = resolve;
-  });
-  await page.route(`**/api/sessions/${sessionId}**`, async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname.endsWith("/navigator")) {
-      return route.fulfill({ json: navigator });
-    }
-    if (url.pathname.endsWith("/turns")) {
-      if (url.searchParams.get("targetTurnId") === "geometry-0") {
-        targetRequested = true;
-        await targetGate;
-        return route.fulfill({ json: chunk(0, 5) });
+for (const action of ["deep target", "latest content"] as const) {
+  test(`keeps the reading window when a wheel cancels deferred ${action}`, async ({
+    page,
+    goto,
+  }) => {
+    const targetId = action === "deep target" ? "geometry-0" : "geometry-119";
+    let releaseTarget!: () => void;
+    let targetRequested = false;
+    const targetGate = new Promise<void>((resolve) => {
+      releaseTarget = resolve;
+    });
+    await page.route(`**/api/sessions/${sessionId}**`, async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname.endsWith("/navigator")) {
+        return route.fulfill({ json: navigator });
       }
-      return route.fulfill({ json: chunk(50, 70) });
+      if (url.pathname.endsWith("/turns")) {
+        if (url.searchParams.get("targetTurnId") === targetId) {
+          targetRequested = true;
+          await targetGate;
+          return route.fulfill({ json: action === "deep target" ? chunk(0, 5) : chunk(115, 120) });
+        }
+        return route.fulfill({ json: chunk(50, 70) });
+      }
+      return route.fulfill({ json: summary });
+    });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await goto(`/session/${sessionId}?turn=geometry-61`, { waitUntil: "hydration" });
+    const scroller = page.locator(".conversation-timeline");
+    const anchor = scroller.locator('[data-turn-id="geometry-61"]');
+    await expect(anchor).toBeVisible();
+    if (action === "deep target") {
+      await page.locator('.turn-minimap__target[aria-current="true"]').press("Home");
+    } else {
+      await page.getByRole("button", { name: "Latest content", exact: true }).click();
     }
-    return route.fulfill({ json: summary });
-  });
-  await page.setViewportSize({ width: 1280, height: 900 });
-  await goto(`/session/${sessionId}?turn=geometry-61`, { waitUntil: "hydration" });
-  const scroller = page.locator(".conversation-timeline");
-  const anchor = scroller.locator('[data-turn-id="geometry-61"]');
-  await expect(anchor).toBeVisible();
-  await page.locator('.turn-minimap__target[aria-current="true"]').press("Home");
-  await expect.poll(() => targetRequested).toBe(true);
-  await expect(page.locator('.turn-minimap__target[data-turn-id="geometry-0"]')).toHaveAttribute(
-    "aria-busy",
-    "true",
-  );
-  await scroller.evaluate((element) => {
-    element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 96 }));
-    element.scrollTop += 96;
-  });
-  const readingOffset = await relativeTop(anchor);
-  await expect(
-    page.locator('.turn-minimap__target[data-turn-id="geometry-0"]'),
-  ).not.toHaveAttribute("aria-busy");
-  const response = page.waitForResponse(
-    (received) => new URL(received.url()).searchParams.get("targetTurnId") === "geometry-0",
-  );
-  releaseTarget();
-  await response;
-  // Allow the fulfilled request and Vue render to settle before checking the retained window.
-  await page.evaluate(async () => {
-    await new Promise<void>((resolve) =>
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    await expect.poll(() => targetRequested).toBe(true);
+    if (action === "deep target") {
+      await expect(
+        page.locator(`.turn-minimap__target[data-turn-id="${targetId}"]`),
+      ).toHaveAttribute("aria-busy", "true");
+    }
+    await scroller.evaluate((element) => {
+      element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 96 }));
+      element.scrollTop += 96;
+    });
+    const readingOffset = await relativeTop(anchor);
+    if (action === "deep target") {
+      await expect(
+        page.locator(`.turn-minimap__target[data-turn-id="${targetId}"]`),
+      ).not.toHaveAttribute("aria-busy");
+    }
+    const response = page.waitForResponse(
+      (received) => new URL(received.url()).searchParams.get("targetTurnId") === targetId,
     );
+    releaseTarget();
+    await response;
+    // Allow the fulfilled request and Vue render to settle before checking the retained window.
+    await page.evaluate(async () => {
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      );
+    });
+    await expect(anchor).toBeVisible();
+    await expect
+      .poll(async () => Math.abs((await relativeTop(anchor)) - readingOffset))
+      .toBeLessThanOrEqual(3);
+    await expect(page).toHaveURL(/turn=geometry-61/u);
+    await expect(page.getByRole("button", { name: "Load earlier turns" })).toBeEnabled();
   });
-  await expect(anchor).toBeVisible();
-  await expect
-    .poll(async () => Math.abs((await relativeTop(anchor)) - readingOffset))
-    .toBeLessThanOrEqual(3);
-  await expect(page).toHaveURL(/turn=geometry-61/u);
-  await expect(page.getByRole("button", { name: "Load earlier turns" })).toBeEnabled();
-});
+}

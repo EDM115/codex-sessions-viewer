@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveThreadFields } from "../../../server/metadata/threadFields.ts";
-import { mergeSessionMetadata } from "../../../server/normalization/metadataMerge.ts";
+import { resolveThreadFields } from "#server/metadata/threadFields.ts";
+import { mergeSessionMetadata } from "#server/normalization/metadataMerge.ts";
+
 import { thread } from "../library/membershipFixtures.ts";
 
 describe("catalog and selected/export metadata field precedence", () => {

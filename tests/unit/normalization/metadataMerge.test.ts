@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import type { StateMetadataSnapshot } from "../../../server/metadata/stateSnapshot.ts";
+import type { StateMetadataSnapshot } from "#server/metadata/stateSnapshot.ts";
 import {
   mergeSessionMetadata,
   selectPreferredSessionSource,
-} from "../../../server/normalization/metadataMerge.ts";
+} from "#server/normalization/metadataMerge.ts";
 
 const snapshot: StateMetadataSnapshot = {
   threads: [

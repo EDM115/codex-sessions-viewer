@@ -3,8 +3,6 @@ import { PhArrowUpRight } from "@phosphor-icons/vue";
 
 import type { SearchHit } from "#shared/types/repository.ts";
 
-import { useOptionalLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
-import SearchExcerpt from "./SearchExcerpt.vue";
 const workspace = useOptionalLibraryWorkspace();
 
 defineProps<{
@@ -37,7 +35,7 @@ function parentDestination(parentThreadId: string) {
           <span><span v-if="hit.parentThreadId">Subagent · </span>{{ hit.title }}</span>
           <PhArrowUpRight :size="16" weight="regular" aria-hidden="true" />
         </span>
-        <SearchExcerpt :excerpt="hit.excerpt" />
+        <LibrarySearchExcerpt :excerpt="hit.excerpt" />
         <span class="library-search-hit__destination tabular">Exact turn · {{ hit.turnId }}</span>
       </NuxtLink>
       <NuxtLink

@@ -9,7 +9,7 @@ const filesystem = vi.hoisted(() => ({
 
 vi.mock("node:fs/promises", () => filesystem);
 
-import { readStableBytes, stableRead } from "../../../server/ingestion/stableRead.ts";
+import { readStableBytes, stableRead } from "#server/ingestion/stableRead.ts";
 
 function observation(
   options: {

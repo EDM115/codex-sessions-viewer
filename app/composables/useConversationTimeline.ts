@@ -4,7 +4,9 @@ import {
   retainHistoryWindows,
   historyItemIslands,
 } from "#shared/timeline/history.ts";
+import { historyItemAttachments } from "#shared/timeline/historyAttachments.ts";
 import { historyItemMarkdown } from "#shared/timeline/historyPresentation.ts";
+import type { ScrollNavigationOwner } from "#shared/timeline/scrollAnchoring.ts";
 import type { ConversationTurn } from "#shared/types/conversation.ts";
 import type {
   HistoryPage,
@@ -371,12 +373,22 @@ export function useProgressiveHistoryTimeline(options: {
   const windows = shallowRef<HistoryTurnWindow[]>(
     mergeHistoryWindows([], options.initialPage?.turns ?? []),
   );
-  const page = shallowRef<HistoryPage | null>(options.initialPage ?? null);
+  const page = shallowRef<HistoryPage | null>(
+    options.initialPage ? { ...options.initialPage, turns: [] } : null,
+  );
   const error = shallowRef<string | null>(null);
   const loading = shallowRef(false);
   const stale = shallowRef(false);
   const presentations = shallowRef<HistoryPresentation[]>([]);
-  const pending = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+  const pending = new Map<
+    string,
+    {
+      controller: AbortController;
+      promise: Promise<void>;
+      itemOwner?: { key: string; epoch: string; cursor: string | null };
+      navigationOwner?: ScrollNavigationOwner;
+    }
+  >();
   const consumed = new Map<
     string,
     {
@@ -392,6 +404,7 @@ export function useProgressiveHistoryTimeline(options: {
   let reloadBefore: HistoryPageQuery | null = null;
   let reloadAfter: HistoryPageQuery | null = null;
   let visibleKeys: Set<string> | null = null;
+  let navigationTarget: { turnId: string | null; owner: ScrollNavigationOwner } | null = null;
   let richActive = 0;
   let expandedItems = new Set<string>();
   const failedRich = new Set<string>();
@@ -421,7 +434,19 @@ export function useProgressiveHistoryTimeline(options: {
     const evicted = windows.value.length > 60;
     if (evicted) {
       let start = direction === "before" ? 0 : windows.value.length - 60;
-      const focused = windows.value.findIndex((window) => visibleKeys?.has(windowKey(window)));
+      const targetId = navigationTarget?.owner.isCurrent()
+        ? (navigationTarget.turnId ?? ("turns" in result ? result.turns.at(-1)?.turnId : null))
+        : null;
+      const targetIndex = targetId
+        ? windows.value.findIndex(
+            (window) =>
+              window.turnId === targetId || window.boundary?.identityAliases.includes(targetId),
+          )
+        : -1;
+      const focused =
+        targetIndex >= 0
+          ? targetIndex
+          : windows.value.findIndex((window) => visibleKeys?.has(windowKey(window)));
       if (focused >= 0 && (focused < start || focused >= start + 60)) {
         start = Math.max(0, Math.min(windows.value.length - 60, focused - 20));
       }
@@ -435,49 +460,48 @@ export function useProgressiveHistoryTimeline(options: {
       }
       windows.value = windows.value.slice(start, start + 60);
     }
-    if (!("turns" in result)) {
-      windows.value = windows.value.map((window) => {
-        if (
-          window.items.length <= 300 ||
-          window.physicalRolloutId !== result.physicalRolloutId ||
-          !(
-            window.turnId === result.turnId ||
-            window.boundary?.identityAliases.includes(result.turnId)
-          )
-        ) {
-          return window;
-        }
-        // A bounded reread keeps the source's actual cursors and islands, never a guessed ordinal
-        return {
-          ...result,
-          turnId: window.turnId,
-          boundary: window.boundary,
-          opening: window.opening,
-          itemsView: "summary" as const,
-          itemIslands: [
-            ...(window.opening.itemId &&
-            !result.items.some((item) => item.itemId === window.opening.itemId)
-              ? [[window.opening.itemId]]
-              : []),
-            ...historyItemIslands(result),
+    const incoming = "turns" in result ? result.turns : [result];
+    windows.value = windows.value.map((window) => {
+      const slice = incoming.find(
+        (entry) =>
+          entry.physicalRolloutId === window.physicalRolloutId &&
+          (entry.turnId === window.turnId ||
+            window.boundary?.identityAliases.includes(entry.turnId)),
+      );
+      if (window.items.length <= 300 || !slice) {
+        return window;
+      }
+      // A bounded reread keeps the source's actual cursors and islands, never a guessed ordinal
+      return {
+        ...slice,
+        turnId: window.turnId,
+        boundary: window.boundary,
+        opening: window.opening,
+        finalAnswerItemId: window.finalAnswerItemId,
+        itemsView: "summary" as const,
+        itemIslands: [
+          ...(window.opening.itemId &&
+          !slice.items.some((item) => item.itemId === window.opening.itemId)
+            ? [[window.opening.itemId]]
+            : []),
+          ...historyItemIslands(slice),
+        ],
+        coverage: {
+          ...slice.coverage,
+          status: "partial" as const,
+          gaps: [
+            ...slice.coverage.gaps,
+            {
+              physicalRolloutId: slice.physicalRolloutId,
+              turnId: window.turnId,
+              reason: "Earlier loaded details were evicted, use the item page controls to reload",
+              beforeOrdinal: null,
+              afterOrdinal: null,
+            },
           ],
-          coverage: {
-            ...result.coverage,
-            status: "partial" as const,
-            gaps: [
-              ...result.coverage.gaps,
-              {
-                physicalRolloutId: result.physicalRolloutId,
-                turnId: window.turnId,
-                reason: "Earlier loaded details were evicted, use the item page controls to reload",
-                beforeOrdinal: null,
-                afterOrdinal: null,
-              },
-            ],
-          },
-        };
-      });
-    }
+        },
+      };
+    });
     windows.value = windows.value.map((window) =>
       window.reviewEvidence && window.reviewEvidence.records.length > 300
         ? {
@@ -492,6 +516,24 @@ export function useProgressiveHistoryTimeline(options: {
         : window,
     );
     const retained = new Set(windows.value.map(windowKey));
+    for (const [key, pendingRequest] of pending) {
+      const owner = pendingRequest.itemOwner;
+      if (!owner) {
+        continue;
+      }
+      const window = windows.value.find(
+        (entry) => windowKey(entry) === owner.key && entry.historyEpoch === owner.epoch,
+      );
+      if (
+        !window ||
+        (owner.cursor !== null &&
+          ![window.beforeCursor, window.afterCursor, window.preparation?.cursor].includes(
+            owner.cursor,
+          ))
+      ) {
+        cancel(key);
+      }
+    }
     for (const key of pageEdges.keys()) {
       if (!retained.has(key)) {
         pageEdges.delete(key);
@@ -545,9 +587,6 @@ export function useProgressiveHistoryTimeline(options: {
     }
     while (consumed.size > 512) {
       consumed.delete(consumed.keys().next().value!);
-    }
-    while (failedRich.size > 128) {
-      failedRich.delete(failedRich.values().next().value!);
     }
   }
   const cursorOwners = new Map<
@@ -643,6 +682,9 @@ export function useProgressiveHistoryTimeline(options: {
           turnId: window.turnId,
           itemId: item.id,
           markdown,
+          ...(historyItemAttachments(item).length
+            ? { attachments: historyItemAttachments(item) }
+            : {}),
         };
         const key = `rich:${JSON.stringify(query)}`;
         if (
@@ -685,6 +727,8 @@ export function useProgressiveHistoryTimeline(options: {
             if (
               !currentItem ||
               historyItemMarkdown(currentItem) !== query.markdown ||
+              JSON.stringify(historyItemAttachments(currentItem)) !==
+                JSON.stringify(query.attachments ?? []) ||
               JSON.stringify({ ...result, body: undefined }) !== JSON.stringify(query)
             ) {
               return undefined;
@@ -705,6 +749,9 @@ export function useProgressiveHistoryTimeline(options: {
           .catch(() => {
             if (!controller.signal.aborted) {
               failedRich.add(key);
+              while (failedRich.size > 128) {
+                failedRich.delete(failedRich.values().next().value!);
+              }
             }
           })
           .finally(() => {
@@ -734,6 +781,8 @@ export function useProgressiveHistoryTimeline(options: {
     key: string,
     query: HistoryPageQuery | HistoryItemQuery,
     replaceEpoch = false,
+    itemOwner?: { key: string; epoch: string; cursor: string | null },
+    navigationOwner?: ScrollNavigationOwner,
   ): Promise<void> {
     if (disposed) {
       return Promise.resolve();
@@ -758,7 +807,12 @@ export function useProgressiveHistoryTimeline(options: {
         : options.repository.getHistoryPage(options.sessionId, query, { signal: controller.signal })
     )
       .then((result) => {
-        if (disposed || controller.signal.aborted || currentSelection !== selection) {
+        if (
+          disposed ||
+          controller.signal.aborted ||
+          currentSelection !== selection ||
+          (navigationOwner && !navigationOwner.isCurrent())
+        ) {
           return undefined;
         }
         if ("threadId" in result && result.threadId !== options.sessionId) {
@@ -881,8 +935,30 @@ export function useProgressiveHistoryTimeline(options: {
         }
         loading.value = [...pending.keys()].some((name) => !name.startsWith("rich:"));
       });
-    pending.set(key, { controller, promise });
+    pending.set(key, { controller, promise, itemOwner, navigationOwner });
     return promise;
+  }
+  function requestItems(key: string, turnId: string, anchor: HistoryItemQuery["anchor"]) {
+    const window = windows.value.find(
+      (entry) => entry.turnId === turnId || entry.boundary?.identityAliases.includes(turnId),
+    );
+    if (!window) {
+      return Promise.resolve();
+    }
+    return request(
+      key,
+      {
+        turnId: cursorTurn(turnId, anchor),
+        anchor,
+        limit: anchor.kind === "opening" ? 2 : 100,
+      },
+      false,
+      {
+        key: windowKey(window),
+        epoch: window.historyEpoch,
+        cursor: "cursor" in anchor ? anchor.cursor : null,
+      },
+    );
   }
   return {
     setExpanded(keys: readonly string[]) {
@@ -921,31 +997,46 @@ export function useProgressiveHistoryTimeline(options: {
           : Promise.resolve(),
     cancelTarget() {
       cancel("target");
+      for (const [key, pendingRequest] of pending) {
+        if (pendingRequest.navigationOwner) {
+          cancel(key);
+        }
+      }
+      navigationTarget = null;
     },
-    loadTarget(turnId: string) {
+    releaseTarget(owner: ScrollNavigationOwner) {
+      if (navigationTarget?.owner === owner) {
+        navigationTarget = null;
+      }
+    },
+    loadTarget(turnId: string, owner: ScrollNavigationOwner = { isCurrent: () => !disposed }) {
       cancel("before");
       cancel("target");
       cancel("latest");
-      return request("target", { anchor: { kind: "turn", turnId }, limit: 5 }, page.value === null);
+      navigationTarget = { turnId, owner };
+      return request(
+        "target",
+        { anchor: { kind: "turn", turnId }, limit: 5 },
+        page.value === null,
+        undefined,
+        owner,
+      );
     },
-    refresh() {
+    refresh(owner?: ScrollNavigationOwner) {
       cancel("latest");
+      if (owner) {
+        navigationTarget = { turnId: null, owner };
+      }
       stale.value = windows.value.length > 0;
-      return request("latest", { anchor: { kind: "latest" }, limit: 5 }, true);
+      return request("latest", { anchor: { kind: "latest" }, limit: 5 }, true, undefined, owner);
     },
     loadItems(turnId: string, anchor: HistoryItemQuery["anchor"] = { kind: "latest" }) {
-      return request(`items:${turnId}:${JSON.stringify(anchor)}`, {
-        turnId: cursorTurn(turnId, anchor),
-        anchor,
-        limit: anchor.kind === "opening" ? 2 : 100,
-      });
+      return requestItems(`items:${turnId}:${JSON.stringify(anchor)}`, turnId, anchor);
     },
     prepare(turnId: string) {
       const cursor = windows.value.find((entry) => entry.turnId === turnId)?.preparation?.cursor;
       const anchor = { kind: "after" as const, cursor: cursor ?? "" };
-      return cursor
-        ? request(`prepare:${turnId}`, { turnId: cursorTurn(turnId, anchor), anchor, limit: 100 })
-        : Promise.resolve();
+      return cursor ? requestItems(`prepare:${turnId}`, turnId, anchor) : Promise.resolve();
     },
     dispose() {
       disposed = true;

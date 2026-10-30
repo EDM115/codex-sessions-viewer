@@ -164,10 +164,39 @@ function legacyItem(
         ? content.map((part) => text(object(part)?.["text"]) ?? "").join("")
         : "");
   if (type === "user_message" || (type === "message" && role === "user")) {
+    const media = [
+      ...(Array.isArray(payload["images"])
+        ? payload["images"].flatMap((value) =>
+            typeof value === "string" ? [{ type: "image", url: value }] : [],
+          )
+        : []),
+      ...(Array.isArray(payload["local_images"])
+        ? payload["local_images"].flatMap((value) =>
+            typeof value === "string" ? [{ type: "localImage", path: value }] : [],
+          )
+        : []),
+      ...(Array.isArray(content)
+        ? content.flatMap((value) => {
+            const part = object(value);
+            return part?.["type"] === "input_image" && typeof part["image_url"] === "string"
+              ? [{ type: "image", url: part["image_url"] }]
+              : [];
+          })
+        : []),
+    ];
     return adaptNativeThreadItem({
       id,
       type: "userMessage",
-      content: [{ type: "text", text: message }],
+      content: [{ type: "text", text: message }, ...media],
+    });
+  }
+  if (type === "image_generation_call" || type === "image_generation_end") {
+    return adaptNativeThreadItem({
+      id,
+      type: "imageGeneration",
+      result: payload["result"] ?? null,
+      savedPath: payload["saved_path"] ?? null,
+      fileId: payload["file_id"] ?? null,
     });
   }
   if (type === "agent_message" || (type === "message" && role === "assistant")) {
@@ -236,8 +265,8 @@ function legacyItem(
 function contextTargetId(payload: Record<string, JsonValue>, turn: RawTurn | null): string | null {
   return text(payload["turn_id"]) ?? turn?.id ?? null;
 }
-function assemble(
-  loaded: Loaded,
+export function assembleHistoryRecords(
+  loaded: Omit<Loaded, "lease" | "generation">,
   inherited?: AssemblyContext,
 ): {
   turns: RawTurn[];
@@ -1154,7 +1183,7 @@ export class RolloutHistoryReader {
         }
         previousSegmentIndex = currentSegmentIndex;
         const physical = segment.ref.physicalRolloutId!;
-        const assembled = assemble(entry, inherited);
+        const assembled = assembleHistoryRecords(entry, inherited);
         reviewRecords.push(...assembled.reviewRecords);
         inherited = tail.reachedStart && tail.errors.length === 0 ? assembled.carried : undefined;
         const full =

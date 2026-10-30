@@ -6,22 +6,23 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import * as z from "zod";
 
-import { upsertCachedAsset } from "../../../server/cache/assetStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { writeConversationExport } from "../../../server/export/writeConversationExport.ts";
+import { upsertCachedAsset } from "#server/cache/assetStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { writeConversationExport } from "#server/export/writeConversationExport.ts";
 import {
   publishCachedContent,
   reconcileStaticSessionArtifacts,
   writeStaticPayloads,
-} from "../../../server/export/writeStaticPayloads.ts";
+} from "#server/export/writeStaticPayloads.ts";
 import {
   classifyCatalogThread,
   classifyNormalizedSession,
   type CatalogThreadMetadata,
-} from "../../../server/metadata/threadClassification.ts";
-import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
-import type { JsonObject } from "../../../shared/types/conversation.ts";
-import { staticLibraryPayloadSchema } from "../../../shared/types/staticPayloads.ts";
+} from "#server/metadata/threadClassification.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import type { JsonObject } from "#shared/types/conversation.ts";
+import { legacyStaticLibraryPayloadSchema as staticLibraryPayloadSchema } from "#shared/types/staticPayloads.ts";
+
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 const temporaryDirectories: string[] = [];
@@ -156,6 +157,8 @@ describe("conversation Markdown files", () => {
       scope: "active",
       revision: "sha256:fixture",
     });
+    expect(conversation.summary.title).toBe(conversation.summary.id);
+    conversation.summary.title = "Build the parser";
     const first = await writeConversationExport(conversation, { generatedRoot, publicRoot });
     const second = await writeConversationExport(conversation, { generatedRoot, publicRoot });
     const privateMarkdown = join(

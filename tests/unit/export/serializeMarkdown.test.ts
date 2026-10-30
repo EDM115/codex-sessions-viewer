@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptCoreTurnItem } from "#server/history/nativeItemAdapter.ts";
-import { nativeActivity } from "#shared/timeline/activityPresentation.ts";
-
 import {
   serializeAgentWork,
   serializeAssistantMessage,
@@ -10,16 +7,18 @@ import {
   serializeConversation,
   serializeToolActivity,
   serializeUserPrompt,
-} from "../../../server/export/serializeMarkdown.ts";
-import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
+} from "#server/export/serializeMarkdown.ts";
+import { adaptCoreTurnItem } from "#server/history/nativeItemAdapter.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import { nativeActivity } from "#shared/timeline/activityPresentation.ts";
 import type {
   ConversationActivity,
   ConversationMessage,
   ConversationTurn,
   MediaActivity,
   ToolActivity,
-} from "../../../shared/types/conversation.ts";
-import type { RichTextCodeNode } from "../../../shared/types/richText.ts";
+} from "#shared/types/conversation.ts";
+import type { RichTextCodeNode } from "#shared/types/richText.ts";
 
 const timestamp = "2026-08-13T10:00:00.000Z";
 

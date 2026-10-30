@@ -1,4 +1,4 @@
-import type { ConversationTurn } from "../types/conversation.ts";
+import type { ConversationTurn } from "#shared/types/conversation.ts";
 
 export const CONVERSATION_CHUNK_SIZE = 20;
 

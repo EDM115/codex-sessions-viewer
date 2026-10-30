@@ -1,23 +1,17 @@
-import {
-  visibleRoles,
-  type ThreadVisibilityPurpose,
-} from "../../shared/library/threadVisibility.ts";
-export {
-  isThreadVisible,
-  type ThreadVisibilityPurpose,
-} from "../../shared/library/threadVisibility.ts";
+import { visibleRoles, type ThreadVisibilityPurpose } from "#shared/library/threadVisibility.ts";
+export { isThreadVisible, type ThreadVisibilityPurpose } from "#shared/library/threadVisibility.ts";
 import { resolve } from "node:path";
 
-import type { JsonValue } from "../../shared/types/conversation.ts";
-import { type ThreadClassification } from "../../shared/types/library.ts";
-import { sessionMetaEvidenceSchema } from "../ingestion/sessionMetaPrefix.ts";
-import type { NormalizedSession } from "../normalization/normalizeSession.ts";
+import { sessionMetaEvidenceSchema } from "#server/ingestion/sessionMetaPrefix.ts";
 import {
   decodeThreadSource,
   rawThreadMetadata,
   type RawThreadMetadataResult,
-} from "./rawThreadMetadata.ts";
-export { rawThreadMetadata } from "./rawThreadMetadata.ts";
+} from "#server/metadata/rawThreadMetadata.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import type { JsonValue } from "#shared/types/conversation.ts";
+import { type ThreadClassification } from "#shared/types/library.ts";
+export { rawThreadMetadata } from "#server/metadata/rawThreadMetadata.ts";
 
 export interface CatalogThreadMetadata {
   source?: JsonValue | undefined;

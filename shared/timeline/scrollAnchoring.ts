@@ -2,6 +2,10 @@ export interface ScrollAnchorPosition {
   top: number;
 }
 
+export interface ScrollNavigationOwner {
+  isCurrent(): boolean;
+}
+
 export function scrollAnchorAdjustment(
   before: ScrollAnchorPosition,
   after: ScrollAnchorPosition,

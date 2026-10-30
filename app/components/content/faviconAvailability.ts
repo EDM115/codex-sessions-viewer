@@ -1,22 +1,20 @@
-import { shallowReactive } from "vue";
+import {
+  savedFaviconRevision,
+  subscribeFaviconAvailability,
+} from "#shared/content/faviconAvailability.ts";
 
-// A bounded per-origin signal survives late mounts without creating retry timers.
-const revisions = shallowReactive(new Map<string, string>());
-const MAX_ORIGINS = 2048;
+export { publishFaviconAvailability } from "#shared/content/faviconAvailability.ts";
 
-export function faviconRevision(origin: string): string | undefined {
-  return revisions.get(origin);
+// The framework-free repository publishes signals, mounted UI tracks their latest generation
+const revision = shallowRef(0);
+const unsubscribe = subscribeFaviconAvailability(() => {
+  revision.value += 1;
+});
+if (import.meta.hot) {
+  import.meta.hot.dispose(unsubscribe);
 }
 
-export function publishFaviconAvailability(origins: readonly string[], revision: string): void {
-  for (const origin of origins) {
-    if (revisions.get(origin) === revision) {
-      continue;
-    }
-    revisions.delete(origin);
-    revisions.set(origin, revision);
-    if (revisions.size > MAX_ORIGINS) {
-      revisions.delete(revisions.keys().next().value!);
-    }
-  }
+export function faviconRevision(origin: string): string | undefined {
+  void revision.value;
+  return savedFaviconRevision(origin);
 }

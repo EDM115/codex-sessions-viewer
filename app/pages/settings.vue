@@ -1,13 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
 import * as z from "zod";
 
 import { viewerDiagnosticSchema } from "#shared/types/diagnostics.ts";
 import { repositoryCapabilitiesForMode, type RepositoryMode } from "#shared/types/repository.ts";
 import { serverViewerSettingsSchema } from "#shared/types/settings.ts";
-
-import SettingsPanel from "../components/settings/SettingsPanel.vue";
-import { usePresentationSettings } from "../composables/usePresentationSettings.ts";
 
 const settingsPayloadSchema = z.strictObject({
   server: serverViewerSettingsSchema,
@@ -85,5 +81,20 @@ async function saveCodexHome(): Promise<void> {
       @update:live-follow="setLiveFollow"
       @update:turn-minimap="setTurnMinimap"
     />
+    <label v-if="server !== null" class="settings-field">
+      <input
+        type="checkbox"
+        :checked="server.fetchLinkPreviews === true"
+        @change="
+          server.fetchLinkPreviews = ($event.target as HTMLInputElement).checked;
+          saveCodexHome();
+        "
+      />
+      Fetch website previews on hover or keyboard focus
+      <span
+        >Off by default. This requests linked pages and preview images, separately from favicons.
+        Saved previews remain available offline.</span
+      >
+    </label>
   </main>
 </template>

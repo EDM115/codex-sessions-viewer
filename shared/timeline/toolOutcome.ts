@@ -1,4 +1,4 @@
-import type { ActivityStatus, JsonObject, JsonValue } from "../types/conversation.ts";
+import type { ActivityStatus, JsonObject, JsonValue } from "#shared/types/conversation.ts";
 
 function object(value: JsonValue | undefined): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;

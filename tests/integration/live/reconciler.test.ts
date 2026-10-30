@@ -16,16 +16,16 @@ import {
   catalogSession,
   listCatalogProjects,
   listCatalogSessions,
-} from "../../../server/cache/catalogStore.ts";
-import { getCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import { readSessionMetaPrefix } from "../../../server/ingestion/sessionMetaPrefix.ts";
-import type { WatchSourcesOptions } from "../../../server/ingestion/watchSources.ts";
-import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import { coalesceSourceWatchBatches, LiveReconciler } from "../../../server/live/reconciler.ts";
-import { readCatalogMetadata } from "../../../server/metadata/catalogMetadata.ts";
-import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
+} from "#server/cache/catalogStore.ts";
+import { getCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { readSessionMetaPrefix } from "#server/ingestion/sessionMetaPrefix.ts";
+import type { WatchSourcesOptions } from "#server/ingestion/watchSources.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { coalesceSourceWatchBatches, LiveReconciler } from "#server/live/reconciler.ts";
+import { readCatalogMetadata } from "#server/metadata/catalogMetadata.ts";
+import type { ViewerInvalidation } from "#shared/types/repository.ts";
 
 const temporaryRoots: string[] = [];
 

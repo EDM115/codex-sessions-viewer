@@ -5,15 +5,16 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { CanonicalRolloutIndex } from "../../../server/history/canonicalRolloutIndex.ts";
-import { readNativeHistoryPage } from "../../../server/history/nativeHistoryReader.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { CanonicalRolloutIndex } from "#server/history/canonicalRolloutIndex.ts";
+import { readNativeHistoryPage } from "#server/history/nativeHistoryReader.ts";
 import {
   qualifyNativeProjection,
   VerifiedProjectionStore,
-} from "../../../server/history/nativeProjectionQualification.ts";
-import * as reads from "../../../server/ingestion/stableRead.ts";
-import { snapshotHistoryDatabase } from "../../../server/metadata/historySnapshot.ts";
+} from "#server/history/nativeProjectionQualification.ts";
+import * as reads from "#server/ingestion/stableRead.ts";
+import { snapshotHistoryDatabase } from "#server/metadata/historySnapshot.ts";
+
 import {
   canonicalRecords,
   fixtureLineage,

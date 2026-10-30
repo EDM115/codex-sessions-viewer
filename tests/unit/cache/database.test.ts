@@ -9,17 +9,17 @@ import {
   upsertCatalogSessions,
   catalogSession,
   writeCatalogLibrary,
-} from "../../../server/cache/catalogStore.ts";
-import { openCacheDatabase, withCacheTransaction } from "../../../server/cache/database.ts";
-import { migrateCacheDatabase } from "../../../server/cache/migrations.ts";
+} from "#server/cache/catalogStore.ts";
+import { openCacheDatabase, withCacheTransaction } from "#server/cache/database.ts";
+import { migrateCacheDatabase } from "#server/cache/migrations.ts";
 import {
   CACHE_SCHEMA_VERSION,
   INITIAL_CACHE_SCHEMA_SQL,
   CATALOG_CACHE_SCHEMA_SQL,
   STRUCTURAL_EVIDENCE_SCHEMA_SQL,
   SOURCE_GENERATION_SCHEMA_SQL,
-} from "../../../server/cache/schema.ts";
-import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
+} from "#server/cache/schema.ts";
+import { classifyCatalogThread } from "#server/metadata/threadClassification.ts";
 
 function seedVersionOneSession(database: DatabaseSync): void {
   const summary = {

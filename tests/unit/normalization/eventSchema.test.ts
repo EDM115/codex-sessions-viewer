@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import type { JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
 import {
   isUnknownCodexEvent,
   parseCodexEvent,
   sessionMetaPayloadSchema,
-} from "../../../server/normalization/eventSchema.ts";
+} from "#server/normalization/eventSchema.ts";
 import {
   createUnknownActivity,
   sanitizeUnknownPayload,
-} from "../../../server/normalization/unknownEvents.ts";
+} from "#server/normalization/unknownEvents.ts";
+
 import { expectedRawIdentity } from "../../helpers/rawIdentity.ts";
 
 const expectedIds = new Map<number, string>();

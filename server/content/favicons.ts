@@ -15,15 +15,15 @@ import {
   assertSafeRemoteUrl,
   canonicalFaviconOrigin,
   type RemoteLookupAddress,
-} from "./faviconSecurity.ts";
-import { sanitizeSvg } from "./sanitizeSvg.ts";
+} from "#server/content/faviconSecurity.ts";
+import { sanitizeSvg } from "#server/content/sanitizeSvg.ts";
 
 export {
   assertSafeRemoteUrl,
   canonicalFaviconOrigin,
   type AssertSafeRemoteUrlOptions,
   type RemoteLookupAddress,
-} from "./faviconSecurity.ts";
+} from "#server/content/faviconSecurity.ts";
 
 const MAX_HTML_BYTES = 512 * 1024;
 const MAX_ICON_BYTES = 512 * 1024;
@@ -44,6 +44,8 @@ export interface FaviconHttpResponse {
 export interface FaviconHttpOptions {
   maxBytes: number;
   accept: string;
+  signal?: AbortSignal;
+  validateUrl?: (url: URL) => void;
 }
 
 export type FaviconHttpClient = (
@@ -173,24 +175,34 @@ async function requestOnce(
   });
 }
 
-export const fetchFaviconHttp: FaviconHttpClient = async (initialUrl, options) => {
-  let url = initialUrl;
-  const signal = AbortSignal.timeout(DEFAULT_TOTAL_TIMEOUT_MS);
-  for (let redirects = 0; redirects <= DEFAULT_REDIRECT_LIMIT; redirects += 1) {
-    // oxlint-disable-next-line no-await-in-loop -- Every redirect target must be resolved and pinned independently.
-    const pinned = await assertSafeRemoteUrl(url);
-    // oxlint-disable-next-line no-await-in-loop -- Redirect handling is deliberately sequential and bounded.
-    const response = await requestOnce(url, pinned, options, signal);
-    if (![301, 302, 303, 307, 308].includes(response.status)) {
-      return response;
+export function createFaviconHttpClient(
+  dependencies: {
+    lookup?: (hostname: string) => Promise<RemoteLookupAddress[]>;
+    request?: typeof requestOnce;
+  } = {},
+): FaviconHttpClient {
+  return async (initialUrl, options) => {
+    let url = initialUrl;
+    const timeout = AbortSignal.timeout(DEFAULT_TOTAL_TIMEOUT_MS);
+    const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
+    for (let redirects = 0; redirects <= DEFAULT_REDIRECT_LIMIT; redirects += 1) {
+      options.validateUrl?.(url);
+      // oxlint-disable-next-line no-await-in-loop -- Every redirect target must be resolved and pinned independently.
+      const pinned = await assertSafeRemoteUrl(url, { lookup: dependencies.lookup });
+      // oxlint-disable-next-line no-await-in-loop -- Redirect handling is deliberately sequential and bounded.
+      const response = await (dependencies.request ?? requestOnce)(url, pinned, options, signal);
+      if (![301, 302, 303, 307, 308].includes(response.status)) {
+        return response;
+      }
+      if (response.location === null || response.location === undefined) {
+        return response;
+      }
+      url = new URL(response.location, url);
     }
-    if (response.location === null || response.location === undefined) {
-      return response;
-    }
-    url = new URL(response.location, url);
-  }
-  throw new Error("The favicon request exceeded its redirect limit.");
-};
+    throw new Error("The favicon request exceeded its redirect limit.");
+  };
+}
+export const fetchFaviconHttp = createFaviconHttpClient();
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");

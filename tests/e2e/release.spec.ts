@@ -198,23 +198,34 @@ test("stays within responsive and local performance budgets", async ({ page, got
   expect(interactionDuration).toBeLessThan(200);
 
   const sessionId = "11111111-1111-4111-8111-111111111111";
-  await goto(`/session/${sessionId}?turn=turn-21`, { waitUntil: "hydration" });
-  for (const width of [320, 375, 414, 768, 1024, 1440, 1920]) {
-    await page.setViewportSize({ width, height: 900 });
-    const geometry = await page.locator(".conversation-timeline").evaluate((timeline) => {
-      const bounds = timeline.getBoundingClientRect();
-      return {
-        documentOverflow:
-          document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        left: bounds.left,
-        right: bounds.right,
-        viewport: document.documentElement.clientWidth,
-      };
-    });
-    expect(geometry.documentOverflow, `session overflow at ${width}px`).toBe(0);
-    expect(geometry.left, `timeline left edge at ${width}px`).toBeGreaterThanOrEqual(0);
-    expect(geometry.right, `timeline right edge at ${width}px`).toBeLessThanOrEqual(
-      geometry.viewport + 1,
-    );
+  // Timing above belongs to the initial library document, these sequential routes check geometry only
+  for (const renderer of [
+    { path: "session", className: "progressive-conversation" },
+    { path: "__fixture/legacy", className: "conversation-timeline" },
+  ]) {
+    await goto(`/${renderer.path}/${sessionId}?turn=turn-21`, { waitUntil: "hydration" });
+    const timeline = page.getByLabel("Conversation timeline", { exact: true });
+    await expect(timeline).toHaveClass(renderer.className);
+    await expect(
+      timeline.getByText("Keep the tall timeline turn active while reading", { exact: true }),
+    ).toBeVisible();
+    for (const width of [320, 375, 414, 768, 1024, 1440, 1920]) {
+      await page.setViewportSize({ width, height: 900 });
+      const geometry = await timeline.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          documentOverflow:
+            document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          left: bounds.left,
+          right: bounds.right,
+          viewport: document.documentElement.clientWidth,
+        };
+      });
+      expect(geometry.documentOverflow, `${renderer.path} overflow at ${width}px`).toBe(0);
+      expect(geometry.left, `${renderer.path} left edge at ${width}px`).toBeGreaterThanOrEqual(0);
+      expect(geometry.right, `${renderer.path} right edge at ${width}px`).toBeLessThanOrEqual(
+        geometry.viewport + 1,
+      );
+    }
   }
 });

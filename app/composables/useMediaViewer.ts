@@ -1,5 +1,3 @@
-import { nextTick, readonly, shallowRef } from "vue";
-
 interface MediaViewerItemBase {
   alt: string;
   filename: string;
@@ -80,6 +78,7 @@ export function useMediaViewer() {
               : (matchingOpeners(fallback)[fallback.occurrence] ?? null);
         target?.focus();
       });
+      return undefined;
     });
   }
 

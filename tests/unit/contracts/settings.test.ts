@@ -5,7 +5,7 @@ import {
   migratePresentationSettings,
   persistedPresentationSettingsSchema,
   serializePresentationSettings,
-} from "../../../shared/types/settings.ts";
+} from "#shared/types/settings.ts";
 
 describe("presentation settings migration", () => {
   it("fills new defaults while preserving recognized legacy preferences", () => {

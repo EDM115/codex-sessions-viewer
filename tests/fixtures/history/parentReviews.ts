@@ -1,4 +1,4 @@
-import type { JsonObject } from "../../../shared/types/conversation.ts";
+import type { JsonObject } from "#shared/types/conversation.ts";
 
 /** Source-shaped parent notifications from pinned app-server envelopes, not projection items */
 export function parentReviewRecords(threadId = "stable"): JsonObject[] {

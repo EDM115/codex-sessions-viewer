@@ -2,21 +2,21 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import {
-  DEFAULT_FETCH_FAVICONS,
-  DEFAULT_SERVER_PORT,
-  persistedServerSettingsSchema,
-  serverViewerSettingsSchema,
-  type ServerViewerSettings,
-} from "../../shared/types/settings.ts";
 import {
   resolveCodexHome,
   resolveViewerPaths,
   type CodexHomeSource,
   type PathResolutionOptions,
   type ViewerPaths,
-} from "./paths.ts";
+} from "#server/core/paths.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import {
+  DEFAULT_FETCH_FAVICONS,
+  DEFAULT_SERVER_PORT,
+  persistedServerSettingsSchema,
+  serverViewerSettingsSchema,
+  type ServerViewerSettings,
+} from "#shared/types/settings.ts";
 
 export interface ServerConfigCliOptions {
   codexHome?: string | undefined;
@@ -169,6 +169,9 @@ export async function loadServerViewerConfig(
     port: options["cli"]?.port ?? persisted.settings?.port ?? DEFAULT_SERVER_PORT,
     fetchFavicons:
       options["cli"]?.fetchFavicons ?? persisted.settings?.fetchFavicons ?? DEFAULT_FETCH_FAVICONS,
+    ...(persisted.settings?.fetchLinkPreviews === undefined
+      ? {}
+      : { fetchLinkPreviews: persisted.settings.fetchLinkPreviews }),
     ...(trustedMediaRoots === undefined ? {} : { trustedMediaRoots }),
   };
   const parsedSettings = serverViewerSettingsSchema.safeParse(settingsInput);

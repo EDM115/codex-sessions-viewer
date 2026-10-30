@@ -1,7 +1,7 @@
 import { opendir } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { DiscoveredRolloutSource } from "./discoverSources.ts";
+import type { DiscoveredRolloutSource } from "#server/ingestion/discoverSources.ts";
 
 // Stream directory entries instead of allocating the entire archive or reading transcript bodies
 export async function* recoverCatalogSources(

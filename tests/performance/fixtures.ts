@@ -1,9 +1,9 @@
-import type { NormalizedSession } from "../../server/normalization/normalizeSession.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
 import type {
   ConversationActivity,
   ConversationMessage,
   ConversationTurn,
-} from "../../shared/types/conversation.ts";
+} from "#shared/types/conversation.ts";
 
 function scaledMessage(
   message: ConversationMessage,

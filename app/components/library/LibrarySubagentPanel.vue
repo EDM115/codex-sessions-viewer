@@ -132,9 +132,13 @@ async function loadTranscript(): Promise<void> {
     return;
   }
   const source = repository.value;
+  const signal = transcriptController.signal;
   try {
-    if (source.capabilities().progressiveHistory) {
-      const metadata = await source.getSessionMetadata(id, { signal: transcriptController.signal });
+    if (
+      source.capabilities().progressiveHistory ||
+      (await source.supportsHistory?.(id, { signal }))
+    ) {
+      const metadata = await source.getSessionMetadata(id, { signal });
       if (metadata.id !== id) {
         throw new Error("Subagent metadata belongs to a different conversation");
       }

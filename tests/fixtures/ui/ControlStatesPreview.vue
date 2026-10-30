@@ -1,17 +1,7 @@
 <script setup lang="ts">
 import { PhGear } from "@phosphor-icons/vue";
-import { ref } from "vue";
 
-import UiButton, {
-  type UiControlState,
-  type UiPreviewState,
-} from "../../../app/components/ui/UiButton.vue";
-import UiDisclosure from "../../../app/components/ui/UiDisclosure.vue";
-import UiIconButton from "../../../app/components/ui/UiIconButton.vue";
-import UiMenu from "../../../app/components/ui/UiMenu.vue";
-import UiTabs from "../../../app/components/ui/UiTabs.vue";
-import UiTextField from "../../../app/components/ui/UiTextField.vue";
-import UiTooltip from "../../../app/components/ui/UiTooltip.vue";
+import type { UiControlState, UiPreviewState } from "~/components/ui/UiButton.vue";
 
 type PreviewState =
   | "default"

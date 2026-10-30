@@ -1,11 +1,8 @@
 <script setup lang="ts">
-import { computed, shallowRef, watch } from "vue";
-
 import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type { RichTextMediaNode } from "#shared/types/richText.ts";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import MediaBlock from "../content/MediaBlock.vue";
 const props = defineProps<{
   assetId: string;
   resolveAsset?: (assetId: string) => Promise<ResolvedAsset>;
@@ -22,7 +19,7 @@ watch(
     });
     asset.value = null;
     state.value = "Loading cached attachment…";
-    if (resolver === undefined) {
+    if (id === "" || resolver === undefined) {
       state.value = "Cached attachment is unavailable.";
       return;
     }
@@ -60,7 +57,7 @@ async function resolveCached(): Promise<ResolvedAsset> {
 </script>
 <template>
   <div class="conversation-attachment" :data-asset-id="assetId">
-    <MediaBlock
+    <ContentMediaBlock
       v-if="asset !== null"
       :node="node"
       :resolve-asset="resolveCached"

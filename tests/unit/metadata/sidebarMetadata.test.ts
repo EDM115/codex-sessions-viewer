@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveSidebarMetadata } from "../../../server/metadata/sidebarMetadata.ts";
+import { resolveSidebarMetadata } from "#server/metadata/sidebarMetadata.ts";
+
 import { metadata, thread } from "../library/membershipFixtures.ts";
 
 describe("scoped sidebar metadata", () => {

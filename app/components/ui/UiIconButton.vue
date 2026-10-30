@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import type { UiControlState, UiPreviewState } from "./UiButton.vue";
-import UiTooltip from "./UiTooltip.vue";
+import type { UiControlState, UiPreviewState } from "~/components/ui/UiButton.vue";
 
 withDefaults(
   defineProps<{

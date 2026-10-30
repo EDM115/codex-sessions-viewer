@@ -7,14 +7,14 @@ import { StringDecoder } from "node:string_decoder";
 import * as pagefind from "pagefind";
 import type { CustomRecord } from "pagefind";
 
-import type { ConversationSummary, ConversationTurn } from "../../shared/types/conversation.ts";
-import type { NormalizedSession } from "../normalization/normalizeSession.ts";
 import {
   finalAssistantMessage,
   serializeAgentWork,
   serializeAssistantMessage,
   serializeUserPrompt,
-} from "./serializeMarkdown.ts";
+} from "#server/export/serializeMarkdown.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import type { ConversationSummary, ConversationTurn } from "#shared/types/conversation.ts";
 
 export interface PagefindBuildResult {
   recordCount: number;
@@ -172,6 +172,7 @@ export function createPagefindTurnRecords(
       const date = turnDate(turn, conversation.summary.updatedAt);
       const messageId = turn.userMessage?.id ?? turn.assistantMessages[0]?.id ?? null;
       const filters: Record<string, string[]> = {
+        session: [conversation.summary.id],
         scope: [conversation.summary.scope],
         model: conversation.summary.models,
         tool: Object.keys(conversation.summary.toolCounts).toSorted(),

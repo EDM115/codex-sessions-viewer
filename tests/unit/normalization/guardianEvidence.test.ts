@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeSession } from "#server/normalization/normalizeSession.ts";
-
-import type { JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
 import {
   matchGuardianEvidence,
   parseGuardianTurn,
@@ -11,8 +9,10 @@ import {
   parseNativeApprovalReview,
   parseParentNativeReviews,
   parentNativeReviewAvailability,
-} from "../../../server/normalization/guardianEvidence.ts";
-import type { ToolActivity } from "../../../shared/types/conversation.ts";
+} from "#server/normalization/guardianEvidence.ts";
+import { normalizeSession } from "#server/normalization/normalizeSession.ts";
+import type { ToolActivity } from "#shared/types/conversation.ts";
+
 import { cutoffReviewRecords } from "../../fixtures/history/parentReviews.ts";
 
 function records(values: JsonlRecord["value"][]): JsonlRecord[] {

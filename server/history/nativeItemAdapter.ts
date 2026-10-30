@@ -4,7 +4,7 @@ import type { GuardianReview } from "#shared/types/approvals.ts";
 import { jsonValueSchema, type JsonValue } from "#shared/types/conversation.ts";
 import { historyItemSchema, type HistoryItem } from "#shared/types/history.ts";
 
-export const NATIVE_ITEM_ADAPTER_VERSION = 4;
+export const NATIVE_ITEM_ADAPTER_VERSION = 5;
 const citationEntriesSchema = z.array(
   z.object({
     path: z.string(),
@@ -231,6 +231,13 @@ function adapt(value: unknown, lifecycle: unknown, core: boolean): HistoryItem |
         clientId: field("clientId", "client_id"),
       });
     }
+    case "imageGeneration":
+      return finish({
+        ...common,
+        result: field("result"),
+        savedPath: field("savedPath", "saved_path"),
+        fileId: field("fileId", "file_id"),
+      });
     case "reasoning":
       return finish({
         ...common,

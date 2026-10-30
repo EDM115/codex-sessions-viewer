@@ -25,7 +25,8 @@ vi.mock("../../../server/ingestion/stableRead.ts", () => ({ stableRead }));
 import {
   readRetainedStateSnapshot,
   snapshotStateDatabase,
-} from "../../../server/metadata/stateSnapshot.ts";
+} from "#server/metadata/stateSnapshot.ts";
+
 import { createStateDatabase } from "../../integration/source-boundary/fixtures.ts";
 
 const temporaryDirectories: string[] = [];

@@ -1,4 +1,4 @@
-import type { ConversationMessage, ConversationTurn } from "../types/conversation.ts";
+import type { ConversationMessage, ConversationTurn } from "#shared/types/conversation.ts";
 
 export function isFinalAnswerPhase(phase: string | null): boolean {
   return phase === "final" || phase === "final_answer";

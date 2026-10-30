@@ -1,5 +1,5 @@
-import type { SessionIndexEntry } from "./sessionIndex.ts";
-import type { StateThreadMetadata } from "./stateSnapshot.ts";
+import type { SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import type { StateThreadMetadata } from "#server/metadata/stateSnapshot.ts";
 
 type Field = { value: string | null; source: string | null };
 function choose(...candidates: readonly Field[]): Field {
@@ -94,7 +94,7 @@ import { createHash } from "node:crypto";
 import {
   catalogSessionMetadataSchema,
   type CatalogSessionMetadata,
-} from "../../shared/types/library.ts";
+} from "#shared/types/library.ts";
 
 export function catalogMetadataRevision(metadata: CatalogSessionMetadata): string {
   const {

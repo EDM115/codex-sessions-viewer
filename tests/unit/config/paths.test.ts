@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { resolveCodexHome, resolveViewerPaths } from "../../../server/core/paths.ts";
+import { resolveCodexHome, resolveViewerPaths } from "#server/core/paths.ts";
 
 afterEach(() => vi.unstubAllEnvs());
 

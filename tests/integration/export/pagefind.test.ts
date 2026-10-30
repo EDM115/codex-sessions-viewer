@@ -6,15 +6,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
-  StaticConversationRepository,
-  type PagefindBrowserApi,
-} from "../../../app/repositories/static.ts";
-import {
   appendPagefindRecords,
   buildPagefind,
   buildPagefindRecordSpool,
   createPagefindTurnRecords,
-} from "../../../server/export/buildPagefind.ts";
+} from "#server/export/buildPagefind.ts";
+import { classifyCatalogThread } from "#server/metadata/threadClassification.ts";
+import type { CatalogLibrary } from "#shared/types/library.ts";
+import { StaticConversationRepository, type PagefindBrowserApi } from "~/repositories/static.ts";
+
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 const temporaryDirectories: string[] = [];
@@ -69,6 +69,113 @@ afterEach(async () => {
 });
 
 describe("Pagefind offline bundle", () => {
+  it("filters typed membership in the actual index before hydrating only the selected result page", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-viewer-pagefind-membership-"));
+    temporaryDirectories.push(root);
+    const outputPath = join(root, "pagefind");
+    const template = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: join(root, "source.jsonl"),
+      scope: "active",
+      revision: "membership",
+      root: true,
+    });
+    const classification = classifyCatalogThread({ threadSource: "user" });
+    const conversations = ["native", "recent"].map((id) => ({
+      ...structuredClone(template),
+      summary: { ...template.summary, id, title: id, parentThreadId: null },
+      classification,
+      turns: Array.from({ length: 501 }, (_, index) => ({
+        ...structuredClone(template.turns[1]!),
+        sessionId: id,
+        id: `turn-${index}`,
+      })),
+    }));
+    const catalog: CatalogLibrary = {
+      projects: [
+        {
+          id: "none",
+          name: "Native none",
+          rootPaths: [],
+          hostId: null,
+          source: "native",
+          position: null,
+          recencyAt: null,
+        },
+      ],
+      threads: conversations.map(({ summary }) => ({
+        id: summary.id,
+        title: summary.title,
+        scope: "active",
+        projectId: summary.id === "native" ? "none" : null,
+        hostId: null,
+        sectionId: null,
+        sectionPosition: null,
+        pinned: false,
+        recencyAt: null,
+        classification,
+      })),
+      sections: [],
+      preferences: {
+        scope: "active",
+        chatSortMode: "manual",
+        projectSortMode: "manual",
+        projectOrder: [],
+        pinnedOrder: [],
+        projectThreadOrders: {},
+      },
+      diagnostics: [],
+    };
+    await buildPagefind(conversations, outputPath);
+    const pagefind = await loadGeneratedPagefind(join(outputPath, "pagefind.js"));
+    let hydrated = 0;
+    const repository = new StaticConversationRepository(
+      async () => ({ version: 2, catalog }),
+      async () => ({
+        async search(query, options) {
+          const result = await pagefind.search(query, options);
+          return {
+            results: result.results.map((entry) => ({
+              ...entry,
+              async data() {
+                hydrated += 1;
+                return entry.data();
+              },
+            })),
+          };
+        },
+      }),
+    );
+    await withFileFetch(async () => {
+      const native = await repository.search({
+        scope: "active",
+        query: "Handle cancellation",
+        groupId: "project:none",
+        cursor: "250",
+        limit: 10,
+      });
+      expect(native.total).toBe(501);
+      expect(native.items).toHaveLength(10);
+      expect(native.items.every((hit) => hit.sessionId === "native")).toBe(true);
+      expect(hydrated).toBe(10);
+      const recent = await repository.search({
+        scope: "active",
+        query: "Handle cancellation",
+        groupId: "recents:none",
+        limit: 10,
+      });
+      expect(recent.total).toBe(501);
+      expect(recent.items.every((hit) => hit.sessionId === "recent")).toBe(true);
+      expect(hydrated).toBe(20);
+      const global = await repository.search({
+        scope: "active",
+        query: "Handle cancellation",
+        limit: 10,
+      });
+      expect(global.total).toBe(1002);
+      expect(hydrated).toBe(30);
+    });
+  }, 30000);
   it("retains parent identity in static child search records", async () => {
     const conversation = await normalizedRolloutFixture({
       name: "modern.jsonl",
@@ -152,6 +259,8 @@ describe("Pagefind offline bundle", () => {
       scope: "active",
       revision: "sha256:parity-fixture",
     });
+    expect(conversation.summary.title).toBe(conversation.summary.id);
+    conversation.summary.title = "Build the parser";
     await buildPagefind([conversation], outputPath);
     const pagefind = await loadGeneratedPagefind(join(outputPath, "pagefind.js"));
     const repository = new StaticConversationRepository(

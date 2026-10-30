@@ -5,8 +5,8 @@ import {
   markerWidthForBucket,
   minimapDestinationIndex,
   minimapPreview,
-} from "../../../shared/timeline/turnMinimap.ts";
-import type { TurnNavigatorItem } from "../../../shared/types/conversation.ts";
+} from "#shared/timeline/turnMinimap.ts";
+import type { TurnNavigatorItem } from "#shared/types/conversation.ts";
 
 const item: TurnNavigatorItem = {
   turnId: "turn-4",

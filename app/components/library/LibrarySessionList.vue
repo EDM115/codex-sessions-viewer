@@ -1,10 +1,7 @@
 <script setup lang="ts">
 import { useVirtualizer } from "@tanstack/vue-virtual";
-import { computed, nextTick, ref } from "vue";
 
 import type { LibraryEntry } from "#shared/types/library.ts";
-
-import LibrarySessionItem from "./LibrarySessionItem.vue";
 
 const props = withDefaults(
   defineProps<{

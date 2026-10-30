@@ -1,6 +1,10 @@
 import * as z from "zod";
 
-import { isoTimestampSchema, jsonValueSchema, type JsonObject } from "./conversation.ts";
+import {
+  isoTimestampSchema,
+  jsonValueSchema,
+  type JsonObject,
+} from "#shared/types/conversation.ts";
 
 export type ViewerDiagnosticCode =
   | "config.invalid_json"

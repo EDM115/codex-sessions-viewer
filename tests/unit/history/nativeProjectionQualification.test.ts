@@ -6,22 +6,23 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { HistoryEpochAuthority } from "../../../server/history/historyEpochAuthority.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { HistoryEpochAuthority } from "#server/history/historyEpochAuthority.ts";
 import {
   decodeNativeHistoryCursor,
   readNativeHistoryPage,
   readNativeTurnItems,
-} from "../../../server/history/nativeHistoryReader.ts";
+} from "#server/history/nativeHistoryReader.ts";
 import {
   qualifyNativeProjection,
   VerifiedProjectionStore,
-} from "../../../server/history/nativeProjectionQualification.ts";
-import { RolloutHistoryReader } from "../../../server/history/rolloutHistoryReader.ts";
-import { RolloutStore } from "../../../server/ingestion/rolloutStream.ts";
-import { validateSourceRanges } from "../../../server/ingestion/sourceGeneration.ts";
-import * as historySnapshots from "../../../server/metadata/historySnapshot.ts";
-import type { HistoryItemQuery, HistoryPageQuery } from "../../../shared/types/repository.ts";
+} from "#server/history/nativeProjectionQualification.ts";
+import { RolloutHistoryReader } from "#server/history/rolloutHistoryReader.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
+import { validateSourceRanges } from "#server/ingestion/sourceGeneration.ts";
+import * as historySnapshots from "#server/metadata/historySnapshot.ts";
+import type { HistoryItemQuery, HistoryPageQuery } from "#shared/types/repository.ts";
+
 import {
   addItem,
   addTurn,

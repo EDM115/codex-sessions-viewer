@@ -6,11 +6,12 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readNativeHistoryPage } from "../../../server/history/nativeHistoryReader.ts";
+import { readNativeHistoryPage } from "#server/history/nativeHistoryReader.ts";
 import {
   HistorySnapshotManager,
   snapshotHistoryDatabase,
-} from "../../../server/metadata/historySnapshot.ts";
+} from "#server/metadata/historySnapshot.ts";
+
 import { historyFixture, fixtureLineage } from "../../fixtures/history/nativeHistory.ts";
 
 const roots: string[] = [];
@@ -24,6 +25,35 @@ async function fixture() {
 }
 
 describe("optional native snapshot acquisition", () => {
+  it("rejects native payload tables that have page indexes but no bounded item-key lookup", async () => {
+    const options = await fixture();
+    const database = new DatabaseSync(options.sourceDatabase);
+    database.exec(
+      "ALTER TABLE thread_items RENAME TO old_items; CREATE TABLE thread_items AS SELECT * FROM old_items; DROP TABLE old_items; CREATE INDEX items_by_page_only ON thread_items(thread_id,turn_id,rollout_ordinal,item_id)",
+    );
+    database.close();
+    const snapshot = await snapshotHistoryDatabase(options);
+    expect(snapshot.status).toBe("unavailable");
+    expect(snapshot.diagnostics.join(" ")).toContain("required page indexes");
+  });
+
+  it("qualifies the actual payload point-lookup plan against the immutable copied database", async () => {
+    const snapshot = await snapshotHistoryDatabase(await fixture());
+    expect(snapshot.snapshot).not.toBeNull();
+    const database = new DatabaseSync(snapshot.snapshot!.databasePath, { readOnly: true });
+    try {
+      const plan = database
+        .prepare(
+          "EXPLAIN QUERY PLAN SELECT item_json FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ? AND length(CAST(item_json AS BLOB)) <= ? LIMIT 1",
+        )
+        .all("physical", "turn", "answer", 1024 * 1024);
+      expect(plan.map((row) => String(row["detail"])).join(" ")).toMatch(
+        /SEARCH thread_items.*thread_id=\?.*turn_id=\?.*item_id=\?/u,
+      );
+    } finally {
+      database.close();
+    }
+  });
   it("validates only an owned immutable generation and leaves source bytes and sidecars untouched", async () => {
     const options = await fixture();
     const before = await readFile(options.sourceDatabase);

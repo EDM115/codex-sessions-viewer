@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { PhCheckCircle, PhSpinnerGap, PhWarningCircle } from "@phosphor-icons/vue";
-import { computed } from "vue";
 
 export type UiControlState = "default" | "loading" | "error" | "success";
 export type UiPreviewState = "hover" | "focus" | "active" | null;

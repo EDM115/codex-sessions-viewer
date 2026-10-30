@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { PhCheck, PhCopy, PhWarning } from "@phosphor-icons/vue";
-import { onBeforeUnmount, ref } from "vue";
 
 const props = defineProps<{
   label: string;

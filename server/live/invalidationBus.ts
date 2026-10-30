@@ -1,7 +1,4 @@
-import {
-  viewerInvalidationSchema,
-  type ViewerInvalidation,
-} from "../../shared/types/repository.ts";
+import { viewerInvalidationSchema, type ViewerInvalidation } from "#shared/types/repository.ts";
 
 export type InvalidationListener = (event: ViewerInvalidation) => void;
 

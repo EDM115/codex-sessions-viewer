@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { PhArrowsClockwise, PhFolderOpen } from "@phosphor-icons/vue";
 
-import UiButton from "../ui/UiButton.vue";
-
 withDefaults(
   defineProps<{
     description: string;

@@ -5,12 +5,10 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  parseVerifyOutputArguments,
-  verifyGeneratedOutput,
-} from "../../../server/export/verifyOutput.ts";
-import { writeStaticPayloads } from "../../../server/export/writeStaticPayloads.ts";
-import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
+import { parseVerifyOutputArguments, verifyGeneratedOutput } from "#server/export/verifyOutput.ts";
+import { writeStaticPayloads } from "#server/export/writeStaticPayloads.ts";
+import { classifyCatalogThread } from "#server/metadata/threadClassification.ts";
+
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import {
   driftOutputDiagnosticCount,
@@ -40,6 +38,45 @@ async function rewriteJson(
 }
 
 describe("generated output verification", () => {
+  it("preserves an explicitly final answer before later commentary and accepts a commentary-only turn without a final", async () => {
+    const output = await validOutput();
+    const conversation = await normalizedRolloutFixture({
+      name: "modern.jsonl",
+      sourcePath: join(output.root, "modern.jsonl"),
+      scope: "active",
+      revision: "sha256:verified-output",
+    });
+    conversation.summary.parentThreadId = null;
+    conversation.summary.childThreadIds = [];
+    conversation.classification = classifyCatalogThread({ threadSource: "user" });
+    const turn = conversation.turns[0]!;
+    const final = turn.assistantMessages[0]!;
+    final.phase = "final_answer";
+    turn.finalAssistantMessageId = final.id;
+    turn.assistantMessages.push({
+      ...final,
+      id: "later-commentary",
+      phase: "commentary",
+      sourceMarkdown: "Post-answer commentary",
+      rawEventIds: [],
+    });
+    turn.entryOrder!.push({ kind: "message", id: "later-commentary" });
+    conversation.summary.assistantMessageCount += 1;
+    expect(conversation.turns[1]!.finalAssistantMessageId).toBeNull();
+    await writeStaticPayloads([conversation], { generatedRoot: output.root, chunkSize: 1 });
+    await expect(verifyGeneratedOutput(output.root)).resolves.toMatchObject({ sessionCount: 1 });
+    await rewriteJson(
+      join(output.root, "payloads/sessions", output.sessionId, "turn-0.json"),
+      (value) => {
+        const saved = (value["turns"] as Array<Record<string, unknown>>)[0]!;
+        saved["finalAssistantMessageId"] = "later-commentary";
+      },
+    );
+    await expect(verifyGeneratedOutput(output.root)).rejects.toThrow(
+      "final assistant ID does not match qualified response evidence",
+    );
+  });
+
   it("verifies an export that excludes incomplete spawns rather than publishing them as roots", async () => {
     const output = await validOutput();
     const user = await normalizedRolloutFixture({

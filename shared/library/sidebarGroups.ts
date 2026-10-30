@@ -1,10 +1,54 @@
-import type {
-  CatalogLibrary,
-  CatalogSidebarThread,
-  SidebarGroup,
-  SidebarPreferences,
-} from "../types/library.ts";
-import { isThreadVisible } from "./threadVisibility.ts";
+import { isThreadVisible } from "#shared/library/threadVisibility.ts";
+import {
+  type CatalogLibrary,
+  type CatalogSidebarThread,
+  type SidebarGroup,
+  type SidebarPreferences,
+  sidebarGroupKey,
+  type CatalogProjectGroup,
+} from "#shared/types/library.ts";
+
+export function catalogProjectGroups(catalog: CatalogLibrary): CatalogProjectGroup[] {
+  const active = buildSidebarGroups(catalog, { ...catalog.preferences, scope: "active" });
+  const archived = buildSidebarGroups(catalog, { ...catalog.preferences, scope: "archived" });
+  return [
+    ...active,
+    ...archived.filter(
+      (group) => !active.some((other) => sidebarGroupKey(other) === sidebarGroupKey(group)),
+    ),
+  ].map((group) => {
+    const groupId = sidebarGroupKey(group);
+    const project =
+      group.kind === "project"
+        ? catalog.projects.find((candidate) => candidate.id === group.projectId)
+        : undefined;
+    return {
+      id: group.id,
+      name: group.name,
+      rootPaths: project?.rootPaths ?? [],
+      hostId: project?.hostId ?? null,
+      source: project?.source ?? "legacy",
+      position: project?.position ?? null,
+      recencyAt: project?.recencyAt ?? null,
+      groupId,
+      activeCount:
+        active.find((candidate) => sidebarGroupKey(candidate) === groupId)?.threadIds.length ?? 0,
+      archivedCount:
+        archived.find((candidate) => sidebarGroupKey(candidate) === groupId)?.threadIds.length ?? 0,
+      sidebar: {
+        order: {
+          active: active.findIndex((candidate) => sidebarGroupKey(candidate) === groupId),
+          archived: archived.findIndex((candidate) => sidebarGroupKey(candidate) === groupId),
+        },
+        kind: group.kind,
+        sectionId: group.sectionId,
+        sectionName: group.sectionId
+          ? (catalog.sections.find((section) => section.id === group.sectionId)?.name ?? null)
+          : null,
+      },
+    };
+  });
+}
 
 function index(order: readonly string[], id: string): number {
   const position = order.indexOf(id);

@@ -1,15 +1,11 @@
 <script setup lang="ts">
-import { computed, useId } from "vue";
-
 import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type {
   RichTextDocument,
   RichTextNode as RichNode,
   RichTextAttribute,
 } from "#shared/types/richText.ts";
-
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import RichTextNode from "./RichTextNode.vue";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = withDefaults(
   defineProps<{
@@ -75,7 +71,7 @@ const scopedChildren = computed(() => {
 
 <template>
   <div class="rich-text-document">
-    <RichTextNode
+    <ContentRichTextNode
       v-for="(node, index) in scopedChildren"
       :key="index"
       :node="node"

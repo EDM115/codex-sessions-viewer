@@ -5,9 +5,10 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readGlobalState } from "../../../server/metadata/globalState.ts";
-import { readSessionIndex } from "../../../server/metadata/sessionIndex.ts";
-import { snapshotStateDatabase } from "../../../server/metadata/stateSnapshot.ts";
+import { readGlobalState } from "#server/metadata/globalState.ts";
+import { readSessionIndex } from "#server/metadata/sessionIndex.ts";
+import { snapshotStateDatabase } from "#server/metadata/stateSnapshot.ts";
+
 import { createStateDatabase } from "./fixtures.ts";
 
 const temporaryDirectories: string[] = [];

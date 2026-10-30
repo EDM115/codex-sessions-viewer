@@ -1,19 +1,20 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type {
-  RichTextDocument,
-  RichTextNode,
-  EmbeddedMediaSource,
-} from "../../shared/types/richText.ts";
-import { storeEmbeddedMedia, storeReferencedMedia } from "../content/extractMedia.ts";
+import { storeEmbeddedMedia, storeReferencedMedia } from "#server/content/extractMedia.ts";
 import {
   canonicalFaviconOrigin,
   resolveFavicon,
   type FaviconResolution,
-} from "../content/favicons.ts";
-import { parseRichText } from "../content/parseRichText.ts";
-import { discoverReferencedMedia } from "../ingestion/discoverSources.ts";
-import type { NormalizedSession } from "../normalization/normalizeSession.ts";
+} from "#server/content/favicons.ts";
+import { parseRichText } from "#server/content/parseRichText.ts";
+import { discoverReferencedMedia } from "#server/ingestion/discoverSources.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+import { documentReferences } from "#shared/content/documentReferences.ts";
+import type {
+  RichTextDocument,
+  RichTextNode,
+  EmbeddedMediaSource,
+} from "#shared/types/richText.ts";
 
 export interface PrepareConversationExportOptions {
   mediaRoot: string;
@@ -24,6 +25,7 @@ export interface PrepareConversationExportOptions {
 }
 
 export interface PreparedConversationExport {
+  previewUrls?: Set<string>;
   conversation: NormalizedSession;
   assetIds: Set<string>;
   faviconOrigins: Set<string>;
@@ -63,13 +65,14 @@ function cloneConversationForRichContent(source: NormalizedSession): NormalizedS
   return {
     summary: source.summary,
     rawEvents: source.rawEvents,
-    turns: source.turns.map((turn) => ({
-      ...turn,
-      userMessage: turn.userMessage === null ? null : { ...turn.userMessage },
-      steeringMessages: (turn.steeringMessages ?? []).map((message) => ({ ...message })),
-      assistantMessages: turn.assistantMessages.map((message) => ({ ...message })),
-      activities: turn.activities.map((activity) => ({ ...activity })),
-    })),
+    turns: source.turns.map((turn) =>
+      Object.assign({}, turn, {
+        userMessage: turn.userMessage === null ? null : { ...turn.userMessage },
+        steeringMessages: (turn.steeringMessages ?? []).map((message) => ({ ...message })),
+        assistantMessages: turn.assistantMessages.map((message) => ({ ...message })),
+        activities: turn.activities.map((activity) => ({ ...activity })),
+      }),
+    ),
   };
 }
 
@@ -91,6 +94,7 @@ export async function prepareConversationForExport(
   const embeddedMedia: EmbeddedMediaSource[] = [];
   const discoveredFaviconOrigins = new Set<string>();
   const assetIds = new Set(mediaActivities.map(({ assetId }) => assetId));
+  const previewUrls = new Set<string>();
   for (const turn of conversation.turns) {
     const messages = [
       turn.userMessage,
@@ -105,6 +109,9 @@ export async function prepareConversationForExport(
         embeddedMedia.push(...parsed.embeddedMedia);
       }
       collectDocumentReferences(message.body, discoveredFaviconOrigins, assetIds);
+      for (const url of documentReferences(message.body).urls) {
+        previewUrls.add(url);
+      }
     }
     for (const activity of turn.activities) {
       if (activity.kind !== "reasoning" || activity.summary === "") {
@@ -117,6 +124,9 @@ export async function prepareConversationForExport(
         embeddedMedia.push(...parsed.embeddedMedia);
       }
       collectDocumentReferences(activity.body, discoveredFaviconOrigins, assetIds);
+      for (const url of documentReferences(activity.body).urls) {
+        previewUrls.add(url);
+      }
     }
   }
   const storedReferences = await storeReferencedMedia(database, references, {
@@ -178,5 +188,6 @@ export async function prepareConversationForExport(
     assetIds,
     faviconOrigins,
     faviconResults,
+    previewUrls,
   };
 }

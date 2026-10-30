@@ -2,18 +2,11 @@ import { createHash, type Hash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
-import {
-  sourceGenerationSchema,
-  type ConversationScope,
-  type SourceFingerprint,
-  type SourceGeneration,
-  type RolloutRef,
-} from "../../shared/types/conversation.ts";
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { HistoryPage } from "../../shared/types/history.ts";
-import type { HistoryPageQuery } from "../../shared/types/repository.ts";
-import { RolloutHistoryReader } from "../history/rolloutHistoryReader.ts";
-import type { DiscoveredRolloutSource } from "../ingestion/discoverSources.ts";
+import { catalogSession } from "#server/cache/catalogStore.ts";
+import { hasCachedSession, replaceCachedSession } from "#server/cache/conversationStore.ts";
+import { RolloutHistoryReader } from "#server/history/rolloutHistoryReader.ts";
+import { readCompleteRollout } from "#server/ingestion/completeRollout.ts";
+import type { DiscoveredRolloutSource } from "#server/ingestion/discoverSources.ts";
 import {
   readStableJsonl,
   type JsonlParseError,
@@ -21,19 +14,23 @@ import {
   type JsonlRecord,
   type ReadStableJsonlOptions,
   type StableJsonlResult,
-} from "../ingestion/jsonlStream.ts";
-import { rolloutRefFromSource } from "../ingestion/rolloutIdentity.ts";
+} from "#server/ingestion/jsonlStream.ts";
+import { rolloutRefFromSource } from "#server/ingestion/rolloutIdentity.ts";
 import {
   filesystemRolloutResolver,
   readPlainRolloutLineage,
   type RolloutSourceResolver,
   type ResolvedRolloutLineage,
-} from "../ingestion/rolloutLineage.ts";
-import { parseSessionMetaBytes } from "../ingestion/sessionMetaPrefix.ts";
-import { SourceGenerationFence, validateSourceGeneration } from "../ingestion/sourceGeneration.ts";
-import { stableRead, type SourceIdentity } from "../ingestion/stableRead.ts";
-import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
-import type { StateMetadataSnapshot } from "../metadata/stateSnapshot.ts";
+} from "#server/ingestion/rolloutLineage.ts";
+import { openRollout, type SeekableRollout } from "#server/ingestion/rolloutStream.ts";
+import { parseSessionMetaBytes } from "#server/ingestion/sessionMetaPrefix.ts";
+import {
+  SourceGenerationFence,
+  validateSourceGeneration,
+} from "#server/ingestion/sourceGeneration.ts";
+import { stableRead, type SourceIdentity } from "#server/ingestion/stableRead.ts";
+import type { SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import type { StateMetadataSnapshot } from "#server/metadata/stateSnapshot.ts";
 import {
   NORMALIZATION_PARSER_VERSION,
   createSessionNormalizer,
@@ -41,9 +38,17 @@ import {
   type NormalizeSessionInput,
   type NormalizeSessionResult,
   type NormalizedSession,
-} from "../normalization/normalizeSession.ts";
-import { catalogSession } from "./catalogStore.ts";
-import { hasCachedSession, replaceCachedSession } from "./conversationStore.ts";
+} from "#server/normalization/normalizeSession.ts";
+import {
+  sourceGenerationSchema,
+  type ConversationScope,
+  type SourceFingerprint,
+  type SourceGeneration,
+  type RolloutRef,
+} from "#shared/types/conversation.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import type { HistoryPage } from "#shared/types/history.ts";
+import type { HistoryPageQuery } from "#shared/types/repository.ts";
 
 export const CACHE_PARSER_VERSION = NORMALIZATION_PARSER_VERSION;
 const PREFIX_PROBE_BYTES = 64;
@@ -63,6 +68,7 @@ export type StableJsonlReader = (
 ) => Promise<StableJsonlResult>;
 
 export interface SessionCacheUpdaterOptions {
+  openRollout?: (ref: RolloutRef, signal?: AbortSignal) => Promise<SeekableRollout>;
   historyReader?: RolloutHistoryReader;
   rolloutSources?: RolloutSourceResolver;
   parserVersion?: number | undefined;
@@ -405,6 +411,7 @@ function clearSourceFailureDiagnostics(database: DatabaseSync, path: string): vo
 
 const generationFences = new WeakMap<DatabaseSync, SourceGenerationFence>();
 export class SessionCacheUpdater {
+  readonly #openRollout: (ref: RolloutRef, signal?: AbortSignal) => Promise<SeekableRollout>;
   readonly #historyReader: RolloutHistoryReader;
   readonly #rolloutSources: RolloutSourceResolver | undefined;
   readonly #fence: SourceGenerationFence;
@@ -421,6 +428,7 @@ export class SessionCacheUpdater {
   readonly #turnBytes = new WeakMap<NormalizedSession["turns"][number], number>();
 
   constructor(database: DatabaseSync, options: SessionCacheUpdaterOptions = {}) {
+    this.#openRollout = options.openRollout ?? openRollout;
     this.#historyReader = options.historyReader ?? new RolloutHistoryReader();
     this.#database = database;
     this.#fence = generationFences.get(database) ?? new SourceGenerationFence();
@@ -456,6 +464,54 @@ export class SessionCacheUpdater {
   }
 
   async #readFull(source: DiscoveredRolloutSource): Promise<ReadCandidate | null> {
+    if (source.path.endsWith(".jsonl.zst")) {
+      const initial = rolloutRefFromSource(source.path, null);
+      const complete = await readCompleteRollout(
+        initial,
+        this.#rolloutSources ?? filesystemRolloutResolver(initial),
+        this.#openRollout,
+        this.#parserVersion,
+      );
+      const generation = complete.generation;
+      return {
+        mode: "full",
+        generation,
+        rolloutRef: complete.ref,
+        dependencies: complete.dependencies,
+        contentRevision: `lineage:${createHash("sha256")
+          .update(
+            JSON.stringify([
+              complete.historyEpoch,
+              generation.decodedSha256,
+              complete.dependencies,
+            ]),
+          )
+          .digest("hex")}`,
+        fingerprint: {
+          path: source.path,
+          size: generation.observation.encodedSize,
+          mtimeMs: Number(generation.observation.mtimeNs) / 1e6,
+          sha256: generation.encodedSha256!,
+          parsedBytes: generation.observation.encodedSize,
+          parserVersion: this.#parserVersion,
+        },
+        identity: {
+          device: BigInt(generation.observation.device),
+          inode: BigInt(generation.observation.inode),
+        },
+        hash: createHash("sha256"),
+        parserState: {
+          pending: Buffer.alloc(0),
+          pendingStart: generation.decodedSize!,
+          nextOffset: generation.decodedSize!,
+          nextLineNumber: complete.records.length + 1,
+        },
+        records: complete.records,
+        errors: [],
+        prefixProbe: Buffer.alloc(0),
+        normalize: this.#normalize,
+      };
+    }
     const hash = createHash("sha256");
     let prefixProbe: Buffer = Buffer.alloc(0);
     const result = await this.#readJsonl(source.path, {
@@ -803,6 +859,7 @@ export class SessionCacheUpdater {
         return this.#normalizeAndStore(source, live, "memory", context);
       }
       const canAppend =
+        sourceRef.representation === "plain-jsonl" &&
         live !== undefined &&
         (live.dependencies?.length ?? 0) === 0 &&
         live.rolloutRef?.subagentHistoryStartOrdinal == null &&
@@ -843,7 +900,7 @@ export class SessionCacheUpdater {
       }
       candidate.generation = {
         ...(candidate.generation ?? validated.generation),
-        semanticEpoch: validated.generation.semanticEpoch,
+        semanticEpoch: candidate.generation?.semanticEpoch ?? validated.generation.semanticEpoch,
         physicalRolloutId:
           candidate.rolloutRef?.physicalRolloutId ?? validated.generation.physicalRolloutId,
         dependencies: candidate.dependencies ?? [],

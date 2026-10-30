@@ -15,9 +15,6 @@ import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 import type { RepositoryCapabilities, RepositoryMode } from "#shared/types/repository.ts";
 import type { PresentationSettings } from "#shared/types/settings.ts";
 
-import UiIconButton from "../ui/UiIconButton.vue";
-import UiTextField from "../ui/UiTextField.vue";
-
 const props = defineProps<{
   capabilities: RepositoryCapabilities;
   codexHome: string;

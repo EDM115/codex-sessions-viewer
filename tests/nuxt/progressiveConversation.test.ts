@@ -2,15 +2,22 @@ import { mountSuspended, mockComponent } from "@nuxt/test-utils/runtime";
 import { flushPromises } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ConversationInspector, ConversationTurn, ConversationMessage } from "#components";
+import {
+  ConversationAttachment,
+  ConversationInspector,
+  ConversationTurn,
+  ConversationMessage,
+} from "#components";
 import type {
   ConversationTurn as LegacyTurn,
   ConversationSummary,
 } from "#shared/types/conversation.ts";
 import type { HistoryPage, HistoryTurnWindow } from "#shared/types/history.ts";
 import { catalogSessionMetadataSchema } from "#shared/types/library.ts";
-import type { ViewerInvalidation } from "#shared/types/repository.ts";
+import type { ResolvedAsset, ViewerInvalidation } from "#shared/types/repository.ts";
 import ProgressiveConversationView from "~/components/conversation/ProgressiveConversationView.vue";
+import type { useProgressiveHistoryTimeline } from "~/composables/useConversationTimeline.ts";
+import type { useMeasuredConversationViewport } from "~/composables/useMeasuredConversationViewport.ts";
 import { LiveApiConversationRepository } from "~/repositories/live.ts";
 import { StaticConversationRepository } from "~/repositories/static.ts";
 
@@ -22,6 +29,7 @@ mockComponent("MediaViewer", () => ({
 
 // Happy DOM has no layout, semantic mounts provide a viewport for the real measured virtualizer
 beforeEach(() => {
+  clearNuxtState("conversation-positions");
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(800);
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
 });
@@ -150,6 +158,268 @@ function pageRepository(window: HistoryTurnWindow) {
 }
 
 describe("progressive and legacy presentation paths", () => {
+  it("waits for a real attachment ID while still resolving a known missing asset", async () => {
+    const resolveAsset = vi.fn<(id: string) => Promise<ResolvedAsset>>(async (id) => ({
+      id,
+      url: id === "known-missing" ? null : "/assets/prepared.png",
+      status: id === "known-missing" ? "missing" : "available",
+      mimeType: "image/png",
+      byteSize: 1,
+      sha256: null,
+      width: 1,
+      height: 1,
+      originalPath: "prepared.png",
+    }));
+    const wrapper = await mountSuspended(ConversationAttachment, {
+      props: { assetId: "", resolveAsset },
+    });
+    try {
+      await flushPromises();
+      expect(resolveAsset).not.toHaveBeenCalled();
+      expect(wrapper.text()).toContain("Cached attachment is unavailable");
+      await wrapper.setProps({ assetId: "known-missing" });
+      await flushPromises();
+      expect(resolveAsset).toHaveBeenCalledExactlyOnceWith("known-missing");
+      expect(wrapper.text()).toContain("Cached media is unavailable");
+      await wrapper.setProps({ assetId: "" });
+      await flushPromises();
+      expect(resolveAsset).toHaveBeenCalledTimes(1);
+      await wrapper.setProps({ assetId: "prepared" });
+      await flushPromises();
+      expect(resolveAsset).toHaveBeenLastCalledWith("prepared");
+      expect(wrapper.get("img").attributes("src")).toBe("/assets/prepared.png");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+  it("prepares only visible attachment references and renders generated media after work expansion", async () => {
+    const source = disjointWindow();
+    const generated = {
+      id: "generated",
+      type: "imageGeneration" as const,
+      result: "aW1hZ2U=",
+      savedPath: null,
+      fileId: null,
+      startedAtMs: null,
+      completedAtMs: null,
+      evidence: null,
+    };
+    source.items.splice(1, 0, {
+      ...source.items[0]!,
+      itemId: generated.id,
+      item: generated,
+      decodedByteStart: 30,
+      decodedByteEnd: 40,
+    });
+    source.opening.item = {
+      ...source.opening.item!,
+      type: "userMessage",
+      text: "PREFIX QUESTION",
+      clientId: null,
+      content: [{ type: "image", url: "sediment:cloud-only" }],
+    };
+    source.items[0]!.item = source.opening.item;
+    const repository = pageRepository(source);
+    const prepare = vi
+      .spyOn(repository, "prepareHistoryPresentation")
+      .mockImplementation(async (query) => ({
+        ...query,
+        body: {
+          type: "document",
+          children: [
+            { type: "text", text: query.markdown },
+            ...(query.attachments ?? []).map(() => ({
+              type: "media" as const,
+              mediaType: "image" as const,
+              source: "asset" as const,
+              assetId: `saved-${query.itemId}`,
+              originalSource: "retained.png",
+              alt: "Recorded image",
+              title: null,
+            })),
+          ],
+        },
+      }));
+    const resolveAsset = vi.spyOn(repository, "resolveAsset").mockImplementation(async (id) => ({
+      id,
+      url: `/assets/${id}.png`,
+      status: "available",
+      mimeType: "image/png",
+      byteSize: 5,
+      sha256: null,
+      width: 1,
+      height: 1,
+      originalPath: null,
+    }));
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository,
+        targetTurnId: null,
+      },
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(
+          prepare.mock.calls.some(
+            ([query]) =>
+              query.itemId === "prefix" && query.attachments?.[0]?.source === "sediment:cloud-only",
+          ),
+        ).toBe(true),
+      );
+      expect(prepare.mock.calls.some(([query]) => query.itemId === "generated")).toBe(false);
+      const work = wrapper.get("details.conversation-work-stream");
+      work.element.setAttribute("open", "");
+      await work.trigger("toggle");
+      await vi.waitFor(() =>
+        expect(
+          prepare.mock.calls.some(
+            ([query]) =>
+              query.itemId === "generated" &&
+              query.attachments?.[0]?.source === "data:image/png;base64,aW1hZ2U=",
+          ),
+        ).toBe(true),
+      );
+      await vi.waitFor(() =>
+        expect(wrapper.find('img[src="/assets/saved-generated.png"]').exists()).toBe(true),
+      );
+      expect(resolveAsset).not.toHaveBeenCalledWith("unavailable-generated");
+      expect(resolveAsset).toHaveBeenCalledWith("saved-generated");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+  it("keeps reader intent when latest content finishes after wheel input", async () => {
+    const source = disjointWindow();
+    const repository = pageRepository(source);
+    let resolve!: (value: HistoryPage) => void;
+    const gate = new Promise<HistoryPage>((done) => {
+      resolve = done;
+    });
+    vi.spyOn(repository, "getHistoryPage")
+      .mockResolvedValueOnce(historyPage(source))
+      .mockImplementation(() => gate);
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository,
+        targetTurnId: null,
+      },
+    });
+    await flushPromises();
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exposes the mounted production script-setup methods
+    const state = wrapper.vm as unknown as {
+      latest(): Promise<void>;
+      readInput(event: Event): void;
+      viewport: ReturnType<typeof useMeasuredConversationViewport>;
+    };
+    state.readInput(new WheelEvent("wheel", { deltaY: 80 }));
+    const loading = state.latest();
+    state.readInput(new WheelEvent("wheel", { deltaY: 80 }));
+    resolve(historyPage(source));
+    await loading;
+    expect(state.viewport.follow.value).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("does not start restored-position measurement after reader input cancels its pending fetch", async () => {
+    const source = disjointWindow();
+    const repository = pageRepository(source);
+    let resolve!: (value: HistoryPage) => void;
+    const gate = new Promise<HistoryPage>((done) => {
+      resolve = done;
+    });
+    vi.spyOn(repository, "getHistoryPage").mockImplementation(() => gate);
+    const wrapper = await mountSuspended({
+      setup() {
+        useState("conversation-positions", () => ({})).value = {
+          thread: { turnId: JSON.stringify(["physical", "turn"]), top: -176 },
+        };
+        return () =>
+          h(ProgressiveConversationView, {
+            metadata: catalogSessionMetadataSchema.parse(summary),
+            repository,
+            targetTurnId: null,
+          });
+      },
+    });
+    const child = wrapper.getComponent(ProgressiveConversationView);
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exposes the mounted production script-setup methods
+    const state = child.vm as unknown as {
+      readInput(event: Event): void;
+      viewport: ReturnType<typeof useMeasuredConversationViewport>;
+    };
+    const target = vi.spyOn(state.viewport, "target");
+    state.readInput(new WheelEvent("wheel", { deltaY: 80 }));
+    resolve(historyPage(source));
+    await flushPromises();
+    expect(target).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+  it("prunes evicted alias identities while an independently cloned Inspector snapshot outlives its page", async () => {
+    const source = disjointWindow();
+    const repository = pageRepository(source);
+    let start = 20;
+    vi.spyOn(repository, "getHistoryPage").mockImplementation(async (_id, query) => {
+      if (query.anchor.kind === "latest") {
+        return { ...historyPage(source), afterCursor: "next-20" };
+      }
+      expect(query.limit).toBe(20);
+      const turns = Array.from({ length: 20 }, (_, offset) => {
+        const index = start + offset;
+        const entry = disjointWindow();
+        entry.turnId = `other-${index}`;
+        entry.order = index;
+        return entry;
+      });
+      start += 20;
+      return { ...historyPage(turns[0]!), turns, afterCursor: `next-${start}` };
+    });
+    const legacyInspector = vi.spyOn(repository, "getInspector");
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository,
+        targetTurnId: null,
+      },
+    });
+    await flushPromises();
+    await wrapper.get('[aria-label="Open message info"]').trigger("click");
+    const selected = wrapper.getComponent(ConversationInspector).props("record");
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Vue Test Utils exposes the mounted component's actual script-setup stores
+    const state = wrapper.vm as unknown as {
+      timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+      messageKeysByIdentity: Map<string, string>;
+    };
+    expect(state.messageKeysByIdentity.size).toBe(2);
+    expect(selected?.rawRecords).toEqual([{ source: "tail evidence" }]);
+    for (let index = 0; index < 4; index++) {
+      state.timeline.setVisible([]);
+      // oxlint-disable-next-line no-await-in-loop -- Each bounded page advances the retained window
+      await state.timeline.loadAfter();
+      // oxlint-disable-next-line no-await-in-loop -- Render the new measured window before checking its cache
+      await flushPromises();
+      expect(state.messageKeysByIdentity.size).toBeLessThanOrEqual(
+        wrapper.findAll("[data-history-turn]").length * 2,
+      );
+    }
+    expect(state.timeline.windows.value).toHaveLength(60);
+    expect(state.timeline.windows.value.some((entry) => entry.turnId === "turn")).toBe(false);
+    expect(
+      [...state.messageKeysByIdentity.keys()].some((key) =>
+        key.startsWith('["physical","turn","epoch"]:'),
+      ),
+    ).toBe(false);
+    expect(wrapper.getComponent(ConversationInspector).props("record")).toBe(selected);
+    source.items[1]!.item!.evidence = { source: "caller mutation" };
+    expect(selected?.rawRecords).toEqual([{ source: "tail evidence" }]);
+    expect(legacyInspector).not.toHaveBeenCalled();
+    await wrapper.setProps({
+      metadata: { ...catalogSessionMetadataSchema.parse(summary), id: "other-selection" },
+    });
+    expect(wrapper.findComponent(ConversationInspector).exists()).toBe(false);
+    wrapper.unmount();
+  });
   it.each(["echo-first", "canonical-first"] as const)(
     "I1 preserves first-page final DOM and original Info identity through a real overlapping merge: %s",
     async (order) => {
@@ -246,12 +516,17 @@ describe("progressive and legacy presentation paths", () => {
       });
       await flushPromises();
       const original = wrapper.get(`[data-message-id="${initial.itemId}"]`).element;
+      const anchorKey = original.getAttribute("data-anchor-entry");
       invalidate({ type: "session.updated", ids: ["thread"], revision: "A" });
       await flushPromises();
       const updated = wrapper
         .findAllComponents(ConversationMessage)
         .find((component) => component.props("message").id === selected.itemId)!;
       expect(wrapper.get(`[data-message-id="${selected.itemId}"]`).element).toBe(original);
+      expect(anchorKey).toBeTruthy();
+      expect(
+        wrapper.get(`[data-message-id="${selected.itemId}"]`).attributes("data-anchor-entry"),
+      ).toBe(anchorKey);
       expect(wrapper.findAll(`[data-message-id="${selected.itemId}"]`)).toHaveLength(1);
       expect(wrapper.find(`[data-entry-id="${initial.itemId}"]`).exists()).toBe(false);
       expect(wrapper.findAll(".conversation-message--assistant")).toHaveLength(1);
@@ -369,6 +644,59 @@ describe("progressive and legacy presentation paths", () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
     wrapper.unmount();
   });
+  it.each(["close", "related", "selection", "unmount", "newer-action"] as const)(
+    "restores progressive Info focus only for the current close lifecycle: %s",
+    async (transition) => {
+      const repository = pageRepository(disjointWindow());
+      const wrapper = await mountSuspended(ProgressiveConversationView, {
+        attachTo: document.body,
+        props: {
+          metadata: catalogSessionMetadataSchema.parse(summary),
+          repository,
+          targetTurnId: null,
+        },
+      });
+      const other = document.createElement("button");
+      document.body.append(other);
+      try {
+        await flushPromises();
+        const opener = wrapper.get<HTMLButtonElement>('[aria-label="Open message info"]');
+        opener.element.focus();
+        await opener.trigger("click");
+        const inspector = wrapper.getComponent(ConversationInspector);
+        expect(document.activeElement).toBe(wrapper.get('[role="dialog"]').element);
+        if (transition === "related") {
+          inspector.vm.$emit("inspect", { type: "message", id: "prefix" });
+          await flushPromises();
+        }
+        expect(inspector.props("record")?.target.id).toBe(
+          transition === "related" ? "prefix" : "tail",
+        );
+        inspector.vm.$emit("close");
+        if (transition === "selection") {
+          other.focus();
+          await wrapper.setProps({
+            metadata: { ...catalogSessionMetadataSchema.parse(summary), id: "replacement" },
+          });
+        } else if (transition === "unmount") {
+          other.focus();
+          wrapper.unmount();
+        } else if (transition === "newer-action") {
+          opener.element.click();
+          other.focus();
+        }
+        await flushPromises();
+        expect(document.activeElement).toBe(
+          transition === "close" || transition === "related" ? opener.element : other,
+        );
+      } finally {
+        if (transition !== "unmount") {
+          wrapper.unmount();
+        }
+        other.remove();
+      }
+    },
+  );
   it("renders the intervening gap from a single page with disjoint prefix and tail evidence", async () => {
     const window = disjointWindow();
     const repository = pageRepository(window);

@@ -1,7 +1,7 @@
 import * as z from "zod";
 
-import { jsonValueSchema, rawEventIdentitySchema } from "./conversation.ts";
-import { richTextDocumentSchema } from "./richText.ts";
+import { jsonValueSchema, rawEventIdentitySchema } from "#shared/types/conversation.ts";
+import { richTextDocumentSchema } from "#shared/types/richText.ts";
 
 const id = z.string().min(1);
 const ordinal = z.int().nonnegative();
@@ -27,6 +27,13 @@ const base = {
 };
 const status = z.enum(["inProgress", "completed", "failed", "declined", "interrupted"]);
 export const historyItemSchema = z.discriminatedUnion("type", [
+  z.object({
+    ...base,
+    type: z.literal("imageGeneration"),
+    result: nullableText,
+    savedPath: nullableText,
+    fileId: nullableText,
+  }),
   z.object({
     ...base,
     type: z.literal("userMessage"),
@@ -250,6 +257,11 @@ export const historyPageSchema = z.strictObject({
   preparation: z.enum(["ready", "partial", "unavailable"]),
 });
 export type HistoryPage = z.infer<typeof historyPageSchema>;
+export const historyAttachmentSchema = z.strictObject({
+  mediaType: z.enum(["image", "audio", "video", "file"]),
+  source: z.string().max(5 * 1024 * 1024),
+});
+export type HistoryAttachment = z.infer<typeof historyAttachmentSchema>;
 export const historyPresentationRequestSchema = z.strictObject({
   threadId: id,
   historyEpoch: id,
@@ -258,6 +270,7 @@ export const historyPresentationRequestSchema = z.strictObject({
   turnId: id,
   itemId: id,
   markdown: z.string().max(5 * 1024 * 1024),
+  attachments: z.array(historyAttachmentSchema).max(100).optional(),
 });
 export type HistoryPresentationRequest = z.infer<typeof historyPresentationRequestSchema>;
 export const historyPresentationSchema = historyPresentationRequestSchema.extend({

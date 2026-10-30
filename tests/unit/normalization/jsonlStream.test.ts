@@ -8,8 +8,8 @@ import {
   JsonlStreamParser,
   readStableJsonl,
   type JsonlRecord,
-} from "../../../server/ingestion/jsonlStream.ts";
-import { stableRead } from "../../../server/ingestion/stableRead.ts";
+} from "#server/ingestion/jsonlStream.ts";
+import { stableRead } from "#server/ingestion/stableRead.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -28,6 +28,58 @@ afterEach(async () => {
 });
 
 describe("JSONL byte streaming", () => {
+  it.each([0, -1, 1.5, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects an invalid record byte budget %s before accepting data",
+    (maxRecordBytes) => {
+      expect(() => new JsonlStreamParser({ maxRecordBytes })).toThrow("Invalid record byte budget");
+    },
+  );
+
+  it("enforces the UTF-8 byte budget for a terminated record while excluding CRLF framing", () => {
+    const raw = '{"text":"é"}';
+    const line = Buffer.from(`${raw}\r\n`);
+    const records: JsonlRecord[] = [];
+    const exact = new JsonlStreamParser({
+      maxRecordBytes: Buffer.byteLength(raw),
+      onRecord: (record) => records.push(record),
+    });
+    exact.write(line, 0);
+    expect(records).toEqual([
+      expect.objectContaining({ value: { text: "é" }, byteStart: 0, byteEnd: line.byteLength }),
+    ]);
+    const rejected: JsonlRecord[] = [];
+    const limited = new JsonlStreamParser({
+      maxRecordBytes: Buffer.byteLength(raw) - 1,
+      onRecord: (record) => rejected.push(record),
+    });
+    expect(() => limited.write(line, 0)).toThrow("rollout.record_budget");
+    expect(rejected).toEqual([]);
+  });
+
+  it("streams bounded records to the consumer without retaining them and still preserves errors and tail state", async () => {
+    const contents = '{"id":1}\ninvalid\n{"id":2}\n{"id":';
+    const path = await temporaryFile(contents);
+    const consumed: JsonlRecord[] = [];
+    const result = await readStableJsonl(path, {
+      maxRecordBytes: 8,
+      retainRecords: false,
+      chunkSize: 3,
+      onRecord: (record) => consumed.push(record),
+    });
+    expect(result.read.status).toBe("stable");
+    expect(result.records).toEqual([]);
+    expect(consumed.map(({ lineNumber, value }) => ({ lineNumber, value }))).toEqual([
+      { lineNumber: 1, value: { id: 1 } },
+      { lineNumber: 3, value: { id: 2 } },
+    ]);
+    expect(result.errors).toEqual([
+      { lineNumber: 2, byteStart: 9, byteEnd: 17, reason: "invalid-json" },
+    ]);
+    expect(result.state.pending.toString("utf8")).toBe('{"id":');
+    expect(result.state.nextOffset).toBe(Buffer.byteLength(contents));
+    expect(result.state.nextLineNumber).toBe(4);
+  });
+
   it("rejects invalid UTF-8 inside a JSON string instead of inventing replacement text", () => {
     const records: JsonlRecord[] = [];
     let errors = 0;

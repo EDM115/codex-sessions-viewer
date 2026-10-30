@@ -10,26 +10,26 @@ import {
   qualifyRawRecord,
   rawRecordIdentity,
   sameObservedItem,
-} from "../../../server/ingestion/rolloutIdentity.ts";
+} from "#server/ingestion/rolloutIdentity.ts";
 import {
   resolveRolloutLineage,
   readPlainRolloutLineage,
-} from "../../../server/ingestion/rolloutLineage.ts";
-import { selectSessionSources } from "../../../server/ingestion/selectSessionSources.ts";
-import { readSessionMetaPrefix } from "../../../server/ingestion/sessionMetaPrefix.ts";
+} from "#server/ingestion/rolloutLineage.ts";
+import { selectSessionSources } from "#server/ingestion/selectSessionSources.ts";
+import { readSessionMetaPrefix } from "#server/ingestion/sessionMetaPrefix.ts";
 import {
   validateSourceGeneration,
   validateSourceRanges,
   SourceGenerationFence,
   completeDecodedGeneration,
-} from "../../../server/ingestion/sourceGeneration.ts";
-import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
+} from "#server/ingestion/sourceGeneration.ts";
+import { normalizeSession } from "#server/normalization/normalizeSession.ts";
 import {
   sourceGenerationSchema,
   type RolloutRef,
   type JsonValue,
   type SourceGeneration,
-} from "../../../shared/types/conversation.ts";
+} from "#shared/types/conversation.ts";
 
 const stable = "11111111-1111-4111-8111-111111111111";
 const physical = "22222222-2222-4222-8222-222222222222";

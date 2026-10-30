@@ -20,6 +20,7 @@ import {
   getCachedTurnsInRange,
   historyEpochStorage,
 } from "#server/cache/repositoryStore.ts";
+import { searchMembershipFilter } from "#server/cache/searchMembership.ts";
 import { countCachedSearchResults } from "#server/cache/searchStore.ts";
 import {
   CACHE_PARSER_VERSION,
@@ -28,6 +29,12 @@ import {
   getSourceManifestEntry,
   type StableJsonlReader,
 } from "#server/cache/sourceManifest.ts";
+import {
+  canonicalFaviconOrigin,
+  fetchFaviconHttp,
+  resolveFavicon,
+  type FaviconHttpClient,
+} from "#server/content/favicons.ts";
 import { prepareConversationForExport } from "#server/export/prepareConversation.ts";
 import { HistoryEpochAuthority } from "#server/history/historyEpochAuthority.ts";
 import { HistoryPager, HistoryReloadError } from "#server/history/historyPager.ts";
@@ -87,6 +94,7 @@ import {
 } from "#server/normalization/guardianEvidence.ts";
 import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
 import { enrichSubagentActivities } from "#server/normalization/subagentTopology.ts";
+import { documentReferences } from "#shared/content/documentReferences.ts";
 import { conversationActivitySchema, type SourceGeneration } from "#shared/types/conversation.ts";
 import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 import type { DeepSearchJob, PreparationResult } from "#shared/types/library.ts";
@@ -98,6 +106,7 @@ import type {
   HistoryItemQuery,
   RepositoryRequestOptions,
 } from "#shared/types/repository.ts";
+import type { RichTextDocument } from "#shared/types/richText.ts";
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 30_000;
 
@@ -127,6 +136,7 @@ interface LiveMetadata {
 }
 
 export interface LiveReconcilerOptions {
+  faviconClient?: FaviconHttpClient | undefined;
   bus: InvalidationBus;
   cacheDir: string;
   codexHome: string;
@@ -146,6 +156,13 @@ export interface LiveReconcilerOptions {
 }
 
 export class LiveReconciler {
+  readonly #faviconClient: FaviconHttpClient | undefined;
+  readonly #faviconController = new AbortController();
+  readonly #faviconTasks = new Set<Promise<void>>();
+  readonly #publishedFavicons = new Map<string, string | null>();
+  readonly #faviconJobs = new Set<string>();
+  readonly #faviconQueue: string[] = [];
+  #activeFavicons = 0;
   readonly #bus: InvalidationBus;
   readonly #cacheDir: string;
   readonly #codexHome: string;
@@ -190,6 +207,11 @@ export class LiveReconciler {
   #revisionSequence = 0;
 
   constructor(options: LiveReconcilerOptions) {
+    this.#faviconClient = (url, request) =>
+      (options.faviconClient ?? fetchFaviconHttp)(url, {
+        ...request,
+        signal: this.#faviconController.signal,
+      });
     const interval = options.reconciliationIntervalMs ?? DEFAULT_RECONCILIATION_INTERVAL_MS;
     if (!Number.isSafeInteger(interval) || interval < 1_000) {
       throw new RangeError("reconciliationIntervalMs must be a safe integer of at least 1000");
@@ -230,6 +252,7 @@ export class LiveReconciler {
     this.#readMetadata = options.readMetadata ?? readCatalogMetadata;
     this.#recoverSources = options.recoverSources ?? recoverCatalogSources;
     this.#updater = new SessionCacheUpdater(this.#database, {
+      openRollout: (ref, signal) => this.#rolloutStore.open(ref, signal),
       maxRetainedSources: 4,
       maxRetainedBytes: 64 * 1024 * 1024,
       readJsonl: options.readJsonl,
@@ -237,11 +260,6 @@ export class LiveReconciler {
     this.#materializationQueue = new MaterializationQueue((id, priority) =>
       this.#materialize(id, priority),
     );
-    for (const row of this.#database.prepare("SELECT origin FROM favicons").all()) {
-      if (typeof row["origin"] === "string") {
-        this.#knownFaviconOrigins.set(this.#faviconKey(row["origin"]), row["origin"]);
-      }
-    }
   }
 
   get codexHome(): string {
@@ -266,6 +284,82 @@ export class LiveReconciler {
 
   faviconOrigin(key: string): string | null {
     return this.#knownFaviconOrigins.get(key) ?? null;
+  }
+
+  scheduleDocumentFavicons(document: RichTextDocument): void {
+    this.#scheduleFaviconOrigins(documentReferences(document).origins);
+  }
+
+  #scheduleFaviconOrigins(origins: Iterable<string>): void {
+    if (this.#closed) {
+      return;
+    }
+    for (const origin of origins) {
+      let canonical: string;
+      try {
+        canonical = canonicalFaviconOrigin(origin);
+      } catch {
+        continue;
+      }
+      this.#knownFaviconOrigins.set(this.#faviconKey(canonical), canonical);
+      if (this.#knownFaviconOrigins.size > 512) {
+        this.#knownFaviconOrigins.delete(this.#knownFaviconOrigins.keys().next().value!);
+      }
+      if (
+        !this.#fetchFavicons ||
+        this.#faviconJobs.has(canonical) ||
+        this.#faviconQueue.length >= 32
+      ) {
+        continue;
+      }
+      this.#faviconJobs.add(canonical);
+      this.#faviconQueue.push(canonical);
+    }
+    this.#drainFavicons();
+  }
+
+  #drainFavicons(): void {
+    while (!this.#closed && this.#activeFavicons < 2 && this.#faviconQueue.length) {
+      const origin = this.#faviconQueue.shift()!;
+      this.#activeFavicons += 1;
+      const task = resolveFavicon(this.#database, origin, {
+        mode: "live",
+        faviconRoot: join(this.#cacheDir, "favicons"),
+        client: this.#faviconClient,
+      })
+        .then(async (result) => {
+          const resolution = result.backgroundRefresh ? await result.backgroundRefresh : result;
+          if (
+            !this.#closed &&
+            resolution.status === "available" &&
+            (result.backgroundRefresh !== null ||
+              this.#publishedFavicons.get(origin) !== resolution.sha256)
+          ) {
+            this.#publishedFavicons.set(origin, resolution.sha256);
+            if (this.#publishedFavicons.size > 512) {
+              this.#publishedFavicons.delete(this.#publishedFavicons.keys().next().value!);
+            }
+            this.#publish({
+              type: "favicon.updated",
+              ids: [origin],
+              revision: this.#nextRevision(),
+            });
+          }
+          return undefined;
+        })
+        .catch((error: unknown) => {
+          if (!this.#closed) {
+            this.#onError?.(error);
+          }
+        })
+        .finally(() => {
+          this.#faviconTasks.delete(task);
+          this.#activeFavicons -= 1;
+          this.#faviconJobs.delete(origin);
+          this.#drainFavicons();
+        });
+      this.#faviconTasks.add(task);
+    }
   }
 
   #faviconKey(origin: string): string {
@@ -298,7 +392,7 @@ export class LiveReconciler {
     const prepared = await prepareConversationForExport(this.#database, session, {
       mediaRoot: join(this.#cacheDir, "assets"),
       faviconRoot: join(this.#cacheDir, "favicons"),
-      offline: !this.#fetchFavicons,
+      offline: true,
       mode: "live",
       trustedMediaRoots: this.#trustedMediaRoots,
     });
@@ -306,26 +400,7 @@ export class LiveReconciler {
       throw new Error("The conversation evidence changed during rich preparation.");
     }
     updateCachedSessionRichContent(this.#database, prepared.conversation);
-    for (const origin of prepared.faviconOrigins) {
-      this.#knownFaviconOrigins.set(this.#faviconKey(origin), origin);
-    }
-    for (const favicon of prepared.faviconResults) {
-      if (favicon.backgroundRefresh === null) {
-        continue;
-      }
-      void favicon.backgroundRefresh
-        .then((resolution) => {
-          if (!this.#closed && resolution.status === "available") {
-            this.#publish({
-              type: "favicon.updated",
-              ids: [favicon.origin],
-              revision: this.#nextRevision(),
-            });
-          }
-          return undefined;
-        })
-        .catch((error: unknown) => this.#onError?.(error));
-    }
+    this.#scheduleFaviconOrigins(prepared.faviconOrigins);
     return prepared.conversation;
   }
 
@@ -848,19 +923,17 @@ export class LiveReconciler {
   startDeepSearch(query: SearchQuery): DeepSearchJob {
     const id = randomUUID();
     const now = new Date().toISOString();
-    const values: string[] = [query.scope];
+    const membership = searchMembershipFilter(this.#database, query, "c");
+    const values = [query.scope, ...membership.values];
     const filters = [
       "scope = ?",
       catalogVisibilitySql("ordinary"),
       "materialization_state <> 'ready'",
+      membership.sql,
     ];
-    if (query.projectId !== undefined) {
-      filters.push("project_id = ?");
-      values.push(query.projectId ?? "none");
-    }
     const sessionIds = this.#database
       .prepare(
-        `SELECT id FROM session_catalog WHERE ${filters.join(" AND ")} ORDER BY updated_at DESC, id`,
+        `SELECT id FROM session_catalog c WHERE ${filters.join(" AND ")} ORDER BY updated_at DESC, id`,
       )
       .all(...values)
       .flatMap((row) => (typeof row["id"] === "string" ? [row["id"]] : []));
@@ -1390,6 +1463,9 @@ export class LiveReconciler {
       return;
     }
     this.#closed = true;
+    this.#faviconController.abort();
+    this.#faviconQueue.length = 0;
+    await Promise.allSettled(this.#faviconTasks);
     await this.#historyPager.close();
     await this.#rolloutStore.close();
     await this.#nativeHistory.close();

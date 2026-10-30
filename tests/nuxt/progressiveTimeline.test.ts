@@ -1,3 +1,4 @@
+import { flushPromises } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 
 import { mergeHistoryWindows, retainHistoryWindows } from "#shared/timeline/history.ts";
@@ -644,5 +645,328 @@ it("keeps repeated-cursor protection for retained items when unrelated turn page
   expect(timeline.windows.value.some((entry) => entry.turnId === "tail")).toBe(true);
   await timeline.loadItems("tail", { kind: "before", cursor: "items-before" });
   expect(timeline.error.value).toContain("cursor did not advance");
+  timeline.dispose();
+});
+
+it("evicts failed rich keys immediately without requiring another history publication", async () => {
+  const source = window();
+  source.items = Array.from({ length: 130 }, (_, index) => ({
+    ...source.items[0]!,
+    itemId: `message-${index}`,
+    item: { ...source.items[0]!.item!, id: `message-${index}` },
+  }));
+  const prepare = vi.fn<ConversationRepository["prepareHistoryPresentation"]>(async () => {
+    throw new Error("Formatting unavailable");
+  });
+  const timeline = useProgressiveHistoryTimeline({
+    sessionId: "thread",
+    initialPage: page([source]),
+    repository: {
+      getHistoryPage: vi.fn<ConversationRepository["getHistoryPage"]>(),
+      getTurnItems: vi.fn<ConversationRepository["getTurnItems"]>(),
+      prepareHistoryPresentation: prepare,
+    },
+  });
+  const expand = async (index: number) => {
+    timeline.setExpanded([`${JSON.stringify(["physical", "tail"])}:message-${index}`]);
+    await flushPromises();
+  };
+  for (let index = 0; index < 129; index++) {
+    await expand(index);
+  }
+  expect(prepare).toHaveBeenCalledTimes(129);
+  await expand(128);
+  expect(prepare).toHaveBeenCalledTimes(129);
+  await expand(0);
+  expect(prepare).toHaveBeenCalledTimes(130);
+  timeline.dispose();
+});
+
+it("cancels pending item requests with their displayed owner on page eviction and fences late responses", async () => {
+  const source = window("source-owner", 0);
+  source.boundary = {
+    status: "verified",
+    sourceTurnId: "source-owner",
+    decodedByteStart: 0,
+    identityAliases: ["displayed"],
+  };
+  source.beforeCursor = "source-cursor";
+  const initial = { ...source, turnId: "displayed" };
+  const gate = deferred<HistoryTurnWindow>();
+  let signal: AbortSignal | undefined;
+  let start = 1;
+  const getTurnItems = vi.fn<ConversationRepository["getTurnItems"]>((_id, query, options) => {
+    if (query.anchor.kind === "latest") {
+      return Promise.resolve(source);
+    }
+    signal = options?.signal;
+    return gate.promise;
+  });
+  const timeline = useProgressiveHistoryTimeline({
+    sessionId: "thread",
+    initialPage: { ...page([initial]), afterCursor: "page-1" },
+    repository: {
+      getTurnItems,
+      getHistoryPage: async () => {
+        const result = {
+          ...page(Array.from({ length: 20 }, (_, i) => window(`other-${start + i}`, start + i))),
+          afterCursor: `page-${start + 20}`,
+        };
+        start += 20;
+        return result;
+      },
+    },
+  });
+  await timeline.loadItems("displayed");
+  const request = timeline.loadItems("displayed", { kind: "before", cursor: "source-cursor" });
+  expect(getTurnItems.mock.calls.at(-1)?.[1].turnId).toBe("source-owner");
+  await timeline.loadAfter();
+  expect(signal?.aborted).toBe(false);
+  for (let index = 0; index < 3; index++) {
+    await timeline.loadAfter();
+  }
+  expect(timeline.windows.value.some((entry) => entry.turnId === "displayed")).toBe(false);
+  expect(signal?.aborted).toBe(true);
+  expect(timeline.loading.value).toBe(false);
+  gate.resolve({ ...source, beforeCursor: null });
+  await request;
+  expect(timeline.windows.value.some((entry) => entry.turnId === "displayed")).toBe(false);
+  expect(timeline.error.value).toBeNull();
+  timeline.dispose();
+});
+
+it("cancels a pending item cursor when a bounded reread evicts its range but keeps opening and final identity evidence", async () => {
+  const source = window();
+  const prompt = {
+    id: "opening",
+    type: "userMessage" as const,
+    text: "Independent opening snapshot",
+    content: [],
+    clientId: null,
+    startedAtMs: null,
+    completedAtMs: null,
+    evidence: null,
+  };
+  source.opening = { itemId: prompt.id, item: prompt, availability: "available" };
+  source.finalAnswerItemId = "item-299";
+  source.items = Array.from({ length: 300 }, (_, index) => ({
+    ...source.items[0]!,
+    itemId: `item-${index}`,
+    item: { ...source.items[0]!.item!, id: `item-${index}` },
+    decodedByteStart: index,
+    decodedByteEnd: index + 1,
+  }));
+  source.afterCursor = "newer";
+  const reread = {
+    ...source,
+    opening: { itemId: null, item: null, availability: "notLoaded" as const },
+    items: Array.from({ length: 100 }, (_, index) => ({
+      ...source.items[0]!,
+      itemId: `item-${300 + index}`,
+      item: { ...source.items[0]!.item!, id: `item-${300 + index}` },
+      decodedByteStart: 300 + index,
+      decodedByteEnd: 301 + index,
+    })),
+    beforeCursor: "reread-before",
+    afterCursor: null,
+  };
+  const gate = deferred<HistoryTurnWindow>();
+  let signal: AbortSignal | undefined;
+  const timeline = useProgressiveHistoryTimeline({
+    sessionId: "thread",
+    initialPage: page([source]),
+    repository: {
+      getHistoryPage: vi.fn<ConversationRepository["getHistoryPage"]>(),
+      getTurnItems: (_id, query, options) => {
+        if (query.anchor.kind === "before") {
+          signal = options?.signal;
+          return gate.promise;
+        }
+        return Promise.resolve(reread);
+      },
+    },
+  });
+  const pending = timeline.loadItems("tail", { kind: "before", cursor: "items-before" });
+  await timeline.loadItems("tail", { kind: "after", cursor: "newer" });
+  expect(signal?.aborted).toBe(true);
+  expect(timeline.windows.value[0]?.items).toHaveLength(100);
+  expect(timeline.windows.value[0]?.opening).toEqual(source.opening);
+  expect(timeline.windows.value[0]?.itemIslands?.[0]).toEqual(["opening"]);
+  expect(timeline.windows.value[0]?.finalAnswerItemId).toBe("item-299");
+  expect(timeline.page.value?.turns).toEqual([]);
+  gate.resolve({ ...source, beforeCursor: null });
+  await pending;
+  expect(timeline.windows.value[0]?.items).toHaveLength(100);
+  expect(timeline.windows.value[0]?.items[0]?.itemId).toBe("item-300");
+  expect(timeline.error.value).toBeNull();
+  timeline.dispose();
+});
+
+it("bounds successful presentations during disclosure-only navigation and keeps initial inputs separate", async () => {
+  const source = window();
+  source.items = Array.from({ length: 130 }, (_, index) => ({
+    ...source.items[0]!,
+    itemId: `message-${index}`,
+    item: { ...source.items[0]!.item!, id: `message-${index}` },
+  }));
+  const initialPage = page([source]);
+  const prepare = vi.fn<ConversationRepository["prepareHistoryPresentation"]>(async (query) => ({
+    ...query,
+    body: { type: "document", children: [{ type: "text", text: query.markdown }] },
+  }));
+  const timeline = useProgressiveHistoryTimeline({
+    sessionId: "thread",
+    initialPage,
+    repository: {
+      getHistoryPage: vi.fn<ConversationRepository["getHistoryPage"]>(),
+      getTurnItems: vi.fn<ConversationRepository["getTurnItems"]>(),
+      prepareHistoryPresentation: prepare,
+    },
+  });
+  for (let index = 0; index < 130; index++) {
+    timeline.setExpanded([`${JSON.stringify(["physical", "tail"])}:message-${index}`]);
+    await flushPromises();
+    expect(timeline.presentations.value.length).toBeLessThanOrEqual(128);
+  }
+  expect(prepare).toHaveBeenCalledTimes(130);
+  expect(timeline.presentations.value).toHaveLength(128);
+  expect(timeline.presentations.value[0]?.itemId).toBe("message-2");
+  expect(initialPage.turns).toHaveLength(1);
+  expect(initialPage.turns[0]?.items).toHaveLength(130);
+  expect(timeline.page.value?.turns).toEqual([]);
+  timeline.dispose();
+});
+
+it("bounds every live page publication and reloads the actual evicted item range", async () => {
+  let currentStart = 0;
+  function slice(start: number): HistoryTurnWindow {
+    const result = window("live-turn", 0);
+    result.contentRevision = `revision-${currentStart}`;
+    result.items = Array.from({ length: 100 }, (_, offset) => ({
+      ...result.items[0]!,
+      itemId: `live-${start + offset}`,
+      decodedByteStart: start + offset,
+      decodedByteEnd: start + offset + 1,
+      updatedAtDecodedByte: start + offset,
+      item: { ...result.items[0]!.item!, id: `live-${start + offset}` },
+    }));
+    result.beforeCursor = start > 0 ? `items-${start}` : null;
+    result.afterCursor = start < currentStart ? `items-${start + 100}` : null;
+    result.loadedRanges = [
+      {
+        physicalRolloutId: "physical",
+        startOrdinal: null,
+        endOrdinalExclusive: null,
+        startDecodedByte: start,
+        endDecodedByteExclusive: start + 100,
+      },
+    ];
+    result.finalAnswerItemId = `live-${currentStart + 99}`;
+    if (start === 0) {
+      result.opening = {
+        itemId: "opening",
+        availability: "available",
+        item: {
+          id: "opening",
+          type: "userMessage",
+          text: "Original question",
+          content: [],
+          clientId: null,
+          startedAtMs: null,
+          completedAtMs: null,
+          evidence: null,
+        },
+      };
+    }
+    return result;
+  }
+  const getTurnItems = vi.fn<ConversationRepository["getTurnItems"]>(async (_id, query) => {
+    const cursor = "cursor" in query.anchor ? Number(query.anchor.cursor.slice(6)) : currentStart;
+    return slice(query.anchor.kind === "before" ? cursor - 100 : cursor);
+  });
+  const timeline = useProgressiveHistoryTimeline({
+    sessionId: "thread",
+    repository: {
+      getHistoryPage: async () => ({
+        ...page([slice(currentStart)]),
+        contentRevision: `revision-${currentStart}`,
+      }),
+      getTurnItems,
+    },
+  });
+  const counts: number[] = [];
+  for (currentStart = 0; currentStart <= 400; currentStart += 100) {
+    await timeline.refresh();
+    counts.push(timeline.windows.value[0]!.items.length);
+  }
+  expect(counts.every((count) => count <= 300)).toBe(true);
+  console.log(JSON.stringify({ livePageRetainedItemCounts: counts }));
+  expect(timeline.windows.value).toHaveLength(1);
+  expect(timeline.page.value?.turns).toEqual([]);
+  expect(timeline.windows.value[0]?.opening).toMatchObject({
+    itemId: "opening",
+    availability: "unresolved",
+    item: { text: "Original question" },
+  });
+  expect(timeline.windows.value[0]?.items.some((item) => item.itemId === "live-0")).toBe(false);
+  currentStart = 400;
+  for (let attempt = 0; attempt < 4 && timeline.windows.value[0]?.beforeCursor; attempt++) {
+    await timeline.loadItems("live-turn", {
+      kind: "before",
+      cursor: timeline.windows.value[0].beforeCursor,
+    });
+    expect(timeline.windows.value[0].items.length).toBeLessThanOrEqual(300);
+  }
+  expect(getTurnItems).toHaveBeenCalled();
+  expect(timeline.windows.value[0]?.items.some((item) => item.itemId === "live-0")).toBe(true);
+  expect(timeline.windows.value[0]?.finalAnswerItemId).toBe("live-499");
+  expect(timeline.windows.value[0]?.opening.availability).toBe("available");
+  expect(timeline.error.value).toBeNull();
+  timeline.dispose();
+});
+
+it("retains an explicit distant target across the sixty-turn boundary instead of pinning the old visible window", async () => {
+  const timeline = useProgressiveHistoryTimeline({
+    sessionId: "thread",
+    initialPage: page(
+      Array.from({ length: 20 }, (_, index) => window(`turn-${100 + index}`, 100 + index)),
+    ),
+    repository: {
+      getHistoryPage: async (_id, query) => {
+        if (query.anchor.kind === "turn") {
+          return page(Array.from({ length: 5 }, (_, index) => window(`turn-${index}`, index)));
+        }
+        if (query.anchor.kind === "latest") {
+          return page(
+            Array.from({ length: 5 }, (_, index) => window(`turn-${200 + index}`, 200 + index)),
+          );
+        }
+        const start = query.anchor.kind === "before" && query.anchor.cursor === "before" ? 80 : 60;
+        return {
+          ...page(
+            Array.from({ length: 20 }, (_, index) =>
+              window(`turn-${start + index}`, start + index),
+            ),
+          ),
+          beforeCursor: `before-${start}`,
+        };
+      },
+      getTurnItems: vi.fn<ConversationRepository["getTurnItems"]>(),
+    },
+  });
+  await timeline.loadBefore();
+  await timeline.loadBefore();
+  expect(timeline.windows.value).toHaveLength(60);
+  timeline.setVisible([JSON.stringify(["physical", "turn-100"])]);
+  await timeline.loadTarget("turn-0");
+  expect(timeline.windows.value).toHaveLength(60);
+  expect(timeline.windows.value.some((entry) => entry.turnId === "turn-0")).toBe(true);
+  await timeline.refresh();
+  expect(timeline.windows.value.some((entry) => entry.turnId === "turn-0")).toBe(true);
+  timeline.cancelTarget();
+  timeline.setVisible([JSON.stringify(["physical", "turn-100"])]);
+  await timeline.refresh();
+  expect(timeline.windows.value.some((entry) => entry.turnId === "turn-0")).toBe(false);
+  expect(timeline.windows.value.some((entry) => entry.turnId === "turn-100")).toBe(true);
   timeline.dispose();
 });

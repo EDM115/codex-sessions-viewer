@@ -2,7 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 
-import { browserSecurityHeaders } from "./server/core/securityHeaders.ts";
+import {
+  browserSecurityHeaders,
+  staticBrowserSecurityHeaders,
+} from "#server/core/securityHeaders.ts";
 
 const viewerMode = process.env.CODEX_VIEWER_MODE === "static" ? "static" : "live";
 const configuredOutput = process.env.CODEX_VIEWER_OUTPUT?.trim();
@@ -129,6 +132,8 @@ export default defineNuxtConfig({
     server: false,
   },
   nitro: {
+    esbuild: { options: { target: "node26" } },
+    rollupConfig: { external: ["node:sqlite", "/pagefind/pagefind.js"] },
     ...(configuredOutput === undefined && buildOutput === undefined
       ? {}
       : {
@@ -169,7 +174,9 @@ export default defineNuxtConfig({
             return plugin;
           }
           const resolvedName = nuxtRequire.resolve(name);
-          return typeof plugin === "string" ? resolvedName : { ...plugin, name: resolvedName };
+          return typeof plugin === "string"
+            ? resolvedName
+            : Object.assign({}, plugin, { name: resolvedName });
         });
       });
     },
@@ -209,7 +216,7 @@ export default defineNuxtConfig({
   },
   routeRules: {
     "/**": {
-      headers: browserSecurityHeaders,
+      headers: viewerMode === "static" ? staticBrowserSecurityHeaders : browserSecurityHeaders,
     },
   },
 });

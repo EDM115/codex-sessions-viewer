@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { PhDotsThree } from "@phosphor-icons/vue";
-import { nextTick, ref, useId } from "vue";
 
 defineProps<{
   label: string;

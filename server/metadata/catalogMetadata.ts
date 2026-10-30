@@ -1,12 +1,11 @@
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
 import {
   discoverMetadataSources,
   type DiscoveredMetadataSources,
-} from "../ingestion/discoverSources.ts";
-import { readGlobalState, type GlobalStateMetadata } from "./globalState.ts";
+} from "#server/ingestion/discoverSources.ts";
+import { readGlobalState, type GlobalStateMetadata } from "#server/metadata/globalState.ts";
 import type {
   SchemaCapabilities,
   StateAttachmentMetadata,
@@ -15,9 +14,10 @@ import type {
   StateSectionMetadata,
   StateSpawnEdgeMetadata,
   StateThreadMetadata,
-} from "./schemaCapabilities.ts";
-import { readSessionIndex, type SessionIndexEntry } from "./sessionIndex.ts";
-import { snapshotStateDatabase } from "./stateSnapshot.ts";
+} from "#server/metadata/schemaCapabilities.ts";
+import { readSessionIndex, type SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import { snapshotStateDatabase } from "#server/metadata/stateSnapshot.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 
 export interface CatalogMetadataSnapshot {
   codexHome: string;

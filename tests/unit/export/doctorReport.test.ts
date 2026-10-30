@@ -4,11 +4,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  formatDoctorOfflineOutput,
-  inspectOfflineOutput,
-} from "../../../server/export/doctorReport.ts";
-import { verifyGeneratedOutput } from "../../../server/export/verifyOutput.ts";
+import { formatDoctorOfflineOutput, inspectOfflineOutput } from "#server/export/doctorReport.ts";
+import { verifyGeneratedOutput } from "#server/export/verifyOutput.ts";
+
 import { driftOutputDiagnosticCount, writeValidOutputFixture } from "../../fixtures/output.ts";
 
 const temporaryDirectories: string[] = [];

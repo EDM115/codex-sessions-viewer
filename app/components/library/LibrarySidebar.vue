@@ -1,22 +1,10 @@
 <script setup lang="ts">
 import { PhFunnel, PhX } from "@phosphor-icons/vue";
-import { computed } from "vue";
 
 import type { ConversationScope } from "#shared/types/conversation.ts";
 import type { LibraryEntry } from "#shared/types/library.ts";
 import type { SearchHit } from "#shared/types/repository.ts";
-
-import { useOptionalLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
-import UiButton from "../ui/UiButton.vue";
-import UiDisclosure from "../ui/UiDisclosure.vue";
-import UiIconButton from "../ui/UiIconButton.vue";
-import UiTabs, { type UiTabItem } from "../ui/UiTabs.vue";
-import UiTextField from "../ui/UiTextField.vue";
-import LibraryEmptyState from "./LibraryEmptyState.vue";
-import LibraryProjectTree from "./LibraryProjectTree.vue";
-import LibrarySearchResults from "./LibrarySearchResults.vue";
-import LibrarySessionList from "./LibrarySessionList.vue";
-import LibrarySkeleton from "./LibrarySkeleton.vue";
+import type { UiTabItem } from "~/components/ui/UiTabs.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -152,7 +140,7 @@ function updateMedia(event: Event): void {
       :model-value="query"
       label="Search sessions"
       type="search"
-      placeholder="Prompt, response, path…"
+      :placeholder="searchExactTurns ? 'Prompt, response, path…' : 'Chat title or project…'"
       helper="Search is scoped to the selected tab."
       @update:model-value="emit('update:query', $event)"
     />
@@ -203,10 +191,21 @@ function updateMedia(event: Event): void {
       <span class="tabular">{{ settledTotal }}</span>
     </div>
     <p class="visually-hidden" aria-live="polite" aria-atomic="true">{{ announcement }}</p>
-    <p v-if="searching && !searchExactTurns" class="library-sidebar__boundary">
-      <PhFunnel :size="15" weight="regular" aria-hidden="true" /> Transcript search was not included
-      in this export; matching session metadata only.
-    </p>
+    <div v-if="searching && !searchExactTurns" class="library-sidebar__progressive-search">
+      <p class="library-sidebar__boundary">
+        <PhFunnel :size="15" weight="regular" aria-hidden="true" /> Matching chat titles and
+        projects.
+      </p>
+      <UiButton
+        v-if="workspace?.supportsContentSearch"
+        variant="quiet"
+        @click="workspace.updateQuery('search', 'content')"
+        >Search transcript content</UiButton
+      >
+      <p v-else-if="mode === 'static'" class="library-sidebar__boundary">
+        Transcript search was not included in this export.
+      </p>
+    </div>
     <div
       v-else-if="searching && searchExactTurns && mode === 'live'"
       class="library-sidebar__progressive-search"
@@ -214,6 +213,20 @@ function updateMedia(event: Event): void {
       <p class="library-sidebar__boundary">
         <PhFunnel :size="15" weight="regular" aria-hidden="true" /> Exact results currently cover
         prepared conversations.
+      </p>
+      <UiButton variant="quiet" @click="workspace?.updateQuery('search', '')"
+        >Search titles and projects</UiButton
+      >
+      <p v-if="deepSearchJob && canStartDeepSearch" role="status" class="library-sidebar__boundary">
+        {{
+          deepSearchJob.state === "cancelled"
+            ? "Search cancelled."
+            : deepSearchJob.state === "failed"
+              ? "Search failed."
+              : "Search finished."
+        }}
+        {{ deepSearchJob.completed }} indexed, {{ deepSearchJob.failed }} unavailable of
+        {{ deepSearchJob.total }} requested conversations. Results cover available indexed content.
       </p>
       <UiButton v-if="canStartDeepSearch" variant="quiet" @click="workspace?.startDeepSearch()"
         >Search unloaded conversations</UiButton

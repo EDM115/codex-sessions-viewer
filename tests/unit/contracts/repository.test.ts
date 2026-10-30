@@ -1,19 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  conversationSummarySchema,
-  sourceFingerprintSchema,
-} from "../../../shared/types/conversation.ts";
+import { conversationSummarySchema, sourceFingerprintSchema } from "#shared/types/conversation.ts";
 import {
   conversationListItemSchema,
   conversationProjectSchema,
   preparationResultSchema,
-} from "../../../shared/types/library.ts";
+} from "#shared/types/library.ts";
 import {
   repositoryCapabilitiesForMode,
   turnNavigatorResponseSchema,
   viewerInvalidationSchema,
-} from "../../../shared/types/repository.ts";
+} from "#shared/types/repository.ts";
 
 function summary() {
   return {

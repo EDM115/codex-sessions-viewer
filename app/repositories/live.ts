@@ -1,3 +1,4 @@
+import { publishFaviconAvailability } from "#shared/content/faviconAvailability.ts";
 import { approvalEvidenceResultSchema } from "#shared/types/approvals.ts";
 import {
   conversationSummarySchema,
@@ -40,7 +41,6 @@ import {
   type TurnChunkQuery,
   type ViewerInvalidation,
 } from "#shared/types/repository.ts";
-import { publishFaviconAvailability } from "~/components/content/faviconAvailability.ts";
 
 export interface RepositoryRequesterOptions extends RepositoryRequestOptions {
   method?: "GET" | "POST" | "DELETE";
@@ -263,6 +263,12 @@ export class LiveApiConversationRepository implements ConversationRepository {
     return `/api/favicons/${base64Url(origin)}`;
   }
 
+  async resolveLinkPreview(url: string, options: RepositoryRequestOptions = {}) {
+    return linkPreviewSchema.parse(
+      await this.requester("/api/link-previews", { ...options, method: "POST", body: { url } }),
+    );
+  }
+
   subscribe(listener: (event: ViewerInvalidation) => void): () => void {
     if (typeof EventSource === "undefined") {
       return () => undefined;
@@ -304,3 +310,4 @@ export class LiveApiConversationRepository implements ConversationRepository {
     };
   }
 }
+import { linkPreviewSchema } from "#shared/types/linkPreview.ts";

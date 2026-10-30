@@ -1,14 +1,4 @@
-import {
-  computed,
-  inject,
-  nextTick,
-  provide,
-  reactive,
-  ref,
-  watch,
-  type InjectionKey,
-  type Ref,
-} from "vue";
+import { type InjectionKey, type Ref } from "vue";
 
 import type { ConversationScope } from "#shared/types/conversation.ts";
 import type { LibraryEntry, CatalogProjectGroup, DeepSearchJob } from "#shared/types/library.ts";
@@ -22,9 +12,8 @@ import {
   type SessionListQuery,
   type ViewerRuntimeStatus,
 } from "#shared/types/repository.ts";
-
-import { createConversationRepository } from "../repositories/index.ts";
-import type { RepositoryRequester } from "../repositories/live.ts";
+import { createConversationRepository } from "~/repositories/index.ts";
+import type { RepositoryRequester } from "~/repositories/live.ts";
 
 export interface LibraryPayload {
   counts: Record<ConversationScope, number>;
@@ -76,6 +65,7 @@ export interface LibraryWorkspaceState {
   runtimeStatus: Ref<ViewerRuntimeStatus>;
   scope: Readonly<Ref<ConversationScope>>;
   searchExactTurns: boolean;
+  supportsContentSearch: boolean;
   selectedId: Readonly<Ref<string | null>>;
   settledTotal: Ref<number>;
   sidebarOpen: Ref<boolean>;
@@ -103,21 +93,18 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
   const route = useRoute();
   const router = useRouter();
   const runtimeConfig = useRuntimeConfig();
-  const requestFetch = useRequestFetch() as unknown as (
-    path: string,
-    options: {
-      body?: unknown;
-      method?: "GET" | "POST" | "DELETE";
-      signal?: AbortSignal;
-    },
-  ) => Promise<unknown>;
+  const requestFetch = useRequestFetch();
   const mode: RepositoryMode = runtimeConfig.public.viewerMode === "static" ? "static" : "live";
-  const searchExactTurns = mode === "live" || runtimeConfig.public.pagefindEnabled;
+  const supportsContentSearch = mode === "live" || runtimeConfig.public.pagefindEnabled;
+  const searchExactTurns = computed(
+    () => supportsContentSearch && route.query["search"] === "content",
+  );
   const requester: RepositoryRequester = (path, options = {}) =>
-    requestFetch(path, {
-      ...(options.body === undefined ? {} : { body: options.body }),
-      ...(options.method === undefined ? {} : { method: options.method }),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    requestFetch<unknown, string, "get" | "post" | "delete">(path, {
+      method: options.method === "POST" ? "post" : options.method === "DELETE" ? "delete" : "get",
+      signal: options.signal,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
     });
   const repository = createConversationRepository(mode, requester);
 
@@ -179,9 +166,11 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
       { active: 0, archived: 0 },
     );
     const searchPage =
-      searching && searchExactTurns ? await repository.search(searchQuery(cursor), options) : null;
+      searching && searchExactTurns.value
+        ? await repository.search(searchQuery(cursor), options)
+        : null;
     const libraryPage =
-      searching && !searchExactTurns
+      searching && !searchExactTurns.value
         ? await repository.listSessions(listQuery(cursor), options)
         : null;
     return {
@@ -274,6 +263,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
   let controller: AbortController | null = null;
   let unsubscribe: () => void = () => undefined;
   let generation = 0;
+  let deepSearchGeneration = 0;
 
   function hydrate(payload: LibraryPayload, append = false): void {
     initialized = true;
@@ -487,16 +477,32 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     if (query.value.trim() === "") {
       return;
     }
-    deepSearchJob.value = await repository.startDeepSearch(searchQuery());
+    const previous = deepSearchJob.value;
+    const requestGeneration = ++deepSearchGeneration;
+    if (previous && (previous.state === "queued" || previous.state === "running")) {
+      await repository.cancelDeepSearch(previous.id);
+    }
+    if (requestGeneration !== deepSearchGeneration) {
+      return;
+    }
+    const job = await repository.startDeepSearch(searchQuery());
+    if (requestGeneration !== deepSearchGeneration) {
+      await repository.cancelDeepSearch(job.id);
+      return;
+    }
+    deepSearchJob.value = job;
   }
 
   async function cancelDeepSearch(): Promise<void> {
+    deepSearchGeneration += 1;
     const job = deepSearchJob.value;
     if (job === null) {
       return;
     }
     await repository.cancelDeepSearch(job.id);
-    deepSearchJob.value = { ...job, state: "cancelled", updatedAt: new Date().toISOString() };
+    if (deepSearchJob.value?.id === job.id) {
+      deepSearchJob.value = { ...job, state: "cancelled", updatedAt: new Date().toISOString() };
+    }
   }
 
   async function closeSidebar(): Promise<void> {
@@ -778,7 +784,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
 
   function sessionDestination(id: string, turnId?: string) {
     const navigationQuery: Record<string, string> = {};
-    for (const name of ["scope", "q", "model", "cwd", "tool", "media"]) {
+    for (const name of ["scope", "q", "search", "model", "cwd", "tool", "media"]) {
       const value = stringQuery(name);
       if (value !== "") {
         navigationQuery[name] = value;
@@ -794,7 +800,13 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     };
   }
 
-  watch([scope, query, model, cwd, tool, hasMedia], () => scheduleRefresh(true));
+  watch([scope, query, model, cwd, tool, hasMedia, searchExactTurns], () => {
+    void cancelDeepSearch().catch((reason: unknown) => {
+      error.value = errorMessage(reason);
+    });
+    deepSearchJob.value = null;
+    scheduleRefresh(true);
+  });
 
   function start(): void {
     stopped = false;
@@ -810,7 +822,11 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
         deepSearchJob.value !== null &&
         event.ids.includes(deepSearchJob.value.id)
       ) {
+        const requestGeneration = deepSearchGeneration;
         void repository.getDeepSearch(deepSearchJob.value.id).then((job) => {
+          if (requestGeneration !== deepSearchGeneration || deepSearchJob.value?.id !== job.id) {
+            return undefined;
+          }
           deepSearchJob.value = job;
           if (job.state === "completed") {
             scheduleRefresh();
@@ -826,6 +842,7 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
   }
 
   function stop(): void {
+    void cancelDeepSearch().catch(() => undefined);
     stopped = true;
     refreshGeneration += 1;
     pageGeneration += 1;
@@ -872,7 +889,10 @@ export function createLibraryWorkspace(): LibraryWorkspaceState {
     repository,
     runtimeStatus,
     scope,
-    searchExactTurns,
+    get searchExactTurns() {
+      return searchExactTurns.value;
+    },
+    supportsContentSearch,
     selectedId,
     settledTotal,
     sidebarOpen,

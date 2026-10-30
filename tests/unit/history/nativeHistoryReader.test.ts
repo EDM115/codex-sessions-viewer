@@ -5,17 +5,15 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import {
-  readNativeHistoryPage,
-  readNativeTurnItems,
-} from "../../../server/history/nativeHistoryReader.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { readNativeHistoryPage, readNativeTurnItems } from "#server/history/nativeHistoryReader.ts";
 import {
   qualifyNativeProjection,
   VerifiedProjectionStore,
-} from "../../../server/history/nativeProjectionQualification.ts";
-import { validateSourceRanges } from "../../../server/ingestion/sourceGeneration.ts";
-import { snapshotHistoryDatabase } from "../../../server/metadata/historySnapshot.ts";
+} from "#server/history/nativeProjectionQualification.ts";
+import { validateSourceRanges } from "#server/ingestion/sourceGeneration.ts";
+import { snapshotHistoryDatabase } from "#server/metadata/historySnapshot.ts";
+
 import {
   addItem,
   addTurn,

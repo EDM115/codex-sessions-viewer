@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, useId } from "vue";
-
 const props = withDefaults(
   defineProps<{
     hoverDelay?: number;

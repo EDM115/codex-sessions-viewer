@@ -1,4 +1,7 @@
-export const CACHE_SCHEMA_VERSION = 7;
+export const CACHE_SCHEMA_VERSION = 8;
+export const LINK_PREVIEW_SCHEMA_SQL = `
+  CREATE TABLE website_previews (url TEXT PRIMARY KEY, payload_json TEXT NOT NULL, fetched_at INTEGER NOT NULL) STRICT;
+`;
 export const LOGICAL_VISIBILITY_SCHEMA_SQL = `
   ALTER TABLE raw_events ADD COLUMN logical_visibility TEXT NOT NULL DEFAULT 'unresolved' CHECK (logical_visibility IN ('visible', 'context-only', 'unresolved'));
 `;

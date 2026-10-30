@@ -4,15 +4,16 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { getCachedAsset } from "../../../server/cache/assetStore.ts";
+import { getCachedAsset } from "#server/cache/assetStore.ts";
 import {
   getCachedSession,
   replaceCachedSession,
   updateCachedSessionRichContent,
-} from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { prepareConversationForExport } from "../../../server/export/prepareConversation.ts";
-import type { RichTextNode } from "../../../shared/types/richText.ts";
+} from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { prepareConversationForExport } from "#server/export/prepareConversation.ts";
+import type { RichTextNode } from "#shared/types/richText.ts";
+
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 const temporaryDirectories: string[] = [];
@@ -102,8 +103,16 @@ describe("conversation export preparation", () => {
       expect(reasoningNodes).toEqual(
         expect.arrayContaining([expect.objectContaining({ type: "element", tagName: "strong" })]),
       );
-      expect(prepared.assetIds).toEqual(new Set(["asset-raw-870-0", "asset-image-1"]));
-      expect(getCachedAsset(database, "asset-raw-870-0")).toMatchObject({ status: "error" });
+      const localImage = conversation.turns
+        .flatMap(({ activities }) => activities)
+        .find((activity) => activity.kind === "media" && activity.assetId !== "asset-image-1");
+      if (!localImage || localImage.kind !== "media") {
+        throw new Error("Expected source-qualified local image");
+      }
+      expect(localImage.rawEventIds[0]).toMatch(/^raw-v2-[a-f0-9]{64}$/u);
+      expect(localImage.assetId).toBe(`asset-${localImage.rawEventIds[0]}-0`);
+      expect(prepared.assetIds).toEqual(new Set([localImage.assetId, "asset-image-1"]));
+      expect(getCachedAsset(database, localImage.assetId)).toMatchObject({ status: "error" });
       expect(getCachedAsset(database, "asset-image-1")).toMatchObject({ status: "error" });
       expect(prepared.faviconResults).toEqual([
         expect.objectContaining({ origin: "https://nuxt.com", status: "fallback", pending: false }),
@@ -130,7 +139,7 @@ describe("conversation export preparation", () => {
         ]),
       );
       expect(reused.faviconOrigins).toEqual(new Set(["https://nuxt.com"]));
-      expect(reused.assetIds).toEqual(new Set(["asset-raw-870-0", "asset-image-1"]));
+      expect(reused.assetIds).toEqual(new Set([localImage.assetId, "asset-image-1"]));
     } finally {
       database.close();
     }

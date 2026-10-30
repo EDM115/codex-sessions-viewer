@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { CliExportProgress } from "../../../server/export/exportProgress.ts";
+import { CliExportProgress } from "#server/export/exportProgress.ts";
 
 afterEach(() => {
   vi.useRealTimers();

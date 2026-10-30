@@ -4,7 +4,7 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { constants, createZstdDecompress } from "node:zlib";
 
-import type { RolloutRef } from "../../shared/types/conversation.ts";
+import type { RolloutRef } from "#shared/types/conversation.ts";
 
 export const ZSTD_DECODER_VERSION = `node-${process.versions.node}-zstd-${process.versions["zstd"]}-jsonl-v1`;
 export interface DecodeLimits {

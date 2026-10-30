@@ -5,12 +5,13 @@ import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { catalogSession, readCatalogLibrary } from "../../../server/cache/catalogStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import { LiveViewerRuntime } from "../../../server/live/viewerRuntime.ts";
-import { readCatalogMetadata } from "../../../server/metadata/catalogMetadata.ts";
-import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
+import { catalogSession, readCatalogLibrary } from "#server/cache/catalogStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { LiveViewerRuntime } from "#server/live/viewerRuntime.ts";
+import { readCatalogMetadata } from "#server/metadata/catalogMetadata.ts";
+import type { ViewerInvalidation } from "#shared/types/repository.ts";
+
 import { createStateDatabase } from "../source-boundary/fixtures.ts";
 
 const sourceIo = vi.hoisted(() => ({ paths: [] as string[] }));

@@ -1,5 +1,5 @@
-import type { JsonObject, JsonValue, UnknownActivity } from "../../shared/types/conversation.ts";
-import { codexEventType, type CodexEvent } from "./eventSchema.ts";
+import { codexEventType, type CodexEvent } from "#server/normalization/eventSchema.ts";
+import type { JsonObject, JsonValue, UnknownActivity } from "#shared/types/conversation.ts";
 
 const omittedKeys = new Set(["__proto__", "constructor", "prototype"]);
 const redactedKeys = new Set([

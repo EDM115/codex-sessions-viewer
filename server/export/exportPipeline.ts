@@ -6,13 +6,24 @@ import type { DatabaseSync } from "node:sqlite";
 
 import type { CustomRecord } from "pagefind";
 
-import { catalogSession } from "#server/cache/catalogStore.ts";
+import {
+  catalogSession,
+  readCatalogLibrary,
+  storeValidatedCatalogClassification,
+} from "#server/cache/catalogStore.ts";
 import {
   getCachedSession,
   updateCachedSessionRichContent,
 } from "#server/cache/conversationStore.ts";
 import { openCacheDatabase } from "#server/cache/database.ts";
-import { SessionCacheUpdater } from "#server/cache/sourceManifest.ts";
+import {
+  SessionCacheUpdater,
+  CACHE_PARSER_VERSION,
+  getSourceManifestEntry,
+} from "#server/cache/sourceManifest.ts";
+import { storeEmbeddedMedia } from "#server/content/extractMedia.ts";
+import { prepareHistoryAttachments } from "#server/content/historyAttachments.ts";
+import { LinkPreviewService } from "#server/content/linkPreviews.ts";
 import { loadServerViewerConfig, resolvedTrustedMediaRoots } from "#server/core/config.ts";
 import type { ViewerPaths } from "#server/core/paths.ts";
 import {
@@ -39,6 +50,7 @@ import {
   type PreparedConversationExport,
   type PrepareConversationExportOptions,
 } from "#server/export/prepareConversation.ts";
+import { publishLinkPreviews } from "#server/export/publishLinkPreviews.ts";
 import { writeConversationExport } from "#server/export/writeConversationExport.ts";
 import {
   publishCachedContent,
@@ -46,16 +58,26 @@ import {
   reconcileStaticSessionArtifacts,
   writeStaticPayloads,
 } from "#server/export/writeStaticPayloads.ts";
+import { completeHistoryPage } from "#server/history/completeHistory.ts";
+import { readCompleteRollout } from "#server/ingestion/completeRollout.ts";
 import { discoverSources } from "#server/ingestion/discoverSources.ts";
+import { rolloutRefFromSource } from "#server/ingestion/rolloutIdentity.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
 import { selectSessionSources } from "#server/ingestion/selectSessionSources.ts";
-import { readGlobalState } from "#server/metadata/globalState.ts";
-import { readSessionIndex, type SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
 import {
-  snapshotStateDatabase,
-  type StateMetadataSnapshot,
-} from "#server/metadata/stateSnapshot.ts";
+  parseSessionMetaBytes,
+  CATALOG_EVIDENCE_VERSION,
+} from "#server/ingestion/sessionMetaPrefix.ts";
+import { refreshLiveCatalog } from "#server/live/catalogBuilder.ts";
+import {
+  readCatalogMetadata,
+  type CatalogMetadataSnapshot,
+} from "#server/metadata/catalogMetadata.ts";
+import type { SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import type { StateMetadataSnapshot } from "#server/metadata/stateSnapshot.ts";
 import {
   classifyNormalizedSession,
+  normalizedSessionMeta,
   isThreadVisible,
 } from "#server/metadata/threadClassification.ts";
 import { resolveThreadFields } from "#server/metadata/threadFields.ts";
@@ -70,7 +92,8 @@ import {
 } from "#server/normalization/guardianEvidence.ts";
 import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
 import { resolveSubagentTopology } from "#server/normalization/subagentTopology.ts";
-import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import type { HistoryPage } from "#shared/types/history.ts";
 
 export interface StaticGenerateInput {
   outputRoot: string;
@@ -102,6 +125,7 @@ export interface RichContentFailure {
 }
 
 export interface RunStaticExportOptions {
+  enrichPreviews?: boolean | undefined;
   cwd?: string | undefined;
   codexHome?: string | undefined;
   outputRoot?: string | undefined;
@@ -136,6 +160,7 @@ export interface StaticExportSummary {
 }
 
 interface ExportMetadata {
+  catalogMetadata: CatalogMetadataSnapshot;
   sessionIndexEntries: SessionIndexEntry[];
   stateSnapshot: StateMetadataSnapshot | null;
   diagnostics: ViewerDiagnostic[];
@@ -179,35 +204,33 @@ function addSessionDiagnostics(
 }
 
 async function loadExportMetadata(
-  discovery: Awaited<ReturnType<typeof discoverSources>>,
+  codexHome: string,
   paths: ViewerPaths,
   progress: ExportProgressSink,
 ): Promise<ExportMetadata> {
-  const diagnostics: ViewerDiagnostic[] = [];
-  let sessionIndexEntries: SessionIndexEntry[] = [];
-  let stateSnapshot: StateMetadataSnapshot | null = null;
-  if (discovery.metadata.sessionIndex !== null) {
-    progress.status("Reading the Codex session index");
-    const result = await readSessionIndex(discovery.metadata.sessionIndex);
-    sessionIndexEntries = result.entries;
-    diagnostics.push(...result.diagnostics);
-  }
-  if (discovery.metadata.globalState !== null) {
-    progress.status("Reading global Codex metadata");
-    const result = await readGlobalState(discovery.metadata.globalState);
-    diagnostics.push(...result.diagnostics);
-  }
-  if (discovery.metadata.stateDatabase !== null) {
-    progress.status("Creating a stable viewer-owned state snapshot");
-    const result = await snapshotStateDatabase({
-      sourceDatabase: discovery.metadata.stateDatabase,
-      sourceWal: discovery.metadata.stateWal ?? `${discovery.metadata.stateDatabase}-wal`,
-      snapshotRoot: join(paths.cacheDir, "state-snapshots"),
-    });
-    stateSnapshot = result.metadata;
-    diagnostics.push(...result.diagnostics);
-  }
-  return { sessionIndexEntries, stateSnapshot, diagnostics };
+  progress.status("Reading the metadata catalog through a viewer-owned snapshot");
+  const catalogMetadata = await readCatalogMetadata(
+    codexHome,
+    join(paths.cacheDir, "catalog-snapshots"),
+  );
+  return {
+    catalogMetadata,
+    sessionIndexEntries: catalogMetadata.sessionIndex,
+    stateSnapshot:
+      catalogMetadata.stateAuthority === "unavailable"
+        ? null
+        : {
+            threads: catalogMetadata.threads,
+            threadsComplete: catalogMetadata.threadsComplete,
+            sections: catalogMetadata.sections,
+            spawnEdges: catalogMetadata.spawnEdges,
+            projects: catalogMetadata.projects,
+            attachments: catalogMetadata.attachments,
+            readReceipts: catalogMetadata.readReceipts,
+            ...(catalogMetadata.capabilities ? { capabilities: catalogMetadata.capabilities } : {}),
+          },
+    diagnostics: catalogMetadata.diagnostics,
+  };
 }
 
 async function defaultGenerateRunner(cwd: string, input: StaticGenerateInput): Promise<void> {
@@ -266,10 +289,12 @@ async function prepareConversations(
   conversations: NormalizedSession[];
   assetIds: Set<string>;
   faviconOrigins: Set<string>;
+  previewUrls: Set<string>;
 }> {
   const conversations: NormalizedSession[] = [];
   const assetIds = new Set<string>();
   const faviconOrigins = new Set<string>();
+  const previewUrls = new Set<string>();
   const native = new Map((stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread]));
   const indexNames = new Map(sessionIndexEntries.map((entry) => [entry.id, entry]));
   const classifications = new Map(
@@ -307,6 +332,37 @@ async function prepareConversations(
     const classification = classifications.get(id)!;
     classification.visibility = "unresolved";
     classification.reasons.push("parent-cycle");
+  }
+  for (const [id, classification] of classifications) {
+    const cached = getCachedSession(database, id);
+    const catalog = catalogSession(database, id);
+    const manifest = catalog?.summary.sourcePath
+      ? getSourceManifestEntry(database, catalog.summary.sourcePath)
+      : null;
+    if (!cached || !catalog?.summary.sourcePath || !manifest || manifest.sessionId !== id) {
+      continue;
+    }
+    const meta = parseSessionMetaBytes(
+      catalog.summary.sourcePath,
+      Buffer.from(
+        JSON.stringify({ type: "session_meta", payload: normalizedSessionMeta(cached) }) + "\n",
+      ),
+    ).meta;
+    storeValidatedCatalogClassification(
+      database,
+      id,
+      {
+        version: CATALOG_EVIDENCE_VERSION,
+        origin: "materialized",
+        status: meta ? "found" : "missing",
+        meta,
+        parentThreadIdHint: classification.parentThreadId,
+        classification,
+        freshness: "verified",
+        validatedSha256: manifest.fingerprint.sha256,
+      },
+      { sourceRevision: catalog.sourceRevision, sourcePath: catalog.summary.sourcePath },
+    );
   }
   const guardianIds = new Set(
     [...classifications]
@@ -427,6 +483,9 @@ async function prepareConversations(
         for (const origin of prepared.faviconOrigins) {
           faviconOrigins.add(origin);
         }
+        for (const url of prepared.previewUrls ?? []) {
+          previewUrls.add(url);
+        }
       } catch (error) {
         richContentFailures.push(richContentFailure(cached, "cache", error));
       }
@@ -441,7 +500,7 @@ async function prepareConversations(
     });
     onProgress(sessionIndex + 1, orderedSessionIds.length);
   }
-  return { conversations, assetIds, faviconOrigins };
+  return { conversations, assetIds, faviconOrigins, previewUrls };
 }
 
 function richContentFailure(
@@ -476,7 +535,7 @@ export async function runStaticExport(
   progress.step(`Resolved Codex home: ${config.settings.codexHome}`);
   progress.status("Discovering active and archived Codex sessions");
   const discovery = await discoverSources(config.settings.codexHome);
-  const metadata = await loadExportMetadata(discovery, config.paths, progress);
+  const metadata = await loadExportMetadata(config.settings.codexHome, config.paths, progress);
   const sourceSelection = await selectSessionSources(discovery.rollouts, {
     currentRolloutPaths: new Map(
       (metadata.stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread.rolloutPath]),
@@ -509,9 +568,29 @@ export async function runStaticExport(
   const reusedSessions = new Set<string>();
   const sessionIds = new Set<string>();
   const database = openCacheDatabase(config.paths.cacheDatabase);
+  const rolloutStore = new RolloutStore({
+    cacheDirectory: join(config.paths.cacheDir, "decoded-rollouts"),
+  });
   let pagefindRecordSpool: string | null = null;
   try {
+    await refreshLiveCatalog({
+      database,
+      discovery,
+      sessionIndexEntries: metadata.sessionIndexEntries,
+      globalState: metadata.catalogMetadata.globalState,
+      stateSnapshot: metadata.stateSnapshot,
+      catalogMetadata: metadata.catalogMetadata,
+    });
+    await refreshLiveCatalog({
+      database,
+      discovery: { ...discovery, rollouts: selectedSources },
+      sessionIndexEntries: metadata.sessionIndexEntries,
+      globalState: metadata.catalogMetadata.globalState,
+      stateSnapshot: metadata.stateSnapshot,
+      recoveryBatch: true,
+    });
     const updater = new SessionCacheUpdater(database, {
+      openRollout: (ref, signal) => rolloutStore.open(ref, signal),
       retainLiveSources: false,
       sessionIndexEntries: metadata.sessionIndexEntries,
       stateSnapshot: metadata.stateSnapshot,
@@ -561,6 +640,7 @@ export async function runStaticExport(
     const pagefindRecords: CustomRecord[] | null =
       searchIndex && options.buildSearch !== undefined ? [] : null;
     let pagefindRecordCount = 0;
+    const historyAssetIds = new Set<string>();
     const prepared = await prepareConversations(
       database,
       sessionIds,
@@ -573,11 +653,91 @@ export async function runStaticExport(
       richContentFailures,
       options.prepareConversation ?? prepareConversationForExport,
       async (conversation) => {
+        let history: HistoryPage | undefined;
+        let historySources;
+        try {
+          const ref =
+            sourceSelection.historyGraph.find(
+              (candidate) => candidate.sourcePath === conversation.summary.sourcePath,
+            ) ?? rolloutRefFromSource(conversation.summary.sourcePath, null);
+          const complete = await readCompleteRollout(
+            ref,
+            {
+              async resolve(physical) {
+                const matches = sourceSelection.historyGraph.filter(
+                  (candidate) => candidate.physicalRolloutId === physical,
+                );
+                const plain = matches.filter(
+                  (candidate) => candidate.representation === "plain-jsonl",
+                );
+                const selected = plain.length ? plain : matches;
+                return selected.length === 1 ? selected[0]! : null;
+              },
+            },
+            (source, signal) => rolloutStore.open(source, signal),
+            CACHE_PARSER_VERSION,
+          );
+          history = completeHistoryPage(complete);
+          historySources = complete.segments.map(({ generation }) => generation);
+          if (history.coverage.status !== "complete") {
+            throw new Error("history.unsupported_records");
+          }
+        } catch (error) {
+          const diagnostic = createViewerDiagnostic({
+            code: "source.invalid_jsonl",
+            severity: "warning",
+            area: "export",
+            sessionId: conversation.summary.id,
+            message:
+              "Saved history is incomplete or contains unsupported records, inspect the retained source evidence before treating it as complete.",
+            details: { reason: error instanceof Error ? error.message : "history.export_failed" },
+          });
+          diagnostics.push(diagnostic);
+          addSessionDiagnostics(diagnosticsBySession, conversation.summary.id, [diagnostic]);
+          conversation.summary.diagnosticCount = diagnosticsBySession.get(
+            conversation.summary.id,
+          )!.length;
+        }
         await writeConversationExport(conversation, { generatedRoot });
         await writeStaticPayloads([conversation], {
           generatedRoot,
           writeIndex: false,
           diagnosticsBySession,
+          historyMedia: {
+            cacheScope: JSON.stringify([
+              config.paths.cacheDir,
+              conversation.summary.id,
+              conversation.summary.revision,
+            ]),
+            async storeEmbeddedMedia(sources) {
+              const stored = await storeEmbeddedMedia(database, sources, {
+                assetRoot: join(config.paths.cacheDir, "assets"),
+                sessionId: conversation.summary.id,
+              });
+              for (const source of stored) {
+                historyAssetIds.add(source.assetId);
+              }
+            },
+            async prepareAttachments(attachments) {
+              const nodes = await prepareHistoryAttachments(database, attachments, {
+                assetRoot: join(config.paths.cacheDir, "assets"),
+                sessionId: conversation.summary.id,
+                trustedMediaRoots: resolvedTrustedMediaRoots(config.settings),
+              });
+              for (const node of nodes) {
+                if (node.assetId) {
+                  historyAssetIds.add(node.assetId);
+                }
+              }
+              return nodes;
+            },
+          },
+          ...(history
+            ? {
+                histories: new Map([[conversation.summary.id, history]]),
+                historySources: new Map([[conversation.summary.id, historySources ?? []]]),
+              }
+            : {}),
         });
         if (pagefindSpoolPath !== null) {
           const records = createPagefindTurnRecords([conversation]);
@@ -588,16 +748,39 @@ export async function runStaticExport(
       },
       (completed, total) => progress.statusProgress("Preparing conversations", completed, total),
     );
+    for (const assetId of historyAssetIds) {
+      prepared.assetIds.add(assetId);
+    }
     progress.step(
       `Prepared ${prepared.conversations.length} ${pluralize("conversation", prepared.conversations.length)}${richContentFailures.length === 0 ? "" : ` with ${richContentFailures.length} rich-content ${pluralize("fallback", richContentFailures.length)}`}`,
       failedSessions.size === 0 && richContentFailures.length === 0 ? "success" : "neutral",
     );
 
     const stagingWorkTotal = 4;
+    if (options.enrichPreviews && !options.offline) {
+      const previews = new LinkPreviewService(database, join(config.paths.cacheDir, "previews"), {
+        enabled: true,
+      });
+      try {
+        for (const url of prepared.previewUrls) {
+          // oxlint-disable-next-line no-await-in-loop -- Optional explicit export enrichment is bounded and never runs in offline mode
+          await previews.resolve(url).catch(() => undefined);
+        }
+      } finally {
+        await previews.close();
+      }
+    }
+    const previewPublication = {
+      cacheRoot: join(config.paths.cacheDir, "previews"),
+      generatedRoot,
+      urls: prepared.previewUrls,
+    };
+    await publishLinkPreviews(database, previewPublication);
     progress.statusProgress("Writing the generated session index", 0, stagingWorkTotal);
     await writeStaticPayloads(prepared.conversations, {
       generatedRoot,
       writeSessions: false,
+      catalog: readCatalogLibrary(database)!,
     });
     await writeOutputFile(
       generatedRoot,
@@ -635,6 +818,10 @@ export async function runStaticExport(
     try {
       progress.status("Preparing isolated prerender data");
       await publishGeneratedExportFiles(generatedRoot, outputStaging.publicInputRoot);
+      await publishLinkPreviews(database, {
+        ...previewPublication,
+        publicRoot: outputStaging.publicInputRoot,
+      });
       await publishCachedContent(database, {
         generatedRoot,
         publicRoot: outputStaging.publicInputRoot,
@@ -659,6 +846,10 @@ export async function runStaticExport(
       const publicationWorkTotal = 2;
       progress.statusProgress("Mirroring generated conversations", 0, publicationWorkTotal);
       await publishGeneratedExportFiles(generatedRoot, outputStaging.publicRoot);
+      await publishLinkPreviews(database, {
+        ...previewPublication,
+        publicRoot: outputStaging.publicRoot,
+      });
       progress.statusProgress("Preparing referenced assets and favicons", 1, publicationWorkTotal);
       const published = await publishCachedContent(database, {
         generatedRoot,
@@ -731,6 +922,7 @@ export async function runStaticExport(
       await discardOutputStagingDirectories(outputStaging);
     }
   } finally {
+    await rolloutStore.close();
     database.close();
     if (pagefindRecordSpool !== null) {
       await rm(pagefindRecordSpool, { force: true });

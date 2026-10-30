@@ -2,13 +2,6 @@ import { basename, extname, resolve, relative, isAbsolute, sep } from "node:path
 import type { DatabaseSync } from "node:sqlite";
 
 import {
-  catalogProjects,
-  membershipProject,
-  resolveThreadMembershipFromSources,
-} from "../../shared/library/projectIdentity.ts";
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { CatalogSessionMetadata, ConversationProject } from "../../shared/types/library.ts";
-import {
   listCatalogProjects,
   listAllCatalogSessions,
   readCatalogLibrary,
@@ -17,15 +10,16 @@ import {
   type CatalogSessionInput,
   type CatalogSessionRecord,
   type CatalogSessionKind,
-} from "../cache/catalogStore.ts";
+} from "#server/cache/catalogStore.ts";
+import { withCacheTransaction } from "#server/cache/database.ts";
 import {
   CACHE_PARSER_VERSION,
   refreshUnchangedSourceManifest,
   type StableJsonlReader,
-} from "../cache/sourceManifest.ts";
-import type { SourceDiscoveryResult } from "../ingestion/discoverSources.ts";
-import { parseRolloutFilename } from "../ingestion/rolloutIdentity.ts";
-import { selectSessionSources } from "../ingestion/selectSessionSources.ts";
+} from "#server/cache/sourceManifest.ts";
+import type { SourceDiscoveryResult } from "#server/ingestion/discoverSources.ts";
+import { parseRolloutFilename } from "#server/ingestion/rolloutIdentity.ts";
+import { selectSessionSources } from "#server/ingestion/selectSessionSources.ts";
 import {
   CATALOG_EVIDENCE_VERSION,
   observeSessionMetaSource,
@@ -33,19 +27,26 @@ import {
   type SessionMetaPrefix,
   type SessionMetaPrefixObservation,
   type SessionMetaPrefixResult,
-} from "../ingestion/sessionMetaPrefix.ts";
-import type { CatalogMetadataSnapshot } from "../metadata/catalogMetadata.ts";
-import type { GlobalStateMetadata } from "../metadata/globalState.ts";
-import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
-import { resolveSidebarMetadata } from "../metadata/sidebarMetadata.ts";
-import type { StateMetadataSnapshot, StateThreadMetadata } from "../metadata/stateSnapshot.ts";
+} from "#server/ingestion/sessionMetaPrefix.ts";
+import type { CatalogMetadataSnapshot } from "#server/metadata/catalogMetadata.ts";
+import type { GlobalStateMetadata } from "#server/metadata/globalState.ts";
+import type { SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import { resolveSidebarMetadata } from "#server/metadata/sidebarMetadata.ts";
+import type { StateMetadataSnapshot, StateThreadMetadata } from "#server/metadata/stateSnapshot.ts";
 import {
   classifyThreadMetadata,
   classificationKind,
   isThreadVisible,
-} from "../metadata/threadClassification.ts";
-import { catalogMetadataRevision, resolveThreadFields } from "../metadata/threadFields.ts";
-import { classifySessionStructure } from "../normalization/subagentTopology.ts";
+} from "#server/metadata/threadClassification.ts";
+import { catalogMetadataRevision, resolveThreadFields } from "#server/metadata/threadFields.ts";
+import { classifySessionStructure } from "#server/normalization/subagentTopology.ts";
+import {
+  catalogProjects,
+  membershipProject,
+  resolveThreadMembershipFromSources,
+} from "#shared/library/projectIdentity.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import type { CatalogSessionMetadata, ConversationProject } from "#shared/types/library.ts";
 
 export interface SessionMetaClassification {
   kind: CatalogSessionKind;
@@ -963,7 +964,10 @@ export async function refreshLiveCatalog(
     return {
       row,
       membership,
-      retainMembership,
+      retainMembership:
+        retainMembership ||
+        (native?.freshness.state === "retained" &&
+          (membership.source === "native" || membership.source === "legacy-root")),
       retainedSection:
         (metadataOnly || options.recoveryBatch === true) && !nativeThread ? previous : undefined,
     };
@@ -1056,26 +1060,27 @@ export async function refreshLiveCatalog(
   }
   const changedIds = upsertCatalogSessions(options.database, rows, currentRows);
   if (native) {
-    for (const thread of native.threads) {
+    withCacheTransaction(options.database, () => {
+      const ownership = options.database.prepare(
+        "INSERT INTO catalog_native_ownership (id, authority) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET authority = excluded.authority WHERE catalog_native_ownership.authority <> excluded.authority",
+      );
+      for (const thread of native.threads) {
+        ownership.run(thread.id, native.stateAuthority);
+      }
       options.database
         .prepare(
-          "INSERT INTO catalog_native_ownership (id, authority) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET authority = excluded.authority",
+          "INSERT INTO catalog_metadata_status (id, payload_json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json WHERE catalog_metadata_status.payload_json <> excluded.payload_json",
         )
-        .run(thread.id, native.stateAuthority);
-    }
-    options.database
-      .prepare(
-        "INSERT INTO catalog_metadata_status (id, payload_json) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET payload_json = excluded.payload_json",
-      )
-      .run(
-        JSON.stringify({
-          codexHome: native.codexHome,
-          freshness: native.freshness,
-          generations: native.generations,
-          stateAuthority: native.stateAuthority,
-          threadsComplete: native.threadsComplete,
-        }),
-      );
+        .run(
+          JSON.stringify({
+            codexHome: native.codexHome,
+            freshness: native.freshness,
+            generations: native.generations,
+            stateAuthority: native.stateAuthority,
+            threadsComplete: native.threadsComplete,
+          }),
+        );
+    });
   }
   const groupsChanged = writeCatalogLibrary(options.database, {
     projects,
@@ -1102,7 +1107,10 @@ export async function refreshLiveCatalog(
           ? (thread.sectionPosition ?? null)
           : (retainedSection?.sectionPosition ?? null),
         membershipFreshness: retainMembership ? "retained-unvalidated" : "fresh",
-        sectionFreshness: retainedSection ? "retained-unvalidated" : "fresh",
+        sectionFreshness:
+          retainedSection || (thread && native?.freshness.state === "retained")
+            ? "retained-unvalidated"
+            : "fresh",
         pinned: row.summary.pinned,
         recencyAt:
           thread?.recencyAtMs ??

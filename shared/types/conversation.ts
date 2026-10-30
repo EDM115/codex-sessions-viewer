@@ -1,6 +1,6 @@
 import * as z from "zod";
 
-import { richTextDocumentSchema, type RichTextDocument } from "./richText.ts";
+import { richTextDocumentSchema, type RichTextDocument } from "#shared/types/richText.ts";
 
 export const MAX_MEDIA_BYTES = 64 * 1024 * 1024;
 export const MAX_MEDIA_REFERENCE_PREVIEW_LENGTH = 160;
@@ -17,6 +17,7 @@ export interface JsonObject {
 }
 
 export interface SourceFingerprint {
+  // Physical encoded-file observation, decoded sizes/ranges/digest belong to SourceGeneration
   path: string;
   size: number;
   mtimeMs: number;

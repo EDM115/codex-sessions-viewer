@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { adaptNativeThreadItem } from "../../../server/history/nativeItemAdapter.ts";
-import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
-import { historyWindowPresentation } from "../../../shared/timeline/historyPresentation.ts";
-import type { JsonObject, JsonValue } from "../../../shared/types/conversation.ts";
-import type { HistoryTurnWindow } from "../../../shared/types/history.ts";
+import { adaptNativeThreadItem } from "#server/history/nativeItemAdapter.ts";
+import { normalizeSession } from "#server/normalization/normalizeSession.ts";
+import { historyWindowPresentation } from "#shared/timeline/historyPresentation.ts";
+import type { JsonObject, JsonValue } from "#shared/types/conversation.ts";
+import type { HistoryTurnWindow } from "#shared/types/history.ts";
 
 describe("source-qualified outcomes on both active consumers", () => {
   it.each([

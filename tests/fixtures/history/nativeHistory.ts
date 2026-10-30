@@ -2,8 +2,8 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import type { ResolvedRolloutLineage } from "../../../server/ingestion/rolloutLineage.ts";
-import type { RolloutRef } from "../../../shared/types/conversation.ts";
+import type { ResolvedRolloutLineage } from "#server/ingestion/rolloutLineage.ts";
+import type { RolloutRef } from "#shared/types/conversation.ts";
 
 export const HISTORY_FIXTURE_SCHEMA = `
 CREATE TABLE thread_history_projection_state(thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER NOT NULL, next_rollout_ordinal INTEGER NOT NULL);

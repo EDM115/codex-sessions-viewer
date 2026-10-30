@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { JsonlStreamParser, type JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
+import { JsonlStreamParser, type JsonlRecord } from "#server/ingestion/jsonlStream.ts";
 import {
   createSessionNormalizer,
   normalizeSession,
-} from "../../../server/normalization/normalizeSession.ts";
+} from "#server/normalization/normalizeSession.ts";
 
 function records(payloads: unknown[]): JsonlRecord[] {
   const result: JsonlRecord[] = [];

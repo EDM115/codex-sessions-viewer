@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 
-import { jsonValueSchema } from "../../shared/types/conversation.ts";
-import type { JsonlRecord } from "./jsonlStream.ts";
-import type { SeekableRollout } from "./rolloutStream.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import type { SeekableRollout } from "#server/ingestion/rolloutStream.ts";
+import { jsonValueSchema } from "#shared/types/conversation.ts";
 export interface JsonlWindowOptions {
   endExclusive: number;
   maxBytes?: number;

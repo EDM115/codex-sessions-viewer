@@ -6,8 +6,8 @@ The viewer never writes, renames, locks, migrates, or deletes anything under the
 
 ## Requirements
 
-- Node.js 26; the project pins Node 26.8.1 for its commands
-- PNPM 11.26.0
+- Node.js 26 (the project pins Node 26.12.1 for its commands)
+- PNPM 11.28.9
 - Windows, macOS, or Linux; Windows is the primary acceptance platform
 
 Install the exact locked dependencies:
@@ -27,7 +27,7 @@ pnpm build
 pnpm live
 ```
 
-Then open `http://127.0.0.1:3000`. Startup builds only a byte-bounded metadata catalog; it does not normalize every transcript. Project folders and root-conversation counts become available from that catalog, each list page contains at most 20 roots, and one visible or explicitly opened cold session is prepared at a time. The persistent desktop library remains usable while an opened conversation shows its loading skeleton.
+Then open `http://127.0.0.1:3000`. Startup serves a metadata catalog without enumerating or reading rollouts when usable metadata is available. Project folders, projectless Recents and root counts are independent of transcript preparation. Selecting a chat reads a bounded recent history page, older turns and large-turn items load separately. Missing metadata enters an explicitly qualified recovery path. The persistent library remains usable while selected content loads.
 
 Build an offline archive without making favicon requests:
 
@@ -47,30 +47,33 @@ Then open `http://127.0.0.1:3000`. Static output requires this local HTTP server
 pnpm live [--codex-home <path>] [--media-root <path>] [--port <number>]
 ```
 
-The command runs the production server from `.output-live/server/index.mjs`; run `pnpm build` again after changing application source or dependencies. If `CODEX_VIEWER_BUILD_OUTPUT` selects another build directory, use the same value for both commands. The server binds only to `127.0.0.1`. It uses cached data immediately when possible, watches active and archived rollouts, coalesces changes, and broadcasts local invalidations over SSE. A Codex JSONL file may be mid-append; only complete stable records are exposed. Visible preparation and explicit opens share a serialized priority queue, so full transcript normalization never fans out across the archive. Repeat `--media-root` to trust more than one attachment directory.
+The command runs the production server from `.output-live/server/index.mjs`, run `pnpm build` again after changing application source or dependencies. If `CODEX_VIEWER_BUILD_OUTPUT` selects another build directory, use the same value for both commands. The server binds only to `127.0.0.1`. Metadata watchers and selected-source validation coalesce changes and broadcast local invalidations over SSE, ordinary browsing does not install recursive rollout watchers. A JSONL file may be mid-append, incomplete records and source gaps stay explicitly qualified. Selected history has priority over deliberate whole-session indexing. Repeat `--media-root` to trust more than one attachment directory.
 
-Library folders are derived from Codex project metadata, git origins, and working directories. Root conversations appear directly in their project; subagents are nested below their parent at any depth. `codex-auto-review` rollouts are auxiliary approval evidence rather than conversations: they are excluded from counts, routes, folders, and model filters, while an unambiguous allow/deny result remains attached to the reviewed tool call.
+Library folders retain native project identity, host scope, explicit projectless membership, populated Sections and order. Two projects with the same root remain distinct. Legacy path mapping is used only when unambiguous, an explicit projectless choice is never replaced by a Git/cwd project. Ordinary roots appear in their group and delegated children expand lazily below their parent. Guardian and internal Security helpers stay out of ordinary roots and search, their qualified approval evidence remains independently inspectable.
 
-Normal live search checks ready cached transcripts and catalog metadata first. If results may exist in cold sessions, the UI offers an explicit progressive deep search. That operation prepares cold sessions serially, reports progress, can be cancelled, and never turns ordinary typing into an archive-wide scan.
+Typing searches chat titles and project names from metadata. “Search transcript content” explicitly switches to available indexed content, which can include a delegated-child hit with navigation to its parent. “Search unloaded conversations” deliberately indexes missing content, reports completed/unavailable counts and can be cancelled. Changing the query or leaving the workspace cancels its owned job. Partial indexed results never imply complete archive coverage.
 
 The Codex-home precedence is the explicit CLI argument, viewer configuration, `CODEX_HOME`, then the platform default `~/.codex`.
 
 ### Static export
 
 ```powershell
-pnpm export [--codex-home <path>] [--output <path>] [--offline] [--force] [--no-index]
+pnpm export [--codex-home <path>] [--output <path>] [--offline] [--force] [--no-index] [--link-previews]
 ```
 
 The default output is `.output/public`. Export writes into isolated staging directories and atomically publishes the completed site so a failed generation does not replace the previous good archive.
 
-- `--offline` disables all remote favicon attempts. Conversations, links, local media, and cached content still export.
+- `--offline` disables remote favicon and website-preview acquisition. Conversations, links, local media and saved enrichment still export.
+- `--link-previews` explicitly acquires bounded website metadata and local preview imagery for referenced links during export (ignored in offline mode)
 - `--no-index` skips Pagefind and disables full-text search in the static site. Metadata browsing remains available.
 - `--force` retransforms every discovered rollout instead of reusing a matching source fingerprint.
 - `--output <path>` selects another viewer-owned publication directory.
 
 Pagefind creates one flat search record per turn and can require substantial memory for very large archives. Use `--no-index` when full-text search is unnecessary or when first validating a large collection, then test indexed export on a representative Codex home before scaling it up.
 
-Static turn payloads are bounded by both turn count and an approximate byte budget, with an explicit per-turn chunk map for exact distant navigation. A single unusually large turn remains indivisible, but unrelated large turns are no longer aggregated into the same JSON payload. Prerendered session routes ship the conversation skeleton and fetch their selected chunk after hydration, avoiding duplication of multi-megabyte tool output in session HTML.
+New exports include a version 2 metadata/library catalog and source-qualified history pages. Saved history supports separate turn and item paging, including large turns, with explicit coverage and generation provenance. Legacy compatibility chunks retain their turn/byte budget and exact turn map (one large legacy turn can still be indivisible). Prerendered session routes ship the conversation skeleton and fetch selected content after hydration, avoiding duplication of multi-megabyte tool output in session HTML. Missing, malformed or unsupported source history is reported, old archives without qualified history retain an explicitly labeled saved-record view.
+
+See [history and artifact contracts](docs/history-and-artifact-contracts.md) for compatibility, source-generation validation, retained media, file-authority and diff provenance. The measured runtime conditions and limitations are recorded in [performance observations](docs/performance-observations.md).
 
 ### Offline server
 
@@ -106,9 +109,9 @@ There is no telemetry, account integration, remote sharing, session editing, or 
 
 ## Favicon and network behavior
 
-Favicon enrichment is the only automatic feature allowed to use the network. Live mode may fill missing viewer-cache favicons in the background, and export may fetch them unless `--offline` is present. Requests are bounded by type, size, timeout, redirect, DNS, and public-address checks; loopback, private, link-local, reserved, and redirect-pivot targets are rejected. A favicon failure degrades to a local fallback and never makes its conversation unavailable.
+Live mode can fill missing viewer-cache favicons for selected rich content (the existing `fetchFavicons` setting defaults to enabled). Website previews have a separate `fetchLinkPreviews` setting that defaults to disabled, existing settings never opt into webpage acquisition. Enabling previews permits a bounded lazy request after pointer dwell or keyboard focus, touch navigation remains a normal link. Cached metadata and images work with acquisition disabled. Export only acquires preview metadata with the explicit `--link-previews` option, `--offline` disables both enrichment transports. Requests are bounded by type, size, timeout, redirect, DNS and public-address checks, loopback/private/link-local/reserved destinations and redirect pivots are rejected. Missing icons use a local fallback, missing preview metadata retains the hostname and Open link.
 
-The generated site performs no external automatic runtime requests. Fonts, application bundles, Pagefind, exported media, and resolved favicons are local. Remote links and uncached remote-media placeholders remain inert links that require an explicit user action.
+The generated site performs no external automatic runtime requests. Fonts, application bundles, Pagefind, exported media, resolved favicons and saved preview imagery are local. Preview data is labeled viewer enrichment with its own URL/revision/fetch time, it is not recorded conversation content. Remote links and uncached remote-media placeholders remain inert links that require an explicit user action.
 
 ## Locations
 
@@ -120,7 +123,7 @@ Viewer configuration and cache locations follow the platform conventions below:
 | macOS    | `~/Library/Application Support/codex-sessions-viewer/config.json` | `~/Library/Caches/codex-sessions-viewer/viewer.sqlite`            |
 | Linux    | `${XDG_CONFIG_HOME:-~/.config}/codex-sessions-viewer/config.json` | `${XDG_CACHE_HOME:-~/.cache}/codex-sessions-viewer/viewer.sqlite` |
 
-Generated state snapshots, cached media, cached favicons, and private export staging live below the same viewer cache root. Repository-local `.generated`, `.output`, and `.output-live` directories are viewer-owned build products and are ignored by Git.
+Generated state/history snapshots, decoded rollouts, cached media, favicons, website previews and private export staging live below the viewer cache root. Repository-local `.generated`, `.output` and `.output-live` directories are viewer-owned build products and are ignored by Git.
 
 Presentation preferences such as theme, disclosure defaults, timestamps, code wrapping, live follow, and minimap visibility are stored only in browser local storage under `codex-sessions-viewer:presentation:v1`.
 
@@ -156,13 +159,13 @@ The composed gates stream each child command's output, stop at the first failure
 
 `pnpm verify:output [--output <path>]` remains separate: it verifies the semantic integrity of a newly generated representative publication, while `doctor` reports only structural presence. Do not treat an arbitrary stale `.output` directory as release evidence.
 
-Vitest separates Node, Pagefind, performance, UI, and Nuxt-owned suites. Pagefind integration is intentionally isolated from parallel files on Windows because its own atomic index rename can collide across workers. `tsconfig.custom.json` type-checks non-default entrypoints and tests; Nuxt remains the owner of application, server, and shared source typing.
+Vitest separates pure Node, Pagefind, performance, official Nuxt runtime and official Nuxt HTTP suites. Framework-dependent component/composable tests use the Nuxt runtime, protocol and repository tests remain pure Node. Pagefind integration is intentionally isolated from parallel files on Windows because its own atomic index rename can collide across workers. `tsconfig.custom.json` type-checks non-default entrypoints and tests, nearest test/script projects expose that contract to type-aware tooling. Nuxt remains the owner of application, server and shared source typing.
 
 ## Troubleshooting
 
 ### The live page is preparing for a long time
 
-The initial HTML should still show the application shell and loaders, but the library should not wait for full transcript reconciliation. Run `pnpm run doctor` in another terminal and compare the catalog counts with the normalized-payload count. A malformed or changing source is isolated; a single favicon or optional metadata failure should not stop the library. A conversation row may remain cold until it enters the viewport, and opening it promotes that one session ahead of background visible preparation.
+The initial HTML should show the application shell and loaders, the library should not wait for transcript reconciliation. Run `pnpm run doctor` in another terminal and compare metadata catalog rows with normalized-payload counts. A malformed/changing source or optional enrichment failure should not stop the library. Scrolling metadata rows does not prepare them, selecting a chat loads its recent history ahead of deliberate background indexing. Doctor labels persisted generation/projection evidence as saved observations, it does not claim that source bytes were freshly validated.
 
 If the selected Codex home is wrong, start with `pnpm live --codex-home <path>` or update it from Settings. The server validates the new directory before changing watcher context.
 
@@ -172,7 +175,7 @@ Nuxt may print a build-time warning that the `node:sqlite` built-in is external.
 
 ### Windows tests abort in `fs-event.c` or show short TEMP paths
 
-Some Windows profiles expose `%TEMP%` through an 8.3 alias while file watchers report the long path. Point `TEMP` and `TMP` to an existing long-form directory such as the repository `.nuxt` directory for that shell, rerun `pnpm exec nuxt prepare`, and retry the failing command. Keep Pagefind tests isolated rather than disabling parallelism for the complete suite.
+Some Windows profiles expose `%TEMP%` through an 8.3 alias while file watchers report the full profile path. Point `TEMP` and `TMP` to the existing `%LOCALAPPDATA%\Temp` directory using its full profile spelling for that shell, rerun `pnpm exec nuxt prepare`, and retry the failing command. Avoid a deeply nested workspace temporary directory for the metadata fixtures: their hashed SQLite snapshot paths can exceed the Windows SQLite path limit and produce `unable to open database file`. Keep Pagefind tests isolated rather than disabling parallelism for the complete suite.
 
 ### Build or prerender fails on `readlink` under the user profile
 

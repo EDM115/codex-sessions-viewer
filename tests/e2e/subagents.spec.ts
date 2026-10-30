@@ -3,9 +3,9 @@ import { fileURLToPath } from "node:url";
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@nuxt/test-utils/playwright";
 
-import type { HistoryItem, HistoryPage, HistoryTurnWindow } from "../../shared/types/history.ts";
-import { historyNavigatorPage } from "../../shared/types/history.ts";
-import type { CatalogSessionMetadata, LibraryEntry } from "../../shared/types/library.ts";
+import type { HistoryItem, HistoryPage, HistoryTurnWindow } from "#shared/types/history.ts";
+import { historyNavigatorPage } from "#shared/types/history.ts";
+import type { CatalogSessionMetadata, LibraryEntry } from "#shared/types/library.ts";
 
 const parentId = "88888888-8888-4888-8888-888888888888";
 const childId = "99999999-9999-4999-8999-999999999999";
@@ -340,6 +340,7 @@ test("reads progressive work and selects one child lazily with native keyboard a
   });
   await goto(`/session/${parentId}`, { waitUntil: "hydration" });
   const parent = page.locator(".session-page__main .progressive-conversation");
+  const parentWorkbench = page.locator(".session-page__main .progressive-workbench");
   await expect(parent.getByText("Parent fixture final answer", { exact: true })).toBeVisible();
   await expect(parent.locator(".conversation-work-stream__entries")).toHaveCount(0);
   expect(paths.some((path) => path.endsWith("/approvals"))).toBe(false);
@@ -361,8 +362,10 @@ test("reads progressive work and selects one child lazily with native keyboard a
       .locator(".conversation-activity-disclosure__caret")
       .evaluate((element) => getComputedStyle(element).transitionProperty),
   ).not.toContain("transform");
-  await parent.getByRole("button", { name: "Load approval evidence", exact: true }).click();
-  await expect(parent.getByText(/Approval source: partial/u)).toBeVisible();
+  await parentWorkbench
+    .getByRole("button", { name: "Load approval evidence", exact: true })
+    .click();
+  await expect(parentWorkbench.getByText(/Approval source: partial/u)).toBeVisible();
   await expect(
     parent.locator(".conversation-tool-row__approval > summary").filter({ hasText: "Denied" }),
   ).toBeVisible();
@@ -402,7 +405,7 @@ test("reads progressive work and selects one child lazily with native keyboard a
   await expect(page).toHaveURL(new RegExp(`/session/${parentId}$`, "u"));
   await panel.getByRole("button", { name: "Close subagents" }).click();
   await expect(link).toBeFocused();
-  const openList = parent.getByRole("button", { name: "Subagents · 2", exact: true });
+  const openList = parentWorkbench.getByRole("button", { name: "Subagents · 2", exact: true });
   await openList.click();
   await expect(panel.getByRole("button", { name: /Child fixture Ada reviewer/u })).toBeVisible();
   expect(paths.some((path) => path.startsWith(`/api/sessions/${siblingId}`))).toBe(false);

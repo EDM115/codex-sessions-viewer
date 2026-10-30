@@ -53,3 +53,8 @@ export function createBoundedWorkQueue(limit: number, capacity = 32) {
 
 // Mermaid's global configuration and rendering form one indivisible job
 export const diagramWorkQueue = createBoundedWorkQueue(1);
+
+/** Large code and patches keep their full source without constructing a rich tree */
+export function canRenderRichCode(source: string): boolean {
+  return source.length <= 100_000 && source.split("\n").length <= 1_000;
+}

@@ -1,5 +1,5 @@
-import type { SidebarPreferences, SidebarSection } from "../../shared/types/library.ts";
-import type { CatalogMetadataSnapshot } from "./catalogMetadata.ts";
+import type { CatalogMetadataSnapshot } from "#server/metadata/catalogMetadata.ts";
+import type { SidebarPreferences, SidebarSection } from "#shared/types/library.ts";
 
 interface SidebarItemKey {
   kind: "thread" | "project";

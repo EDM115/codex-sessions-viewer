@@ -5,19 +5,20 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import * as z from "zod";
 
-import { replaceCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { writeStaticPayloads } from "../../../server/export/writeStaticPayloads.ts";
-import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import { LiveConversationRepository } from "../../../server/live/repository.ts";
-import { conversationSummarySchema } from "../../../shared/types/conversation.ts";
-import { viewerDiagnosticSchema } from "../../../shared/types/diagnostics.ts";
-import { turnChunkSchema } from "../../../shared/types/repository.ts";
+import { replaceCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { writeStaticPayloads } from "#server/export/writeStaticPayloads.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { LiveConversationRepository } from "#server/live/repository.ts";
+import { conversationSummarySchema } from "#shared/types/conversation.ts";
+import { viewerDiagnosticSchema } from "#shared/types/diagnostics.ts";
+import { turnChunkSchema } from "#shared/types/repository.ts";
 import {
   hydrateStaticInspectorRecords,
   staticInspectorChunkSchema,
   staticNavigatorPayloadSchema,
-} from "../../../shared/types/staticPayloads.ts";
+} from "#shared/types/staticPayloads.ts";
+
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import { representativeLargeSession } from "../../performance/fixtures.ts";
 

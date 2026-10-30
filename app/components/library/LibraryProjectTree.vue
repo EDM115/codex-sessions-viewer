@@ -1,8 +1,4 @@
 <script setup lang="ts">
-import { useLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
-import LibraryEmptyState from "./LibraryEmptyState.vue";
-import LibraryProjectFolder from "./LibraryProjectFolder.vue";
-
 const workspace = useLibraryWorkspace();
 </script>
 

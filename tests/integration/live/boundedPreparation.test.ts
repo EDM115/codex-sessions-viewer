@@ -5,22 +5,20 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { upsertCatalogSessions } from "../../../server/cache/catalogStore.ts";
-import { getCachedSession, replaceCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import {
-  SessionCacheUpdater,
-  getSourceManifestEntry,
-} from "../../../server/cache/sourceManifest.ts";
-import * as richText from "../../../server/content/parseRichText.ts";
-import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import { rolloutRefFromSource } from "../../../server/ingestion/rolloutIdentity.ts";
-import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import { LiveReconciler } from "../../../server/live/reconciler.ts";
-import { LiveConversationRepository } from "../../../server/live/repository.ts";
-import { readCatalogMetadata } from "../../../server/metadata/catalogMetadata.ts";
-import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
-import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
+import { upsertCatalogSessions } from "#server/cache/catalogStore.ts";
+import { getCachedSession, replaceCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { SessionCacheUpdater, getSourceManifestEntry } from "#server/cache/sourceManifest.ts";
+import * as richText from "#server/content/parseRichText.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { rolloutRefFromSource } from "#server/ingestion/rolloutIdentity.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { LiveReconciler } from "#server/live/reconciler.ts";
+import { LiveConversationRepository } from "#server/live/repository.ts";
+import { readCatalogMetadata } from "#server/metadata/catalogMetadata.ts";
+import { normalizeSession } from "#server/normalization/normalizeSession.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import { representativeLargeSession } from "../../performance/fixtures.ts";
 import { createStateDatabase } from "../source-boundary/fixtures.ts";
@@ -389,7 +387,7 @@ describe("production live preparation boundaries", () => {
         entered();
         await held;
       }
-      return actual(text, options);
+      return actual!(text, options);
     });
     const reconciler = new LiveReconciler({
       database,

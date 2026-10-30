@@ -1,7 +1,7 @@
 import { Virtualizer } from "@tanstack/vue-virtual";
 import { describe, expect, it, vi } from "vitest";
 
-import { installConversationScrollPolicy } from "../../../shared/timeline/virtualizer.ts";
+import { installConversationScrollPolicy } from "#shared/timeline/virtualizer.ts";
 
 function fixture(ids = Array.from({ length: 100 }, (_, index) => `turn-${index}`)) {
   const scroll = vi.fn<Virtualizer<HTMLElement, Element>["options"]["scrollToFn"]>();

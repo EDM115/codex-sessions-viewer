@@ -1,5 +1,8 @@
 import * as z from "zod";
 
+import { searchMembershipIds } from "#shared/library/searchMembership.ts";
+import { buildSidebarGroups, catalogProjectGroups } from "#shared/library/sidebarGroups.ts";
+import { isThreadVisible } from "#shared/library/threadVisibility.ts";
 import { approvalEvidenceResultSchema } from "#shared/types/approvals.ts";
 import {
   conversationSummarySchema,
@@ -20,7 +23,15 @@ import {
   type ConversationProject,
   type DeepSearchJob,
   type CatalogProjectGroup,
+  type CatalogLibrary,
+  type CatalogSessionMetadata,
+  sidebarGroupKey,
 } from "#shared/types/library.ts";
+import {
+  canonicalWebsiteUrl,
+  linkPreviewSchema,
+  type LinkPreview,
+} from "#shared/types/linkPreview.ts";
 import {
   repositoryCapabilitiesForMode,
   UnsupportedHistoryError,
@@ -39,13 +50,26 @@ import {
   type TurnChunk,
   type TurnChunkQuery,
   type ViewerInvalidation,
+  historyPageQuerySchema,
+  historyItemQuerySchema,
 } from "#shared/types/repository.ts";
+import {
+  STATIC_HISTORY_ITEM_CHUNK,
+  readStaticHistoryCursor,
+  staticHistoryCursor,
+  staticHistoryManifestSchema,
+  staticHistoryChunkSchema,
+  type StaticHistoryManifest,
+} from "#shared/types/staticHistory.ts";
 import {
   hydrateStaticInspectorRecord,
   staticInspectorChunkSchema,
   staticLibraryPayloadSchema,
+  legacyStaticLibraryPayloadSchema,
   staticNavigatorPayloadSchema,
   type StaticLibraryPayload,
+  type LegacyStaticLibraryPayload,
+  staticSessionIndexSchema,
 } from "#shared/types/staticPayloads.ts";
 import type { RepositoryRequester } from "~/repositories/live.ts";
 
@@ -66,16 +90,13 @@ export interface PagefindSearchResponse {
 export interface PagefindBrowserApi {
   search(
     query: string,
-    options: { filters: Record<string, string> },
+    options: { filters: Record<string, string | { any: string[] }> },
   ): Promise<PagefindSearchResponse>;
 }
 
 export type PagefindLoader = () => Promise<PagefindBrowserApi>;
 
-const sessionIndexSchema = z.strictObject({
-  version: z.literal(1),
-  sessions: z.array(conversationSummarySchema),
-});
+const sessionIndexSchema = staticSessionIndexSchema;
 const summaryPayloadSchema = z.object({ summary: conversationSummarySchema });
 const assetManifestSchema = z.object({
   assets: z.array(resolvedAssetSchema),
@@ -142,7 +163,7 @@ interface StaticMembership {
 
 const UNRESOLVED_STATIC_GROUP = "section:unresolved-static-v1";
 function staticProjection(
-  library: StaticLibraryPayload,
+  library: LegacyStaticLibraryPayload,
   summaries: readonly ConversationSummary[],
 ) {
   const groups = library.projects.map(catalogProjectGroupFromLegacy);
@@ -270,7 +291,7 @@ function matchesSession(
   return query.hasMedia === undefined || session.hasMedia === query.hasMedia;
 }
 
-function fallbackLibrary(sessions: readonly ConversationSummary[]): StaticLibraryPayload {
+function fallbackLibrary(sessions: readonly ConversationSummary[]): LegacyStaticLibraryPayload {
   const roots = sessions.filter(({ parentThreadId }) => parentThreadId === null);
   const project: ConversationProject = {
     id: "none",
@@ -280,7 +301,7 @@ function fallbackLibrary(sessions: readonly ConversationSummary[]): StaticLibrar
     activeCount: roots.filter(({ scope }) => scope === "active").length,
     archivedCount: roots.filter(({ scope }) => scope === "archived").length,
   };
-  return staticLibraryPayloadSchema.parse({
+  return legacyStaticLibraryPayloadSchema.parse({
     version: 1,
     projects: [project],
     entries: Object.fromEntries(
@@ -346,10 +367,12 @@ async function pagefindHit(
 }
 
 export class StaticConversationRepository implements ConversationRepository {
-  private indexPromise: Promise<ConversationSummary[]> | null = null;
+  private readonly historyManifests = new Map<string, Promise<StaticHistoryManifest | null>>();
+  private indexPromise: Promise<z.infer<typeof sessionIndexSchema>> | null = null;
   private libraryPromise: Promise<StaticLibraryPayload | null> | null = null;
   private pagefindPromise: Promise<PagefindBrowserApi> | null = null;
   private faviconPromise: Promise<ReadonlyMap<string, string>> | null = null;
+  private previewPromise: Promise<ReadonlyMap<string, LinkPreview>> | null = null;
   private assetManifestPromise: Promise<ReadonlyMap<string, ResolvedAsset>> | null = null;
   private deepSearchSequence = 0;
   private readonly deepSearchJobs = new Map<string, DeepSearchJob>();
@@ -370,12 +393,20 @@ export class StaticConversationRepository implements ConversationRepository {
 
   async listSessions(query: SessionListQuery, options: RepositoryRequestOptions = {}) {
     options.signal?.throwIfAborted();
-    const summaries = await this.index(options);
-    const library = (await this.library(options)) ?? fallbackLibrary(summaries);
-    const projection = staticProjection(library, summaries);
+    const index = await this.index(options);
+    const library = await this.library(options);
+    if (library?.version === 2) {
+      return this.catalogSessions(library.catalog, index.sessions, query);
+    }
+    if (index.version !== 1) {
+      throw new Error("The static v2 catalog is missing or invalid");
+    }
+    const summaries = index.sessions;
+    const legacyLibrary = library ?? fallbackLibrary(summaries);
+    const projection = staticProjection(legacyLibrary, summaries);
     const sessions = summaries
       .flatMap((summary): ConversationListItem[] => {
-        const entry = library.entries[summary.id];
+        const entry = legacyLibrary.entries[summary.id];
         return entry === undefined ? [] : [{ summary, materialization: "ready", ...entry }];
       })
       .filter((item) => matchesSession(item, query, projection.byId.get(item.summary.id)));
@@ -395,9 +426,95 @@ export class StaticConversationRepository implements ConversationRepository {
   }
 
   async listProjects(options: RepositoryRequestOptions = {}) {
-    const summaries = await this.index(options);
-    return staticProjection((await this.library(options)) ?? fallbackLibrary(summaries), summaries)
-      .groups;
+    const library = await this.library(options);
+    if (library?.version === 2) {
+      return catalogProjectGroups(library.catalog);
+    }
+    const index = await this.index(options);
+    if (index.version !== 1) {
+      throw new Error("The static v2 catalog is missing or invalid");
+    }
+    return staticProjection(library ?? fallbackLibrary(index.sessions), index.sessions).groups;
+  }
+
+  private catalogSessions(
+    catalog: CatalogLibrary,
+    summaries: readonly CatalogSessionMetadata[],
+    query: SessionListQuery,
+  ) {
+    const child = query.parentThreadId !== undefined && query.parentThreadId !== "__root__";
+    const groups = buildSidebarGroups(catalog, { ...catalog.preferences, scope: query.scope });
+    const group =
+      query.groupId === undefined
+        ? undefined
+        : groups.find((candidate) => sidebarGroupKey(candidate) === query.groupId);
+    const term = query.query?.trim().toLocaleLowerCase() ?? "";
+    const rows = catalog.threads
+      .filter((thread) => {
+        if (child) {
+          return (
+            isThreadVisible(thread.classification, "child") &&
+            thread.classification.parentThreadId === query.parentThreadId
+          );
+        }
+        if (thread.scope !== query.scope || !isThreadVisible(thread.classification, "root")) {
+          return false;
+        }
+        if (query.projectId !== undefined && thread.projectId !== query.projectId) {
+          return false;
+        }
+        if (query.groupId !== undefined && !group?.threadIds.includes(thread.id)) {
+          return false;
+        }
+        const summary = summaries.find(({ id }) => id === thread.id);
+        const project = catalog.projects.find(({ id }) => id === thread.projectId);
+        if (
+          term &&
+          ![thread.title, summary?.cwd, project?.name, ...(project?.rootPaths ?? [])].some(
+            (value) => includes(value ?? null, term),
+          )
+        ) {
+          return false;
+        }
+        return query.cwd === undefined || summary?.cwd === query.cwd;
+      })
+      .toSorted((a, b) =>
+        group
+          ? group.threadIds.indexOf(a.id) - group.threadIds.indexOf(b.id)
+          : (b.recencyAt ?? -Infinity) - (a.recencyAt ?? -Infinity) || a.id.localeCompare(b.id),
+      );
+    const offset = cursorOffset(query.cursor);
+    const limit = query.limit ?? 20;
+    const items = rows.slice(offset, offset + limit).map((thread) => ({
+      id: thread.id,
+      title: thread.title,
+      scope: thread.scope,
+      projectId: thread.projectId,
+      orderKey: thread.recencyAt === null ? "" : new Date(thread.recencyAt).toISOString(),
+      kind: isThreadVisible(thread.classification, "child")
+        ? ("subagent" as const)
+        : ("root" as const),
+      parentThreadId: thread.classification.parentThreadId,
+      childCount: catalog.threads.filter(
+        (candidate) =>
+          isThreadVisible(candidate.classification, "child") &&
+          candidate.classification.parentThreadId === thread.id,
+      ).length,
+      ...(isThreadVisible(thread.classification, "child")
+        ? {
+            agent: {
+              name: thread.classification.agentNickname,
+              path: thread.classification.agentPath,
+              role: thread.classification.agentRole,
+            },
+          }
+        : {}),
+    }));
+    return {
+      items,
+      nextCursor: offset + items.length < rows.length ? String(offset + items.length) : null,
+      total: rows.length,
+    };
   }
 
   async prepareSessions(ids: string[]) {
@@ -449,19 +566,41 @@ export class StaticConversationRepository implements ConversationRepository {
 
   async search(query: SearchQuery, options: RepositoryRequestOptions = {}) {
     options.signal?.throwIfAborted();
+    const library = await this.library(options);
+    const allowed =
+      library?.version === 2 ? new Set(searchMembershipIds(library.catalog, query)) : null;
+    if (
+      allowed?.size === 0 ||
+      (allowed === null && (query.projectId !== undefined || query.groupId !== undefined))
+    ) {
+      return { items: [], nextCursor: null, total: 0 };
+    }
     const pagefind = await this.pagefind();
-    const response = await pagefind.search(query.query, { filters: pagefindFilters(query) });
+    const response = await pagefind.search(query.query, {
+      filters: {
+        ...pagefindFilters(query),
+        ...(allowed === null ? {} : { session: { any: [...allowed] } }),
+      },
+    });
     const offset = cursorOffset(query.cursor);
     const limit = query.limit ?? 50;
-    const page = response.results.slice(offset, offset + limit);
-    const hits = (await Promise.all(page.map((result) => pagefindHit(result, query.scope)))).filter(
-      (hit): hit is SearchHit => hit !== null,
+    const page = await Promise.all(
+      response.results
+        .slice(offset, offset + limit)
+        .map((result) => pagefindHit(result, query.scope)),
+    );
+    const hits = page.filter(
+      (hit): hit is SearchHit =>
+        hit !== null &&
+        (allowed === null || allowed.has(hit.sessionId)) &&
+        (query.parentThreadId === undefined ||
+          query.parentThreadId === "__root__" ||
+          hit.parentThreadId === query.parentThreadId),
     );
     options.signal?.throwIfAborted();
     return {
       items: hits,
-      nextCursor:
-        offset + page.length < response.results.length ? String(offset + page.length) : null,
+      nextCursor: offset + limit < response.results.length ? String(offset + limit) : null,
       total: response.results.length,
     };
   }
@@ -491,21 +630,138 @@ export class StaticConversationRepository implements ConversationRepository {
   }
 
   async getHistoryPage(
-    _id: string,
-    _query: HistoryPageQuery,
+    id: string,
+    query: HistoryPageQuery,
     options: RepositoryRequestOptions = {},
   ): Promise<HistoryPage> {
+    query = historyPageQuerySchema.parse(query);
     options.signal?.throwIfAborted();
-    throw new UnsupportedHistoryError();
+    const manifest = await this.historyManifest(id, options);
+    if (!manifest) {
+      throw new UnsupportedHistoryError();
+    }
+    const limit = query.limit ?? (query.anchor.kind === "latest" ? 5 : 20);
+    let end = manifest.turns.length;
+    if (query.anchor.kind === "before") {
+      end = readStaticHistoryCursor(query.anchor.cursor, manifest, "turn");
+    }
+    if (query.anchor.kind === "after") {
+      end = Math.min(
+        manifest.turns.length,
+        readStaticHistoryCursor(query.anchor.cursor, manifest, "turn") + limit,
+      );
+    }
+    if (query.anchor.kind === "turn") {
+      const targetId = query.anchor.turnId;
+      const target = manifest.turns.findIndex((turn) => turn.turnId === targetId);
+      if (target < 0) {
+        throw new Error("history.static_target_missing");
+      }
+      end = target + 1;
+    }
+    if (end > manifest.turns.length) {
+      throw new Error("history.invalid_static_cursor");
+    }
+    const start =
+      query.anchor.kind === "after"
+        ? readStaticHistoryCursor(query.anchor.cursor, manifest, "turn")
+        : Math.max(0, end - limit);
+    const turns = await Promise.all(
+      manifest.turns
+        .slice(start, end)
+        .map((turn) =>
+          this.getTurnItems(
+            id,
+            { turnId: turn.turnId, anchor: { kind: "latest" }, limit: 100 },
+            options,
+          ),
+        ),
+    );
+    options.signal?.throwIfAborted();
+    const {
+      version: _version,
+      turns: _turns,
+      sourceGenerations: _generations,
+      ...metadata
+    } = manifest;
+    return {
+      ...metadata,
+      turns,
+      beforeCursor: start > 0 ? staticHistoryCursor(manifest, "turn", start) : null,
+      afterCursor: end < manifest.turns.length ? staticHistoryCursor(manifest, "turn", end) : null,
+    };
   }
 
   async getTurnItems(
-    _id: string,
-    _query: HistoryItemQuery,
+    id: string,
+    query: HistoryItemQuery,
     options: RepositoryRequestOptions = {},
   ): Promise<HistoryTurnWindow> {
+    query = historyItemQuerySchema.parse(query);
     options.signal?.throwIfAborted();
-    throw new UnsupportedHistoryError();
+    const manifest = await this.historyManifest(id, options);
+    if (!manifest) {
+      throw new UnsupportedHistoryError();
+    }
+    const turnIndex = manifest.turns.findIndex((turn) => turn.turnId === query.turnId);
+    const turn = manifest.turns[turnIndex];
+    if (!turn) {
+      throw new Error("history.static_target_missing");
+    }
+    const limit = query.limit ?? (query.anchor.kind === "opening" ? 2 : 100);
+    let start = Math.max(0, turn.itemCount - limit);
+    let end = turn.itemCount;
+    if (query.anchor.kind === "opening") {
+      start = 0;
+      end = Math.min(limit, turn.itemCount);
+    }
+    if (query.anchor.kind === "before") {
+      end = readStaticHistoryCursor(query.anchor.cursor, manifest, "item", query.turnId);
+      start = Math.max(0, end - limit);
+    }
+    if (query.anchor.kind === "after") {
+      start = readStaticHistoryCursor(query.anchor.cursor, manifest, "item", query.turnId);
+      end = Math.min(turn.itemCount, start + limit);
+    }
+    if (start > turn.itemCount || end > turn.itemCount) {
+      throw new Error("history.invalid_static_cursor");
+    }
+    const first = Math.floor(start / STATIC_HISTORY_ITEM_CHUNK);
+    const last = Math.floor(Math.max(start, end - 1) / STATIC_HISTORY_ITEM_CHUNK);
+    const chunks = await Promise.all(
+      Array.from({ length: last - first + 1 }, (_, index) =>
+        this.historyChunk(id, manifest, turnIndex, first + index, options),
+      ),
+    );
+    const base = chunks[0]!.window;
+    const items = chunks
+      .flatMap(({ window }) => window.items)
+      .slice(start % STATIC_HISTORY_ITEM_CHUNK, (start % STATIC_HISTORY_ITEM_CHUNK) + end - start);
+    const partial = start > 0 || end < turn.itemCount;
+    return {
+      ...base,
+      items,
+      beforeCursor: start > 0 ? staticHistoryCursor(manifest, "item", start, turn.turnId) : null,
+      afterCursor:
+        end < turn.itemCount ? staticHistoryCursor(manifest, "item", end, turn.turnId) : null,
+      itemsView: partial ? "summary" : base.itemsView,
+      coverage: partial
+        ? {
+            ...base.coverage,
+            status: base.coverage.status === "complete" ? "partial" : base.coverage.status,
+            gaps: [
+              ...base.coverage.gaps.filter(({ reason }) => reason !== "saved-items-not-loaded"),
+              {
+                physicalRolloutId: base.physicalRolloutId,
+                turnId: base.turnId,
+                reason: "saved-items-not-loaded",
+                beforeOrdinal: null,
+                afterOrdinal: null,
+              },
+            ],
+          }
+        : base.coverage,
+    };
   }
 
   async getHistoryNavigator(
@@ -516,12 +772,111 @@ export class StaticConversationRepository implements ConversationRepository {
     return historyNavigatorPage(await this.getHistoryPage(id, query, options));
   }
   prepareHistoryPresentation: ConversationRepository["prepareHistoryPresentation"] = async (
-    _query,
-    options,
+    query,
+    options = {},
   ) => {
     options?.signal?.throwIfAborted();
-    throw new Error("Static exports use their prepared rich-text payloads");
+    const manifest = await this.historyManifest(query.threadId, options);
+    if (!manifest) {
+      throw new UnsupportedHistoryError();
+    }
+    const index = manifest.turns.findIndex(
+      (turn) => turn.turnId === query.turnId && turn.physicalRolloutId === query.physicalRolloutId,
+    );
+    const chunk = manifest.turns[index]?.itemChunks[query.itemId];
+    if (
+      chunk === undefined ||
+      manifest.historyEpoch !== query.historyEpoch ||
+      manifest.contentRevision !== query.contentRevision
+    ) {
+      throw new Error("history.static_presentation_owner_mismatch");
+    }
+    const content = await this.historyChunk(query.threadId, manifest, index, chunk, options);
+    const saved = content.presentations.find(
+      (presentation) =>
+        presentation.threadId === query.threadId &&
+        presentation.historyEpoch === query.historyEpoch &&
+        presentation.contentRevision === query.contentRevision &&
+        presentation.physicalRolloutId === query.physicalRolloutId &&
+        presentation.turnId === query.turnId &&
+        presentation.itemId === query.itemId &&
+        presentation.markdown === query.markdown &&
+        JSON.stringify(presentation.attachments ?? []) === JSON.stringify(query.attachments ?? []),
+    );
+    if (!saved) {
+      throw new Error("history.static_presentation_missing");
+    }
+    return saved;
   };
+
+  async supportsHistory(id: string, options: RepositoryRequestOptions = {}) {
+    return (await this.historyManifest(id, options)) !== null;
+  }
+
+  private historyManifest(
+    id: string,
+    options: RepositoryRequestOptions,
+  ): Promise<StaticHistoryManifest | null> {
+    options.signal?.throwIfAborted();
+    let pending = this.historyManifests.get(id);
+    if (!pending) {
+      pending = this.requester(
+        `/payloads/sessions/${encodeURIComponent(id)}/history-index.json`,
+        options,
+      )
+        .catch(() => null)
+        .then((value) => {
+          options.signal?.throwIfAborted();
+          if (value === null) {
+            return null;
+          }
+          const manifest = staticHistoryManifestSchema.parse(value);
+          if (manifest.threadId !== id) {
+            throw new Error("history.static_owner_mismatch");
+          }
+          return manifest;
+        })
+        .catch((error: unknown) => {
+          this.historyManifests.delete(id);
+          throw error;
+        });
+      this.historyManifests.set(id, pending);
+      if (this.historyManifests.size > 32) {
+        this.historyManifests.delete(this.historyManifests.keys().next().value!);
+      }
+    }
+    return pending;
+  }
+
+  private async historyChunk(
+    id: string,
+    manifest: StaticHistoryManifest,
+    turnIndex: number,
+    chunk: number,
+    options: RepositoryRequestOptions,
+  ) {
+    const turn = manifest.turns[turnIndex];
+    if (!turn || chunk < 0 || chunk >= turn.chunks) {
+      throw new Error("history.invalid_static_cursor");
+    }
+    const result = staticHistoryChunkSchema.parse(
+      await this.requester(
+        `/payloads/sessions/${encodeURIComponent(id)}/history-${turnIndex}-${chunk}.json`,
+        options,
+      ),
+    );
+    if (
+      result.threadId !== id ||
+      result.window.turnId !== turn.turnId ||
+      result.window.physicalRolloutId !== turn.physicalRolloutId ||
+      result.window.historyEpoch !== manifest.historyEpoch ||
+      result.window.contentRevision !== manifest.contentRevision
+    ) {
+      throw new Error("history.static_owner_mismatch");
+    }
+    options.signal?.throwIfAborted();
+    return result;
+  }
 
   async getTurnNavigator(id: string): Promise<TurnNavigatorItem[]> {
     return (await this.navigator(id)).items;
@@ -593,13 +948,47 @@ export class StaticConversationRepository implements ConversationRepository {
     return (await this.favicons()).get(origin) ?? null;
   }
 
+  async resolveLinkPreview(
+    input: string,
+    options: RepositoryRequestOptions = {},
+  ): Promise<LinkPreview> {
+    options.signal?.throwIfAborted();
+    const url = canonicalWebsiteUrl(input);
+    this.previewPromise ??= this.requester("/payloads/link-previews.json")
+      .then((value) => {
+        const payload = z
+          .strictObject({ version: z.literal(1), previews: z.array(linkPreviewSchema) })
+          .parse(value);
+        return new Map(payload.previews.map((preview) => [preview.url, preview]));
+      })
+      .catch(() => new Map<string, LinkPreview>());
+    const found = (await this.previewPromise).get(url);
+    options.signal?.throwIfAborted();
+    return (
+      found ?? {
+        version: 1,
+        provenance: "viewer-enrichment",
+        url,
+        finalUrl: null,
+        revision: "static:missing",
+        availability: "unavailable",
+        title: null,
+        description: null,
+        image: null,
+        fetchedAt: null,
+        retryAt: null,
+        reason: "unavailable",
+      }
+    );
+  }
+
   subscribe(_listener: (event: ViewerInvalidation) => void): () => void {
     return () => undefined;
   }
 
-  private index(options: RepositoryRequestOptions): Promise<ConversationSummary[]> {
+  private index(options: RepositoryRequestOptions): Promise<z.infer<typeof sessionIndexSchema>> {
     this.indexPromise ??= this.requester("/payloads/sessions/index.json", options)
-      .then((value) => sessionIndexSchema.parse(value).sessions)
+      .then((value) => sessionIndexSchema.parse(value))
       .catch((error: unknown) => {
         this.indexPromise = null;
         throw error;

@@ -1,4 +1,8 @@
-import { jsonValueSchema } from "../types/conversation.ts";
+import { recordedToolInventory } from "#shared/timeline/codeMode.ts";
+import { fileChangeLineCounts } from "#shared/timeline/fileChanges.ts";
+import { decodeToolOutcome } from "#shared/timeline/toolOutcome.ts";
+import { presentTool } from "#shared/timeline/toolSemantics.ts";
+import { jsonValueSchema } from "#shared/types/conversation.ts";
 import type {
   ActivityPresentation,
   ActivityStatus,
@@ -6,12 +10,8 @@ import type {
   JsonObject,
   JsonValue,
   ToolActivity,
-} from "../types/conversation.ts";
-import type { HistoryItem } from "../types/history.ts";
-import { recordedToolInventory } from "./codeMode.ts";
-import { fileChangeLineCounts } from "./fileChanges.ts";
-import { decodeToolOutcome } from "./toolOutcome.ts";
-import { presentTool } from "./toolSemantics.ts";
+} from "#shared/types/conversation.ts";
+import type { HistoryItem } from "#shared/types/history.ts";
 
 export function activityObject(value: JsonValue | undefined): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;

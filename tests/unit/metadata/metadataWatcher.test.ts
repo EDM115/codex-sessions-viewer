@@ -8,7 +8,7 @@ import {
   watchSources,
   type SourceWatcher,
   type SourceWatchBatch,
-} from "../../../server/ingestion/watchSources.ts";
+} from "#server/ingestion/watchSources.ts";
 
 it("observes metadata already present in an atomically installed legacy sqlite directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "viewer-legacy-metadata-watch-"));

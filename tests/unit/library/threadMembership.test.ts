@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  resolveThreadMembership,
-  catalogProjects,
-} from "../../../shared/library/projectIdentity.ts";
+import { resolveThreadMembership, catalogProjects } from "#shared/library/projectIdentity.ts";
+
 import { metadata, thread } from "./membershipFixtures.ts";
 
 describe("resolveThreadMembership", () => {

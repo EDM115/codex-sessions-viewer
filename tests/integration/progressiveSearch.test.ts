@@ -4,16 +4,16 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { catalogSession } from "../../server/cache/catalogStore.ts";
-import { openCacheDatabase } from "../../server/cache/database.ts";
-import type { StableJsonlReader } from "../../server/cache/sourceManifest.ts";
-import type { LoadedServerViewerConfig } from "../../server/core/config.ts";
-import { readStableJsonl } from "../../server/ingestion/jsonlStream.ts";
-import type { WatchSourcesOptions } from "../../server/ingestion/watchSources.ts";
-import { InvalidationBus } from "../../server/live/invalidationBus.ts";
-import { coalesceSourceWatchBatches, LiveReconciler } from "../../server/live/reconciler.ts";
-import { LiveViewerRuntime } from "../../server/live/viewerRuntime.ts";
-import type { ViewerInvalidation } from "../../shared/types/repository.ts";
+import { catalogSession, readCatalogLibrary } from "#server/cache/catalogStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import type { StableJsonlReader } from "#server/cache/sourceManifest.ts";
+import type { LoadedServerViewerConfig } from "#server/core/config.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import type { WatchSourcesOptions } from "#server/ingestion/watchSources.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { coalesceSourceWatchBatches, LiveReconciler } from "#server/live/reconciler.ts";
+import { LiveViewerRuntime } from "#server/live/viewerRuntime.ts";
+import type { ViewerInvalidation } from "#shared/types/repository.ts";
 
 const temporaryRoots: string[] = [];
 const fixtureSessionId = "11111111-1111-4111-8111-111111111111";
@@ -46,7 +46,7 @@ async function startRuntime(
       const id = `11111111-1111-4111-8111-${String(index + 1).padStart(12, "0")}`;
       return writeFile(
         join(sessions, `session-${String(index).padStart(2, "0")}.jsonl`),
-        fixture.replaceAll(fixtureSessionId, id),
+        fixture.replaceAll(fixtureSessionId, id).replace(/"parent_thread_id":"[^"]*",/u, ""),
         "utf8",
       );
     }),
@@ -75,6 +75,9 @@ async function startRuntime(
             },
           },
           "pinned-thread-ids": ["11111111-1111-4111-8111-000000000001"],
+          "thread-project-assignments": {
+            "11111111-1111-4111-8111-000000000001": { projectKind: "local", projectId: "viewer" },
+          },
         }),
         "utf8",
       ),
@@ -157,16 +160,18 @@ describe("progressive live search", () => {
       ).resolves.toMatchObject({
         items: [
           expect.objectContaining({
-            summary: expect.objectContaining({
-              id: "11111111-1111-4111-8111-000000000001",
-              title: "Indexed session title",
-              pinned: true,
-            }),
-            projectId: "codex:viewer",
+            id: "11111111-1111-4111-8111-000000000001",
+            title: "Indexed session title",
+            projectId: "viewer",
           }),
         ],
         total: 1,
       });
+      expect(
+        readCatalogLibrary(runtime.database)?.threads.find(
+          (thread) => thread.id === "11111111-1111-4111-8111-000000000001",
+        )?.pinned,
+      ).toBe(true);
     } finally {
       await runtime.close();
     }
@@ -514,6 +519,12 @@ describe("progressive live search", () => {
         cacheDir: join(root, "default-cache"),
         codexHome: root,
         database,
+        fetchFavicons: false,
+      });
+      expect(defaults.faviconOrigin(Buffer.from(origin).toString("base64url"))).toBeNull();
+      defaults.scheduleDocumentFavicons({
+        type: "document",
+        children: [{ type: "link", url: origin, origin, title: null, children: [] }],
       });
       expect(defaults.faviconOrigin(Buffer.from(origin).toString("base64url"))).toBe(origin);
       await defaults.close();

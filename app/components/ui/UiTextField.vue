@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { PhCheckCircle, PhSpinnerGap, PhWarningCircle } from "@phosphor-icons/vue";
-import { computed } from "vue";
 
 const props = withDefaults(
   defineProps<{

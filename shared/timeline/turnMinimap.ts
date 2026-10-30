@@ -1,4 +1,4 @@
-import type { TurnNavigatorItem } from "../types/conversation.ts";
+import type { TurnNavigatorItem } from "#shared/types/conversation.ts";
 
 const MARKER_WIDTHS = [18, 30, 44, 60] as const;
 

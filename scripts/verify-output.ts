@@ -1,9 +1,6 @@
 import { resolve } from "node:path";
 
-import {
-  parseVerifyOutputArguments,
-  verifyGeneratedOutput,
-} from "../server/export/verifyOutput.ts";
+import { parseVerifyOutputArguments, verifyGeneratedOutput } from "#server/export/verifyOutput.ts";
 
 const HELP = `Codex Sessions Viewer generated-output verification
 

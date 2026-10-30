@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveConversationProject } from "../../../shared/library/projectIdentity.ts";
+import { resolveConversationProject } from "#shared/library/projectIdentity.ts";
 
 describe("resolveConversationProject", () => {
   it("uses the longest case-insensitive Codex project-root match on Windows", () => {

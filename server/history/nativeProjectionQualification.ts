@@ -5,19 +5,12 @@ import { isDeepStrictEqual } from "node:util";
 
 import * as z from "zod";
 
-import type { SourceGeneration } from "../../shared/types/conversation.ts";
-import type { HistoryItem, HistoryPage, HistoryTurnWindow } from "../../shared/types/history.ts";
-import type { ResolvedRolloutLineage } from "../ingestion/rolloutLineage.ts";
-import { observeSessionMetaSource } from "../ingestion/sessionMetaPrefix.ts";
-import { validateSourceRanges } from "../ingestion/sourceGeneration.ts";
-import { stableRead } from "../ingestion/stableRead.ts";
-import { historySnapshotUnchanged } from "../metadata/historySnapshot.ts";
-import { consumePreparedCanonicalWindow } from "./canonicalRolloutIndex.ts";
+import { consumePreparedCanonicalWindow } from "#server/history/canonicalRolloutIndex.ts";
 import type {
   HistoryEpochAuthority,
   HistoryEpochProof,
   HistoryEpochTicket,
-} from "./historyEpochAuthority.ts";
+} from "#server/history/historyEpochAuthority.ts";
 import {
   decodeNativeHistoryCursor,
   nativeCursorBoundary,
@@ -26,8 +19,18 @@ import {
   pageCursorBoundaries,
   qualifyPageCursors,
   type NativeHistoryPageResult,
-} from "./nativeHistoryReader.ts";
-import { adaptCoreTurnItem, NATIVE_ITEM_ADAPTER_VERSION } from "./nativeItemAdapter.ts";
+} from "#server/history/nativeHistoryReader.ts";
+import {
+  adaptCoreTurnItem,
+  NATIVE_ITEM_ADAPTER_VERSION,
+} from "#server/history/nativeItemAdapter.ts";
+import type { ResolvedRolloutLineage } from "#server/ingestion/rolloutLineage.ts";
+import { observeSessionMetaSource } from "#server/ingestion/sessionMetaPrefix.ts";
+import { validateSourceRanges } from "#server/ingestion/sourceGeneration.ts";
+import { stableRead } from "#server/ingestion/stableRead.ts";
+import { historySnapshotUnchanged } from "#server/metadata/historySnapshot.ts";
+import type { SourceGeneration } from "#shared/types/conversation.ts";
+import type { HistoryItem, HistoryPage, HistoryTurnWindow } from "#shared/types/history.ts";
 
 export const NATIVE_VERIFICATION_LIMITS = { bytes: 2 * 1024 * 1024, records: 10000 } as const;
 const dependencySchema = z.strictObject({

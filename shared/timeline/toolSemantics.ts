@@ -1,4 +1,9 @@
-import type { ActivityStatus, JsonObject, JsonValue, ToolActivity } from "../types/conversation.ts";
+import type {
+  ActivityStatus,
+  JsonObject,
+  JsonValue,
+  ToolActivity,
+} from "#shared/types/conversation.ts";
 
 export type ToolCategory = "shell" | "read" | "search" | "edit" | "web" | "app" | "agent" | "other";
 export interface ToolPresentation {

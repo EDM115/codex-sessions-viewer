@@ -3,8 +3,6 @@ import { PhLockKey, PhWarningCircle } from "@phosphor-icons/vue";
 
 import type { ViewerRuntimeStatus } from "#shared/types/repository.ts";
 
-import LibrarySkeleton from "./LibrarySkeleton.vue";
-
 defineProps<ViewerRuntimeStatus>();
 </script>
 

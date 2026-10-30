@@ -1,4 +1,5 @@
 export interface ExportArguments {
+  enrichPreviews?: boolean;
   codexHome?: string | undefined;
   output?: string | undefined;
   offline: boolean;
@@ -25,6 +26,8 @@ export function parseExportArguments(args: readonly string[]): ExportArguments {
     const argument = args[index]!;
     if (argument === "--offline") {
       parsed.offline = true;
+    } else if (argument === "--link-previews") {
+      parsed.enrichPreviews = true;
     } else if (argument === "--force") {
       parsed.force = true;
     } else if (argument === "--no-index") {

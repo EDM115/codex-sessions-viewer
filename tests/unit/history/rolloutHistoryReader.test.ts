@@ -5,17 +5,17 @@ import { zstdCompressSync } from "node:zlib";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { RolloutHistoryReader } from "#server/history/rolloutHistoryReader.ts";
+import * as lineageModule from "#server/ingestion/rolloutLineage.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
+import { resolveSelectedRolloutLineage } from "#server/ingestion/selectedRolloutLineage.ts";
+import * as generations from "#server/ingestion/sourceGeneration.ts";
 import { approvalEvidenceForHistoryPage } from "#server/normalization/guardianEvidence.ts";
 import {
   historyWindowInspector,
   historyWindowPresentation,
 } from "#shared/timeline/historyPresentation.ts";
 
-import { RolloutHistoryReader } from "../../../server/history/rolloutHistoryReader.ts";
-import * as lineageModule from "../../../server/ingestion/rolloutLineage.ts";
-import { RolloutStore } from "../../../server/ingestion/rolloutStream.ts";
-import { resolveSelectedRolloutLineage } from "../../../server/ingestion/selectedRolloutLineage.ts";
-import * as generations from "../../../server/ingestion/sourceGeneration.ts";
 import {
   canonicalRecords,
   fixtureLineage,

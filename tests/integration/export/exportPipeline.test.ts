@@ -16,23 +16,24 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as z from "zod";
 
-import { StaticConversationRepository } from "../../../app/repositories/static.ts";
-import { getCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { SessionCacheUpdater } from "../../../server/cache/sourceManifest.ts";
-import type { ViewerPaths } from "../../../server/core/paths.ts";
-import { collectDoctorReport } from "../../../server/export/doctorReport.ts";
-import { runStaticExport } from "../../../server/export/exportPipeline.ts";
-import { CliExportProgress } from "../../../server/export/exportProgress.ts";
-import { discoverSources } from "../../../server/ingestion/discoverSources.ts";
-import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import { selectSessionSources } from "../../../server/ingestion/selectSessionSources.ts";
-import { refreshLiveCatalog } from "../../../server/live/catalogBuilder.ts";
-import { LiveViewerRuntime } from "../../../server/live/viewerRuntime.ts";
+import { getCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { SessionCacheUpdater } from "#server/cache/sourceManifest.ts";
+import type { ViewerPaths } from "#server/core/paths.ts";
+import { collectDoctorReport } from "#server/export/doctorReport.ts";
+import { runStaticExport } from "#server/export/exportPipeline.ts";
+import { CliExportProgress } from "#server/export/exportProgress.ts";
+import { discoverSources } from "#server/ingestion/discoverSources.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { selectSessionSources } from "#server/ingestion/selectSessionSources.ts";
+import { refreshLiveCatalog } from "#server/live/catalogBuilder.ts";
+import { LiveViewerRuntime } from "#server/live/viewerRuntime.ts";
 import {
   hydrateStaticInspectorRecords,
   staticInspectorChunkSchema,
-} from "../../../shared/types/staticPayloads.ts";
+} from "#shared/types/staticPayloads.ts";
+import { StaticConversationRepository } from "~/repositories/static.ts";
+
 import { cutoffReviewRecords, parentReviewRecords } from "../../fixtures/history/parentReviews.ts";
 import { createStateDatabase } from "../source-boundary/fixtures.ts";
 
@@ -180,6 +181,17 @@ describe("static export pipeline", () => {
       createdAt: "1970-01-01T00:00:01.001Z",
       updatedAt: "1970-01-01T00:00:09.001Z",
     });
+    const staticRepository = new StaticConversationRepository(
+      async (path) => JSON.parse(await readFile(join(outputRoot, path), "utf8")) as unknown,
+    );
+    const history = await staticRepository.getHistoryPage("thread-1", {
+      anchor: { kind: "latest" },
+    });
+    expect(history.turns[0]?.opening.item).toMatchObject({
+      type: "userMessage",
+      text: "A prompt does not replace the human name",
+    });
+    expect(history.coverage.status).toBe("complete");
   });
 
   it("publishes only structurally visible chats and retains unmatched helper reviews beside their parent", async () => {
@@ -459,7 +471,7 @@ describe("static export pipeline", () => {
       generateCalls.push(input);
       await expect(
         readFile(join(input.publicInputRoot, "payloads", "sessions", "index.json"), "utf8"),
-      ).resolves.toContain('"version":1');
+      ).resolves.toContain('"version":2');
       await rm(input.outputRoot, { recursive: true, force: true });
       await mkdir(input.outputRoot, { recursive: true });
       await writeFile(join(input.outputRoot, "index.html"), "<!doctype html><title>Viewer</title>");

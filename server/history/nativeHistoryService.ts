@@ -1,16 +1,16 @@
 import type { DatabaseSync } from "node:sqlite";
 
-import type { SourceGeneration } from "../../shared/types/conversation.ts";
-import type { HistoryItemQuery, HistoryPageQuery } from "../../shared/types/repository.ts";
-import type { ResolvedRolloutLineage } from "../ingestion/rolloutLineage.ts";
-import type { HistorySnapshot, HistorySnapshotLease } from "../metadata/historySnapshot.ts";
-import { readNativeHistoryPage, readNativeTurnItems } from "./nativeHistoryReader.ts";
+import { readNativeHistoryPage, readNativeTurnItems } from "#server/history/nativeHistoryReader.ts";
 import {
   qualifyNativeProjection,
   VerifiedProjectionStore,
   type NativeProjectionQualification,
   type VerifiedProjectionStoreOptions,
-} from "./nativeProjectionQualification.ts";
+} from "#server/history/nativeProjectionQualification.ts";
+import type { ResolvedRolloutLineage } from "#server/ingestion/rolloutLineage.ts";
+import type { HistorySnapshot, HistorySnapshotLease } from "#server/metadata/historySnapshot.ts";
+import type { SourceGeneration } from "#shared/types/conversation.ts";
+import type { HistoryItemQuery, HistoryPageQuery } from "#shared/types/repository.ts";
 
 export interface HistorySnapshotProvider {
   current(): HistorySnapshot | null;

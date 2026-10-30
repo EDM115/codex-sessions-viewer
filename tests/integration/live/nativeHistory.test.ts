@@ -5,19 +5,20 @@ import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { NativeHistoryService } from "../../../server/history/nativeHistoryService.ts";
-import { validateSourceRanges } from "../../../server/ingestion/sourceGeneration.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { NativeHistoryService } from "#server/history/nativeHistoryService.ts";
+import { validateSourceRanges } from "#server/ingestion/sourceGeneration.ts";
 import {
   watchSources,
   type SourceWatchBatch,
   type WatchSourcesOptions,
-} from "../../../server/ingestion/watchSources.ts";
-import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import { LiveReconciler } from "../../../server/live/reconciler.ts";
-import { LiveConversationRepository } from "../../../server/live/repository.ts";
-import { HistorySnapshotManager } from "../../../server/metadata/historySnapshot.ts";
-import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
+} from "#server/ingestion/watchSources.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { LiveReconciler } from "#server/live/reconciler.ts";
+import { LiveConversationRepository } from "#server/live/repository.ts";
+import { HistorySnapshotManager } from "#server/metadata/historySnapshot.ts";
+import type { ViewerInvalidation } from "#shared/types/repository.ts";
+
 import { addTurn, fixtureLineage, historyFixture } from "../../fixtures/history/nativeHistory.ts";
 
 describe("optional native history serving boundary", () => {

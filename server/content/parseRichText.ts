@@ -9,6 +9,8 @@ import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
 import { unified } from "unified";
 
+import { highlightCode } from "#server/content/highlightCode.ts";
+import { richTextSanitizeSchema } from "#server/content/sanitizeSchema.ts";
 import {
   richTextDocumentSchema,
   type EmbeddedMediaSource,
@@ -18,9 +20,7 @@ import {
   type RichTextDocument,
   type RichTextMediaNode,
   type RichTextNode,
-} from "../../shared/types/richText.ts";
-import { highlightCode } from "./highlightCode.ts";
-import { richTextSanitizeSchema } from "./sanitizeSchema.ts";
+} from "#shared/types/richText.ts";
 
 const MAX_MARKDOWN_BYTES = 5 * 1024 * 1024;
 const MAX_EMBEDDED_MEDIA_BYTES = 5 * 1024 * 1024;

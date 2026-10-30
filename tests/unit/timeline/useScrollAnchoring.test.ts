@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   scrollAnchorAdjustment,
   shouldAdjustForMeasuredRow,
-} from "../../../shared/timeline/scrollAnchoring.ts";
+} from "#shared/timeline/scrollAnchoring.ts";
 
 describe("scroll anchoring", () => {
   it("corrects scroll position by the anchor element's visual displacement", () => {

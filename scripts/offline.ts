@@ -5,7 +5,7 @@ import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
-import { browserSecurityHeaders } from "../server/core/securityHeaders.ts";
+import { staticBrowserSecurityHeaders } from "#server/core/securityHeaders.ts";
 
 const HOST = "127.0.0.1";
 const DEFAULT_PORT = 3000;
@@ -134,7 +134,7 @@ async function sendFile(
   const contentType = contentTypes[extname(filePath).toLowerCase()] ?? "application/octet-stream";
 
   response.writeHead(statusCode, {
-    ...browserSecurityHeaders,
+    ...staticBrowserSecurityHeaders,
     "Cache-Control": filePath.endsWith(".html")
       ? "no-cache"
       : "public, max-age=31536000, immutable",
@@ -160,7 +160,7 @@ export async function createOfflineServer(root: string): Promise<Server> {
     void (async () => {
       if (request.method !== "GET" && request.method !== "HEAD") {
         response.writeHead(405, {
-          ...browserSecurityHeaders,
+          ...staticBrowserSecurityHeaders,
           Allow: "GET, HEAD",
           "Content-Type": "text/plain; charset=utf-8",
         });
@@ -172,7 +172,7 @@ export async function createOfflineServer(root: string): Promise<Server> {
       try {
         pathname = decodeURIComponent(new URL(request.url ?? "/", "http://offline.local").pathname);
       } catch {
-        response.writeHead(400, browserSecurityHeaders);
+        response.writeHead(400, staticBrowserSecurityHeaders);
         response.end("Bad request");
         return;
       }
@@ -189,11 +189,11 @@ export async function createOfflineServer(root: string): Promise<Server> {
         return;
       }
 
-      response.writeHead(404, browserSecurityHeaders);
+      response.writeHead(404, staticBrowserSecurityHeaders);
       response.end("Not found");
     })().catch((error: unknown) => {
       if (!response.headersSent) {
-        response.writeHead(500, browserSecurityHeaders);
+        response.writeHead(500, staticBrowserSecurityHeaders);
       }
       response.end("Internal server error");
       console.error(error);

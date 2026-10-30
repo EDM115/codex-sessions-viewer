@@ -18,6 +18,7 @@ import type { RepositoryRequester } from "~/repositories/live.ts";
 
 const props = defineProps<{
   embedded?: boolean;
+  legacyEvidence?: boolean;
   initialChunk: TurnChunk;
   initialTargetTurnId: string | null;
   mode: RepositoryMode;
@@ -38,13 +39,16 @@ const ESTIMATED_TURN_SIZE = 520;
 
 const route = useRoute();
 const router = useRouter();
-const requestFetch = useRequestFetch() as unknown as (
-  path: string,
-  options: { signal?: AbortSignal },
-) => Promise<unknown>;
+const requestFetch = useRequestFetch();
 const requester: RepositoryRequester = (path, options = {}) =>
-  requestFetch(path, { signal: options.signal }) as Promise<unknown>;
+  requestFetch<unknown, string, "get" | "post" | "delete">(path, {
+    method: options.method === "POST" ? "post" : options.method === "DELETE" ? "delete" : "get",
+    signal: options.signal,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
+  });
 const repository = createConversationRepository(props.mode, requester);
+provideLinkPreviewResolver(repository.resolveLinkPreview?.bind(repository));
 const resolveAsset = (assetId: string) => repository.resolveAsset(assetId);
 const resolveFavicon = (origin: string) => repository.resolveFavicon(origin);
 const mediaViewer = useMediaViewer();
@@ -159,6 +163,10 @@ const anchoring = useScrollAnchoring(
       ? null
       : { turnId, top: row.start + origin - container.scrollTop };
   },
+  (turnId) => {
+    const turn = timeline.turns.value.find((entry) => entry.id === turnId);
+    return turn ? JSON.stringify([props.summary.id, turn.sourceTurnId ?? turn.id]) : null;
+  },
 );
 const inspectorActivities = computed(() =>
   inspectorOpen.value ? timeline.turns.value.flatMap((turn) => turn.activities) : [],
@@ -192,7 +200,7 @@ async function settleRenderedTurnAtStart(
   remainingFrames = 3,
 ): Promise<void> {
   await nextTick();
-  if (requestVersion !== jumpRequestVersion) {
+  if (disposed || requestVersion !== jumpRequestVersion) {
     return;
   }
   alignRenderedTurnAtStart(turnId);
@@ -313,24 +321,33 @@ async function restoreDisclosureAnchor(): Promise<void> {
   disclosureAnchor = null;
 }
 
-async function jumpToTurn(turnId: string, updateRoute = true): Promise<void> {
+async function jumpToTurn(
+  turnId: string,
+  updateRoute = true,
+  requestVersion = ++jumpRequestVersion,
+): Promise<void> {
+  if (disposed || requestVersion !== jumpRequestVersion) {
+    return;
+  }
   anchoring.cancel();
-  const requestVersion = ++jumpRequestVersion;
   programmaticJumpVersion = requestVersion;
   try {
     const restoreMinimapFocus = minimapOverlayOpen.value;
     if (restoreMinimapFocus) {
       minimapOverlayOpen.value = false;
       await nextTick();
+      if (disposed || requestVersion !== jumpRequestVersion) {
+        return;
+      }
       focusMinimapToggle();
     }
-    if (requestVersion !== jumpRequestVersion) {
+    if (disposed || requestVersion !== jumpRequestVersion) {
       return;
     }
     await timeline.loadTarget(turnId, {
       limit: props.mode === "live" ? 5 : 20,
       beforeApply: () => {
-        if (requestVersion !== jumpRequestVersion) {
+        if (disposed || requestVersion !== jumpRequestVersion) {
           return;
         }
         if (scroller.value !== null) {
@@ -338,17 +355,20 @@ async function jumpToTurn(turnId: string, updateRoute = true): Promise<void> {
         }
       },
     });
-    if (requestVersion !== jumpRequestVersion) {
+    if (disposed || requestVersion !== jumpRequestVersion) {
       return;
     }
     await nextTick();
+    if (disposed || requestVersion !== jumpRequestVersion) {
+      return;
+    }
     const index = timeline.turns.value.findIndex(({ id }) => id === turnId);
     if (index < 0) {
       return;
     }
     virtualizer.value.scrollToIndex(index, { align: "start" });
     await settleRenderedTurnAtStart(turnId, requestVersion);
-    if (requestVersion !== jumpRequestVersion) {
+    if (disposed || requestVersion !== jumpRequestVersion) {
       return;
     }
     currentTurnId.value = turnId;
@@ -357,8 +377,14 @@ async function jumpToTurn(turnId: string, updateRoute = true): Promise<void> {
         query: { ...route.query, turn: turnId },
         hash: `#turn-${turnId}`,
       });
+      if (disposed || requestVersion !== jumpRequestVersion) {
+        return;
+      }
     }
     await nextTick();
+    if (disposed || requestVersion !== jumpRequestVersion) {
+      return;
+    }
     alignRenderedTurnAtStart(turnId);
     anchoring.remember();
   } finally {
@@ -457,12 +483,17 @@ async function refreshLiveSession(): Promise<void> {
       }
       await nextTick();
     }
+    if (disposed || interactionVersion !== jumpRequestVersion) {
+      return;
+    }
     anchoring.cancel();
     virtualizer.value.scrollToIndex(Math.max(0, timeline.turns.value.length - 1), {
       align: "end",
     });
     await nextTick();
-    anchoring.remember();
+    if (!disposed && interactionVersion === jumpRequestVersion) {
+      anchoring.remember();
+    }
   }
 }
 
@@ -532,6 +563,7 @@ function handleReadInput(event: Event): void {
   readerScrollPending = true;
   tailFollow.value = false;
   anchoring.cancel();
+  anchoring.remember();
   timeline.cancelTarget();
   jumpRequestVersion += 1;
   programmaticJumpVersion = null;
@@ -584,6 +616,12 @@ function restoreLayoutAnchor(): void {
 }
 
 onMounted(async () => {
+  const requestVersion = ++jumpRequestVersion;
+  unsubscribe = repository.subscribe((event) => {
+    if (event.type === "session.updated" && event.ids.includes(props.summary.id)) {
+      scheduleLiveRefresh();
+    }
+  });
   layoutObserver = new ResizeObserver(restoreLayoutAnchor);
   if (scroller.value !== null) {
     layoutObserver.observe(scroller.value);
@@ -592,8 +630,14 @@ onMounted(async () => {
     layoutObserver.observe(virtualCanvas.value);
   }
   await nextTick();
+  if (disposed || requestVersion !== jumpRequestVersion) {
+    return;
+  }
   virtualized.value = true;
   await nextTick();
+  if (disposed || requestVersion !== jumpRequestVersion) {
+    return;
+  }
   const initialIndex = Math.max(
     0,
     timeline.turns.value.findIndex(({ id }) => id === currentTurnId.value),
@@ -602,24 +646,28 @@ onMounted(async () => {
     align: props.initialTargetTurnId === null ? "end" : "start",
   });
   if (props.initialTargetTurnId !== null) {
-    await jumpToTurn(props.initialTargetTurnId, false);
+    await jumpToTurn(props.initialTargetTurnId, false, requestVersion);
   } else if (savedPosition) {
-    await jumpToTurn(savedPosition.turnId, false);
-    await anchoring.restore({ turnId: savedPosition.turnId, top: savedPosition.top });
+    await jumpToTurn(savedPosition.turnId, false, requestVersion);
+    if (disposed || requestVersion !== jumpRequestVersion) {
+      return;
+    }
+    await anchoring.restore({ ...savedPosition, inputVersion: anchoring.inputVersion });
   }
   await nextTick();
-  anchoring.remember();
-  unsubscribe = repository.subscribe((event) => {
-    if (event.type === "session.updated" && event.ids.includes(props.summary.id)) {
-      scheduleLiveRefresh();
-    }
-  });
+  if (!disposed && requestVersion === jumpRequestVersion) {
+    anchoring.remember();
+  }
 });
 
 async function latestContent() {
+  const requestVersion = ++jumpRequestVersion;
   const turnId = navigatorItems.value.at(-1)?.turnId;
   if (turnId) {
-    await jumpToTurn(turnId);
+    await jumpToTurn(turnId, true, requestVersion);
+  }
+  if (disposed || requestVersion !== jumpRequestVersion) {
+    return;
   }
   tailFollow.value = true;
   latestAvailable.value = false;
@@ -633,7 +681,7 @@ onBeforeUnmount(() => {
       ...Object.entries(savedPositions.value)
         .filter(([id]) => id !== props.summary.id)
         .slice(-31),
-      [props.summary.id, { turnId: position.turnId, top: position.top }],
+      [props.summary.id, { ...position, inputVersion: undefined }],
     ]);
   }
   disposed = true;
@@ -680,13 +728,20 @@ onBeforeUnmount(() => {
         </div>
       </div>
       <div class="conversation-heading__metadata">
-        <span>{{ summaryState.turnCount }} turns</span>
+        <span>{{ summaryState.turnCount }} {{ legacyEvidence ? "saved turns" : "turns" }}</span>
         <span>{{ summaryState.models.join(", ") || "Model unavailable" }}</span>
         <span v-if="summaryState.cwd !== null">{{ summaryState.cwd }}</span>
         <time :datetime="summaryState.updatedAt" data-allow-mismatch="text"
           >Updated {{ formatTimestamp(summaryState.updatedAt, settings.timestampFormat) }}</time
         >
       </div>
+      <p v-if="legacyEvidence" class="history-gap" role="status">
+        This archive has no source-qualified history for this chat. Contents and counts describe
+        only the saved records, completeness and older inferred outcomes are not verified.
+        <span v-if="summaryState.diagnosticCount"
+          >The export reported {{ summaryState.diagnosticCount }} issues for this chat.</span
+        >
+      </p>
       <ConversationApprovals
         :evidence="approvals.evidence.value"
         :loading="approvals.loading.value"
@@ -708,14 +763,6 @@ onBeforeUnmount(() => {
         @pointerdown.capture="handleReadInput"
         @keydown.capture="handleReadInput"
       >
-        <button
-          v-if="latestAvailable || !tailFollow"
-          class="conversation-latest"
-          type="button"
-          @click="latestContent"
-        >
-          Latest content
-        </button>
         <div class="conversation-timeline__load conversation-timeline__load--before">
           <UiButton
             v-if="timeline.canLoadBefore.value"
@@ -794,6 +841,14 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <UiButton
+        v-if="latestAvailable || !tailFollow"
+        class="conversation-latest"
+        @click="latestContent"
+      >
+        Latest content
+      </UiButton>
+
       <div
         v-if="settings.turnMinimap"
         :id="minimapPanelId"
@@ -832,8 +887,9 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .conversation-latest {
-  position: sticky;
-  top: 0;
+  position: absolute;
+  inset-block-end: var(--space-md);
+  inset-inline-end: var(--space-md);
   z-index: 2;
 }
 .conversation-heading__actions {

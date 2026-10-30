@@ -1,15 +1,12 @@
 <script setup lang="ts">
 import { PhCaretRight, PhRobot, PhWarning } from "@phosphor-icons/vue";
-import { computed, ref, watch } from "vue";
 
 import type {
   ConversationActivity,
   DisclosureDefault,
   ReasoningActivity,
 } from "#shared/types/conversation.ts";
-
-import ConversationToolRow from "./ConversationToolRow.vue";
-import { mediaReferenceText } from "./format.ts";
+import { mediaReferenceText } from "~/components/conversation/format.ts";
 
 const props = defineProps<{
   activities: ConversationActivity[];

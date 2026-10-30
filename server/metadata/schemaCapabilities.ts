@@ -54,6 +54,25 @@ const optionalThread = z.object({
   attachedParentThreadId: nullableText.optional(),
   cliVersion: nullableText.optional(),
 });
+const optionalProject = z
+  .object({ position: timestamp, createdAtMs: timestamp, updatedAtMs: timestamp })
+  .partial();
+const optionalAttachment = z.object({ createdAt: timestamp }).partial();
+const attachmentReference = z
+  .object({
+    url: text,
+    threadId: text,
+    parentThreadId: text,
+    root: nullableText,
+    path: text,
+    baseBranch: text,
+    headBranch: nullableText,
+    number: timestamp,
+    owner: text,
+    repository: text,
+    hostname: text,
+  })
+  .partial();
 export type StateThreadMetadata = z.output<typeof baseThread> & z.output<typeof optionalThread>;
 export interface MetadataAppearance {
   color?: string;
@@ -265,11 +284,11 @@ export function readStateMetadata(database: DatabaseSync): StateMetadataSnapshot
   }
   function optionalValues<T extends Record<string, z.ZodType>>(
     row: Record<string, unknown>,
-    shape: T,
+    validator: z.ZodObject<T>,
     table: string,
   ) {
     const result: Record<string, unknown> = {};
-    for (const [field, schema] of Object.entries(shape)) {
+    for (const [field, schema] of Object.entries(validator.shape)) {
       if (!(field in row)) {
         continue;
       }
@@ -280,7 +299,7 @@ export function readStateMetadata(database: DatabaseSync): StateMetadataSnapshot
         capabilities.diagnostics.push({ table, field, reason: "invalid-field" });
       }
     }
-    return z.object(shape).partial().parse(result);
+    return validator.parse(result);
   }
   if (!capabilities.tables["threads"]?.includes("id")) {
     throw new Error("State snapshot has no supported threads table");
@@ -324,7 +343,7 @@ export function readStateMetadata(database: DatabaseSync): StateMetadataSnapshot
         capabilities.diagnostics.push({ table: "threads", reason: "invalid-field" });
         return [];
       }
-      return [Object.assign(parsed.data, optionalValues(row, optionalThread.shape, "threads"))];
+      return [Object.assign(parsed.data, optionalValues(row, optionalThread, "threads"))];
     })
     .toSorted((a, b) => a.id.localeCompare(b.id));
   const sections = selectedRows(
@@ -408,11 +427,7 @@ export function readStateMetadata(database: DatabaseSync): StateMetadataSnapshot
           id: row["id"],
           name: row["name"],
           roots,
-          ...optionalValues(
-            row,
-            { position: timestamp, createdAtMs: timestamp, updatedAtMs: timestamp },
-            "projects",
-          ),
+          ...optionalValues(row, optionalProject, "projects"),
           ...(style ? { appearance: style } : {}),
         },
       ];
@@ -441,25 +456,13 @@ export function readStateMetadata(database: DatabaseSync): StateMetadataSnapshot
     }
     const reference = optionalValues(
       jsonObject(row["payload"]),
-      {
-        url: text,
-        threadId: text,
-        parentThreadId: text,
-        root: nullableText,
-        path: text,
-        baseBranch: text,
-        headBranch: nullableText,
-        number: timestamp,
-        owner: text,
-        repository: text,
-        hostname: text,
-      },
+      attachmentReference,
       "thread_attachments",
     );
     return [
       {
         ...parsed.data,
-        ...optionalValues(row, { createdAt: timestamp }, "thread_attachments"),
+        ...optionalValues(row, optionalAttachment, "thread_attachments"),
         ...(Object.keys(reference).length ? { reference } : {}),
       },
     ];

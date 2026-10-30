@@ -1,4 +1,4 @@
-import type { FileChange } from "../types/conversation.ts";
+import type { FileChange } from "#shared/types/conversation.ts";
 
 export function fullFileLines(content: string): string[] {
   if (content === "") {

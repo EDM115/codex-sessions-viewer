@@ -8,9 +8,22 @@ import type {
   ConversationSummary,
   ConversationTurn,
   TurnNavigatorItem,
-} from "../../shared/types/conversation.ts";
-import type { ConversationListItem } from "../../shared/types/library.ts";
-import type { TurnChunk } from "../../shared/types/repository.ts";
+} from "#shared/types/conversation.ts";
+import type { ConversationListItem } from "#shared/types/library.ts";
+import type { TurnChunk } from "#shared/types/repository.ts";
+
+declare global {
+  interface Window {
+    staticDisclosureEvents: Array<{
+      type: string;
+      target: string;
+      nativeOpen: boolean;
+      aria: string | null;
+      initial: boolean;
+      connected: boolean;
+    }>;
+  }
+}
 
 test.use({
   nuxt: {
@@ -168,6 +181,9 @@ test("opens nested static subagents locally with independent embedded controls a
   const childCursors: string[] = [];
   await page.route("**/payloads/**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/history-index.json")) {
+      return route.fulfill({ status: 404, body: "Version 1 archive has no history manifest" });
+    }
     if (url.pathname.endsWith("/index.json")) {
       return route.fulfill({ json: { version: 1, sessions: Object.keys(titles).map(summary) } });
     }
@@ -282,7 +298,92 @@ test("opens nested static subagents locally with independent embedded controls a
     .withRules(["duplicate-id-aria", "aria-valid-attr-value", "aria-required-attr"])
     .analyze();
   expect(accessibility.violations).toEqual([]);
-  await panel.locator(".conversation-work-stream > summary").click();
+  const childWork = panel.locator(".conversation-work-stream > summary");
+  await expect(childWork).toHaveAttribute("aria-expanded", "false");
+  await page.evaluate(() => {
+    const initial = document.querySelector(".subagent-panel .conversation-work-stream");
+    const events: Window["staticDisclosureEvents"] = [];
+    window.staticDisclosureEvents = events;
+    for (const type of ["pointerdown", "click", "toggle"]) {
+      document.addEventListener(
+        type,
+        (event) => {
+          const target = event.target;
+          const details =
+            target instanceof Element
+              ? target.closest<HTMLDetailsElement>(".subagent-panel .conversation-work-stream")
+              : null;
+          if (details && target instanceof Element) {
+            events.push({
+              type,
+              target: target.tagName,
+              nativeOpen: details.open,
+              aria: details.querySelector("summary")?.getAttribute("aria-expanded") ?? null,
+              initial: details === initial,
+              connected: details.isConnected,
+            });
+          }
+        },
+        true,
+      );
+    }
+  });
+  const summaryBefore = await childWork.boundingBox();
+  if (!summaryBefore) {
+    throw new Error("The nested-work summary must be visible");
+  }
+  const latestBefore = await panel
+    .getByRole("button", { name: "Latest content", exact: true })
+    .count();
+  await page.mouse.move(
+    summaryBefore.x + summaryBefore.width / 2,
+    summaryBefore.y + summaryBefore.height / 2,
+  );
+  await page.mouse.down();
+  const summaryAfterDown = await childWork.boundingBox();
+  const latestAfterDown = await panel
+    .getByRole("button", { name: "Latest content", exact: true })
+    .count();
+  await page.mouse.up();
+  expect(latestBefore).toBe(0);
+  expect(latestAfterDown).toBe(1);
+  if (!summaryAfterDown) {
+    throw new Error("The summary must remain mounted during native pointer input");
+  }
+  expect(Math.abs(summaryAfterDown.y - summaryBefore.y)).toBeLessThanOrEqual(0.5);
+  expect(summaryAfterDown.x).toBe(summaryBefore.x);
+  await expect(childWork).toHaveAttribute("aria-expanded", "true");
+  const events = await page.evaluate(() => window.staticDisclosureEvents);
+  expect(events.some((event) => event.type === "click" && event.initial && event.connected)).toBe(
+    true,
+  );
+  expect(events.some((event) => event.type === "toggle" && event.initial && event.connected)).toBe(
+    true,
+  );
+  console.log(
+    JSON.stringify({
+      staticNativeDisclosure: {
+        summaryBefore,
+        summaryAfterDown,
+        latestBefore,
+        latestAfterDown,
+        events,
+      },
+    }),
+  );
+  await test.info().attach("static-native-disclosure", {
+    body: JSON.stringify(
+      { summaryBefore, summaryAfterDown, latestBefore, latestAfterDown, events },
+      null,
+      2,
+    ),
+    contentType: "application/json",
+  });
+  await childWork.focus();
+  await childWork.press("Enter");
+  await expect(childWork).toHaveAttribute("aria-expanded", "false");
+  await childWork.press("Enter");
+  await expect(childWork).toHaveAttribute("aria-expanded", "true");
   await panel.locator('[data-entry-id="nested-activity"] details > summary').click();
   await panel.getByRole("link", { name: "Open Nested worker conversation" }).click();
   await expect(panel.getByText("Nested fixture assistant 39", { exact: true })).toBeVisible();

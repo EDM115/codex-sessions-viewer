@@ -1,14 +1,7 @@
 <script setup lang="ts">
 import { PhCaretRight } from "@phosphor-icons/vue";
-import { computed } from "vue";
 
 import type { LibraryEntry } from "#shared/types/library.ts";
-
-import { useLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
-import UiButton from "../ui/UiButton.vue";
-import LibraryEmptyState from "./LibraryEmptyState.vue";
-import LibrarySessionItem from "./LibrarySessionItem.vue";
-import LibrarySkeleton from "./LibrarySkeleton.vue";
 
 const props = defineProps<{ item: LibraryEntry }>();
 const workspace = useLibraryWorkspace();

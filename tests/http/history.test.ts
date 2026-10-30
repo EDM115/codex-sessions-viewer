@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
+import { createReadStream } from "node:fs";
 import {
   appendFile,
   glob,
@@ -22,10 +23,11 @@ import { zstdCompressSync } from "node:zlib";
 import { setup, $fetch, url, createPage, useTestContext } from "@nuxt/test-utils/e2e";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { LiveApiConversationRepository } from "../../app/repositories/live.ts";
-import type { CachedContentFile } from "../../server/cache/contentStore.ts";
-import { rolloutRefFromSource } from "../../server/ingestion/rolloutIdentity.ts";
-import { mergeHistoryWindows } from "../../shared/timeline/history.ts";
+import type { CachedContentFile } from "#server/cache/contentStore.ts";
+import { rolloutRefFromSource } from "#server/ingestion/rolloutIdentity.ts";
+import { mergeHistoryWindows } from "#shared/timeline/history.ts";
+import { LiveApiConversationRepository } from "~/repositories/live.ts";
+
 import { canonicalRecords } from "../fixtures/history/nativeHistory.ts";
 import { cutoffReviewRecords, parentReviewRecords } from "../fixtures/history/parentReviews.ts";
 import { createStateDatabase } from "../integration/source-boundary/fixtures.ts";
@@ -493,21 +495,60 @@ describe("actual Nuxt progressive HTTP routes", () => {
     expect((await snapshot()).rolloutIo).toBeGreaterThan(0);
   });
   it("opens the real progressive Info control against cache-empty Nuxt history without legacy materialization", async () => {
+    const stageStarted = performance.now();
+    const stages: Record<string, unknown> = {};
     const output = useTestContext().nuxt?.options.nitro.output?.dir;
     if (!output) {
       throw new Error("Expected the actual built Nuxt output");
     }
     const clientScripts = await Array.fromAsync(glob("**/*.js", { cwd: join(output, "public") }));
     const serverScripts = await Array.fromAsync(glob("**/*.mjs", { cwd: join(output, "server") }));
-    const clientSources = await Promise.all(
-      clientScripts.map((file) => readFile(join(output, "public", file), "utf8")),
-    );
-    const serverSources = await Promise.all(
-      serverScripts.map((file) => readFile(join(output, "server", file), "utf8")),
-    );
+    let scannedScriptCharacters = 0;
+    async function containsSqlite(path: string): Promise<boolean> {
+      let suffix = "";
+      for await (const chunk of createReadStream(path, {
+        encoding: "utf8",
+        highWaterMark: 64 * 1024,
+      })) {
+        const text = String(chunk);
+        scannedScriptCharacters += text.length;
+        const search = suffix + text;
+        if (search.includes("node:sqlite")) {
+          return true;
+        }
+        suffix = search.slice(-10);
+      }
+      return false;
+    }
+    let clientHasSqlite = false;
+    for (const file of clientScripts) {
+      // oxlint-disable-next-line no-await-in-loop -- Inspect every client file with one bounded stream instead of retaining the complete script graph
+      if (await containsSqlite(join(output, "public", file))) {
+        clientHasSqlite = true;
+        break;
+      }
+    }
+    let serverHasSqlite = false;
+    for (const file of serverScripts) {
+      // oxlint-disable-next-line no-await-in-loop -- One positive server dependency proves the retained packaging assertion
+      if (await containsSqlite(join(output, "server", file))) {
+        serverHasSqlite = true;
+        break;
+      }
+    }
     expect(clientScripts.length).toBeGreaterThan(0);
-    expect(clientSources.some((source) => source.includes("node:sqlite"))).toBe(false);
-    expect(serverSources.some((source) => source.includes("node:sqlite"))).toBe(true);
+    expect(clientHasSqlite).toBe(false);
+    expect(serverHasSqlite).toBe(true);
+    stages["packagingMs"] = performance.now() - stageStarted;
+    stages["afterPackagingMemory"] = process.memoryUsage();
+    stages["packagingScan"] = {
+      clientFiles: clientScripts.length,
+      serverFiles: serverScripts.length,
+      scannedScriptCharacters,
+      wholeScriptStringsRetained: 0,
+      streamHighWaterMark: 64 * 1024,
+      carryCharacters: 10,
+    };
     const records = canonicalRecords();
     records.splice(3, 0, {
       type: "event_msg",
@@ -528,8 +569,13 @@ describe("actual Nuxt progressive HTTP routes", () => {
         },
       },
     });
+    const fixtureStarted = performance.now();
     const selected = await fixture({ records });
+    stages["fixtureMs"] = performance.now() - fixtureStarted;
+    const pageStarted = performance.now();
     const page = await createPage("/");
+    stages["pageCreationMs"] = performance.now() - pageStarted;
+    const interactionStarted = performance.now();
     try {
       await page.getByRole("button", { name: "Open message info", exact: true }).click();
       const dialog = page.getByRole("dialog");
@@ -584,7 +630,16 @@ describe("actual Nuxt progressive HTTP routes", () => {
       expect((await snapshot()).sessions).toBe(0);
       expect((await snapshot()).fullReads).toBe(0);
     } finally {
+      stages["interactionsMs"] = performance.now() - interactionStarted;
       await page.close();
+      stages["totalMs"] = performance.now() - stageStarted;
+      console.log(JSON.stringify({ condition: "progressive-info-stage-costs", stages }));
+      if (process.env["VIEWER_INFO_METRICS_OUTPUT"]) {
+        await writeFile(
+          resolve(process.env["VIEWER_INFO_METRICS_OUTPUT"]),
+          JSON.stringify({ condition: "progressive-info-stage-costs", stages }, null, 2),
+        );
+      }
     }
   });
   it("propagates an actual Nuxt socket disconnect to a pending selected source read", async () => {

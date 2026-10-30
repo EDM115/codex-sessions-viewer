@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { JsonValue, RolloutRef, SourceGeneration } from "../../shared/types/conversation.ts";
-import type { JsonlRecord } from "../ingestion/jsonlStream.ts";
-import type { JsonlWindow } from "../ingestion/reverseJsonl.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import type { JsonlWindow } from "#server/ingestion/reverseJsonl.ts";
+import type { JsonValue, RolloutRef, SourceGeneration } from "#shared/types/conversation.ts";
 
 export interface LegacyTurnWindowIdentity {
   id: string;

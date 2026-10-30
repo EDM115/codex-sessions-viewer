@@ -14,15 +14,16 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { discoverSources } from "../../../server/ingestion/discoverSources.ts";
-import { stableRead } from "../../../server/ingestion/stableRead.ts";
+import { discoverSources } from "#server/ingestion/discoverSources.ts";
+import { stableRead } from "#server/ingestion/stableRead.ts";
 import {
   watchSources,
   type SourceWatchBatch,
   type SourceWatcher,
-} from "../../../server/ingestion/watchSources.ts";
-import { readSessionIndex } from "../../../server/metadata/sessionIndex.ts";
-import { snapshotStateDatabase } from "../../../server/metadata/stateSnapshot.ts";
+} from "#server/ingestion/watchSources.ts";
+import { readSessionIndex } from "#server/metadata/sessionIndex.ts";
+import { snapshotStateDatabase } from "#server/metadata/stateSnapshot.ts";
+
 import { createStateDatabase } from "./fixtures.ts";
 
 const temporaryDirectories: string[] = [];

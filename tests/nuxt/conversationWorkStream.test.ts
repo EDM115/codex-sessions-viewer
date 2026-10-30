@@ -8,6 +8,7 @@ import type {
   TurnEntryReference,
 } from "#shared/types/conversation.ts";
 import ConversationTurn from "~/components/conversation/ConversationTurn.vue";
+import { useWorkDisclosure } from "~/composables/useWorkDisclosure.ts";
 
 import { detailsElement } from "./helpers/elements.ts";
 
@@ -297,4 +298,39 @@ it("preserves explicit work disclosure intent across virtual remounts when brows
   const second = await mountSuspended(ConversationTurn, { props });
   expect(detailsElement(second.get('[data-activity-group="worked"]').element).open).toBe(true);
   second.unmount();
+});
+
+it("retains only the latest 1024 explicit disclosure choices without retaining rendered bodies", async () => {
+  vi.spyOn(localStorage, "getItem").mockImplementation(() => null);
+  vi.spyOn(localStorage, "setItem").mockImplementation(() => {});
+  const Harness = defineComponent({
+    setup() {
+      const key = ref("bounded-0");
+      const disclosure = useWorkDisclosure(key, "completed");
+      const choices = useState<Record<string, boolean>>("work-disclosure-choices");
+      return { key, ...disclosure, choices };
+    },
+    template:
+      '<details :open="open" @toggle="toggle"><summary>Work</summary><span v-if="open">Body</span></details>',
+  });
+  const wrapper = await mountSuspended(Harness);
+  wrapper.vm.choices = {};
+  for (let index = 0; index < 1025; index++) {
+    wrapper.vm.key = `bounded-${index}`;
+    // oxlint-disable-next-line no-await-in-loop -- Hydrate each disclosure identity before its explicit toggle
+    await nextTick();
+    const details = wrapper.get("details");
+    detailsElement(details.element).open = true;
+    // oxlint-disable-next-line no-await-in-loop -- Each user choice must settle before the next identity is mounted
+    await details.trigger("toggle");
+  }
+  expect(Object.keys(wrapper.vm.choices)).toHaveLength(1024);
+  expect(Object.values(wrapper.vm.choices).every(Boolean)).toBe(true);
+  wrapper.vm.key = "bounded-0";
+  await nextTick();
+  expect(wrapper.find("span").exists()).toBe(false);
+  wrapper.vm.key = "bounded-1024";
+  await nextTick();
+  expect(wrapper.get("span").text()).toBe("Body");
+  wrapper.unmount();
 });

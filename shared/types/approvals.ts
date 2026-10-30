@@ -1,7 +1,7 @@
 import * as z from "zod";
 
-import { guardianApprovalEvidenceSchema } from "./conversation.ts";
-import { historyCoverageSchema, reviewSourceRecordSchema } from "./history.ts";
+import { guardianApprovalEvidenceSchema } from "#shared/types/conversation.ts";
+import { historyCoverageSchema, reviewSourceRecordSchema } from "#shared/types/history.ts";
 
 export const guardianReviewSchema = guardianApprovalEvidenceSchema.extend({
   guardianSessionId: z.string().nullable(),

@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import type { LibraryEntry } from "#shared/types/library.ts";
 
-import { useOptionalLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
-
 defineProps<{ selected: boolean; item: LibraryEntry }>();
 const workspace = useOptionalLibraryWorkspace();
 

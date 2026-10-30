@@ -1,13 +1,8 @@
 <script setup lang="ts">
 import { PhCheck, PhCopy, PhFileCode, PhTextAlignLeft, PhWarning } from "@phosphor-icons/vue";
-import { computed, ref } from "vue";
 
+import { canRenderRichCode } from "#shared/timeline/boundedWork.ts";
 import type { RichTextCodeNode } from "#shared/types/richText.ts";
-
-import { useClipboard } from "../../composables/useClipboard.ts";
-import UiIconButton from "../ui/UiIconButton.vue";
-import DiffBlock from "./DiffBlock.client.vue";
-import RichTextNode from "./RichTextNode.vue";
 
 const props = defineProps<{ node: RichTextCodeNode }>();
 
@@ -37,6 +32,7 @@ const languageNames: Readonly<Record<string, string>> = {
 const wrapped = ref(false);
 const { copyText, state } = useClipboard();
 const isDiff = computed(() => ["diff", "patch"].includes(props.node.language?.toLowerCase() ?? ""));
+const richAllowed = computed(() => canRenderRichCode(props.node.source));
 const language = computed(() => {
   const value = props.node.language?.trim().toLowerCase();
   return value === undefined || value === "" ? "Plain text" : (languageNames[value] ?? value);
@@ -68,9 +64,9 @@ const copyLabel = computed(() => (state.value === "success" ? "Copied: Copy code
       </span>
     </figcaption>
     <div class="rich-code-block__scroller" tabindex="0">
-      <DiffBlock v-if="isDiff" :source="node.source" :wrapped="wrapped" />
-      <template v-else-if="node.highlighted !== null">
-        <RichTextNode
+      <ContentDiffBlock v-if="isDiff && richAllowed" :source="node.source" :wrapped="wrapped" />
+      <template v-else-if="richAllowed && node.highlighted !== null">
+        <ContentRichTextNode
           v-for="(child, index) in node.highlighted.children"
           :key="index"
           mode="highlighted"

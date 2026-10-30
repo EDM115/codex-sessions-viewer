@@ -4,11 +4,11 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { CACHE_PARSER_VERSION } from "../../../server/cache/sourceManifest.ts";
-import type { LoadedServerViewerConfig } from "../../../server/core/config.ts";
-import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import { LiveViewerRuntime } from "../../../server/live/viewerRuntime.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { CACHE_PARSER_VERSION } from "#server/cache/sourceManifest.ts";
+import type { LoadedServerViewerConfig } from "#server/core/config.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { LiveViewerRuntime } from "#server/live/viewerRuntime.ts";
 
 const temporaryRoots: string[] = [];
 

@@ -5,9 +5,10 @@ import { join } from "node:path";
 
 import { afterEach, expect, it } from "vitest";
 
-import { readJsonlWindow } from "../../../server/ingestion/reverseJsonl.ts";
-import { qualifyRawRecord } from "../../../server/ingestion/rolloutIdentity.ts";
-import { RolloutStore } from "../../../server/ingestion/rolloutStream.ts";
+import { readJsonlWindow } from "#server/ingestion/reverseJsonl.ts";
+import { qualifyRawRecord } from "#server/ingestion/rolloutIdentity.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
+
 import { fixtureRef } from "../../fixtures/history/nativeHistory.ts";
 const roots: string[] = [];
 afterEach(async () => {

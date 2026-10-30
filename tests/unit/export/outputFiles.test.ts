@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { retryTransientOutputRename } from "../../../server/export/outputFiles.ts";
+import { retryTransientOutputRename } from "#server/export/outputFiles.ts";
 
 describe("output file replacement", () => {
   it("retries a transient Windows EPERM rename", async () => {

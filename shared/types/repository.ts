@@ -1,6 +1,6 @@
 import * as z from "zod";
 
-import type { ApprovalEvidenceResult } from "./approvals.ts";
+import type { ApprovalEvidenceResult } from "#shared/types/approvals.ts";
 import {
   conversationScopeSchema,
   conversationTurnSchema,
@@ -14,15 +14,15 @@ import {
   type JsonValue,
   type TokenUsage,
   type TurnNavigatorItem,
-} from "./conversation.ts";
-import { viewerDiagnosticSchema, type ViewerDiagnostic } from "./diagnostics.ts";
+} from "#shared/types/conversation.ts";
+import { viewerDiagnosticSchema, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 import type {
   HistoryPage,
   HistoryTurnWindow,
   HistoryNavigatorPage,
   HistoryPresentationRequest,
   HistoryPresentation,
-} from "./history.ts";
+} from "#shared/types/history.ts";
 import {
   libraryEntrySchema,
   type LibraryEntry,
@@ -30,7 +30,8 @@ import {
   type DeepSearchJob,
   type PreparationResult,
   type CatalogSessionMetadata,
-} from "./library.ts";
+} from "#shared/types/library.ts";
+import type { LinkPreviewResolver } from "#shared/types/linkPreview.ts";
 export type RepositoryMode = "live" | "static";
 
 export interface RepositoryCapabilities {
@@ -194,6 +195,8 @@ export interface ViewerRuntimeStatus {
 }
 
 export interface ConversationRepository {
+  resolveLinkPreview?: LinkPreviewResolver;
+  supportsHistory?(id: string, options?: RepositoryRequestOptions): Promise<boolean>;
   getApprovalEvidence?(
     id: string,
     options?: RepositoryRequestOptions,

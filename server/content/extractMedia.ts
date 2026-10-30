@@ -5,16 +5,16 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { fileTypeFromBuffer } from "file-type";
 
+import { upsertCachedAsset } from "#server/cache/assetStore.ts";
+import { sanitizeSvg } from "#server/content/sanitizeSvg.ts";
+import type { ReferencedMediaSource } from "#server/ingestion/discoverSources.ts";
+import { readStableBytes } from "#server/ingestion/stableRead.ts";
 import {
   MAX_MEDIA_BYTES,
   type MediaActivity,
   type MediaReference,
-} from "../../shared/types/conversation.ts";
-import type { EmbeddedMediaSource } from "../../shared/types/richText.ts";
-import { upsertCachedAsset } from "../cache/assetStore.ts";
-import type { ReferencedMediaSource } from "../ingestion/discoverSources.ts";
-import { readStableBytes } from "../ingestion/stableRead.ts";
-import { sanitizeSvg } from "./sanitizeSvg.ts";
+} from "#shared/types/conversation.ts";
+import type { EmbeddedMediaSource } from "#shared/types/richText.ts";
 
 const MAX_MEDIA_ERROR_LENGTH = 512;
 const MAX_ORIGINAL_REFERENCE_LENGTH = 4_096;

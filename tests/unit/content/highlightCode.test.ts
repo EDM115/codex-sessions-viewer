@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { highlightCode } from "../../../server/content/highlightCode.ts";
-import type { HighlightedCodeNode } from "../../../shared/types/richText.ts";
+import { highlightCode } from "#server/content/highlightCode.ts";
+import type { HighlightedCodeNode } from "#shared/types/richText.ts";
 
 function renderedText(nodes: readonly HighlightedCodeNode[]): string {
   return nodes

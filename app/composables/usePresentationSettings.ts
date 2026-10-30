@@ -1,5 +1,3 @@
-import { onMounted, readonly, ref, shallowReactive } from "vue";
-
 import type { DisclosureDefault, ViewerTheme } from "#shared/types/conversation.ts";
 import {
   DEFAULT_PRESENTATION_SETTINGS,

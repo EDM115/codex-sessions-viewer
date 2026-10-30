@@ -4,8 +4,8 @@ import {
   adaptCoreTurnItem,
   adaptNativeThreadItem,
   adaptGuardianReviewEnvelope,
-} from "../../../server/history/nativeItemAdapter.ts";
-import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
+} from "#server/history/nativeItemAdapter.ts";
+import { classifyCatalogThread } from "#server/metadata/threadClassification.ts";
 
 describe("native and canonical item boundaries", () => {
   it("normalizes Core rolloutIds to native threadIds for cited assistant messages while retaining original evidence", () => {

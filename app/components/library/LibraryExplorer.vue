@@ -1,9 +1,6 @@
 <script setup lang="ts">
 import { PhArrowRight, PhLockKey } from "@phosphor-icons/vue";
 
-import { useLibraryWorkspace } from "../../composables/useLibraryWorkspace.ts";
-import LibraryPreparationState from "./LibraryPreparationState.vue";
-
 const workspace = useLibraryWorkspace();
 </script>
 

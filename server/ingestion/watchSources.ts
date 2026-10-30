@@ -4,7 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { watch } from "chokidar";
 
-import type { ConversationScope } from "../../shared/types/conversation.ts";
+import type { ConversationScope } from "#shared/types/conversation.ts";
 
 export type SourceChangeKind = "added" | "changed" | "removed";
 export type MetadataSourceKind =

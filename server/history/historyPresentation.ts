@@ -5,12 +5,19 @@ import {
   historyPresentationRequestSchema,
   type HistoryPresentationRequest,
   type HistoryPresentation,
+  type HistoryAttachment,
 } from "#shared/types/history.ts";
-import type { EmbeddedMediaSource } from "#shared/types/richText.ts";
+import type {
+  EmbeddedMediaSource,
+  RichTextDocument,
+  RichTextMediaNode,
+} from "#shared/types/richText.ts";
 
 export interface HistoryPresentationMedia {
+  onDocument?: (document: RichTextDocument) => void;
   cacheScope: string;
   storeEmbeddedMedia: (sources: readonly EmbeddedMediaSource[]) => Promise<void>;
+  prepareAttachments?: (attachments: readonly HistoryAttachment[]) => Promise<RichTextMediaNode[]>;
 }
 
 const entries = new Map<
@@ -35,6 +42,22 @@ export function prepareHistoryPresentation(
     const promise = parseRichText(query.markdown).then(async ({ document, embeddedMedia }) => {
       if (media && embeddedMedia.length > 0) {
         await media.storeEmbeddedMedia(embeddedMedia);
+      }
+      if (query.attachments?.length) {
+        const attachments = media?.prepareAttachments
+          ? await media.prepareAttachments(query.attachments)
+          : query.attachments.map(({ mediaType, source }): RichTextMediaNode => ({
+              type: "media",
+              mediaType,
+              source: "missing",
+              assetId: null,
+              originalSource: source.startsWith("data:")
+                ? "Retained inline attachment"
+                : source.slice(0, 4096),
+              alt: "Recorded attachment unavailable",
+              title: null,
+            }));
+        document.children.push(...attachments);
       }
       return { ...query, body: document };
     });
@@ -86,7 +109,12 @@ export function prepareHistoryPresentation(
     active.promise.then(
       (result) => {
         if (detach()) {
-          resolve(result);
+          try {
+            media?.onDocument?.(result.body);
+            resolve(result);
+          } catch (error) {
+            reject(error);
+          }
         }
         return undefined;
       },

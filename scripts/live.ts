@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { loadServerViewerConfig } from "../server/core/config.ts";
+import { loadServerViewerConfig } from "#server/core/config.ts";
 
 const HOST = "127.0.0.1";
 const HELP = `Codex Sessions Viewer live server

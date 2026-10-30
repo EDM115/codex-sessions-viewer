@@ -1,6 +1,7 @@
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import type { Ref } from "vue";
 
+import type { ScrollNavigationOwner } from "#shared/timeline/scrollAnchoring.ts";
 import { installConversationScrollPolicy } from "#shared/timeline/virtualizer.ts";
 import type { ScrollAnchorSnapshot } from "~/composables/useScrollAnchoring.ts";
 
@@ -10,6 +11,7 @@ export function useMeasuredConversationViewport(options: {
   canvas: Ref<HTMLElement | null>;
   storageKey: string;
   followEnabled: () => boolean;
+  sourceIdentity?: (key: string) => string | null;
 }) {
   const origin = ref(0);
   const follow = ref(true);
@@ -48,11 +50,13 @@ export function useMeasuredConversationViewport(options: {
       const turnId = row ? options.keys()[row.index] : undefined;
       return row && turnId ? { turnId, top: row.start - container.scrollTop } : null;
     },
+    options.sourceIdentity,
   );
   let observer: ResizeObserver | null = null;
   const measuredElements = new Set<HTMLElement>();
   let snapshot: ScrollAnchorSnapshot | null = null;
   let scheduled = false;
+  let settleQueued = false;
   let disposed = false;
   let navigation = 0;
   let readerInput = false;
@@ -71,28 +75,44 @@ export function useMeasuredConversationViewport(options: {
     snapshot ??= anchoring.capture();
   }
   async function settle() {
-    if (scheduled || disposed || navigating) {
+    if (disposed || navigating) {
+      return;
+    }
+    if (scheduled) {
+      settleQueued = true;
       return;
     }
     scheduled = true;
+    const version = navigation;
     try {
       await nextTick();
       const container = options.surface.value;
       const canvas = options.canvas.value;
-      if (!container || !canvas) {
+      if (!container || !canvas || version !== navigation || disposed) {
         return;
       }
       updateOrigin();
       await nextTick();
+      if (version !== navigation || disposed) {
+        return;
+      }
       if (follow.value && options.followEnabled()) {
         container.scrollTop = container.scrollHeight;
       } else {
         await anchoring.restore(snapshot ?? anchoring.snapshot);
       }
-      anchoring.remember();
+      if (version === navigation && !disposed) {
+        anchoring.remember();
+      }
     } finally {
-      snapshot = null;
+      if (version === navigation) {
+        snapshot = null;
+      }
       scheduled = false;
+      if (settleQueued) {
+        settleQueued = false;
+        await settle();
+      }
     }
   }
   function measure(element: unknown) {
@@ -119,7 +139,7 @@ export function useMeasuredConversationViewport(options: {
       event instanceof KeyboardEvent &&
       !["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)
     ) {
-      return;
+      return false;
     }
     navigation++;
     readerInput = true;
@@ -127,10 +147,12 @@ export function useMeasuredConversationViewport(options: {
     follow.value = false;
     snapshot = null;
     anchoring.cancel();
+    anchoring.remember();
+    return true;
   }
   function scroll() {
     const container = options.surface.value;
-    if (!container || navigating || scheduled) {
+    if (!container || navigating || (scheduled && !readerInput)) {
       return;
     }
     if (readerInput) {
@@ -142,14 +164,49 @@ export function useMeasuredConversationViewport(options: {
     }
     anchoring.remember();
   }
-  // oxlint-disable no-await-in-loop -- Each measured frame depends on the preceding layout and reader input
-  async function target(key: string, top = 0) {
+  function beginNavigation(): ScrollNavigationOwner {
     const version = ++navigation;
     readerInput = false;
     navigating = true;
     follow.value = false;
+    snapshot = null;
     anchoring.cancel();
+    return { isCurrent: () => version === navigation && !disposed };
+  }
+  function finishNavigation(owner: ScrollNavigationOwner) {
+    if (owner.isCurrent()) {
+      navigating = false;
+      anchoring.remember();
+    }
+  }
+  // oxlint-disable no-await-in-loop -- Each measured frame depends on the preceding layout and reader input
+  async function target(
+    key: string,
+    top = 0,
+    owner = beginNavigation(),
+    restored?: ScrollAnchorSnapshot,
+  ) {
+    if (!owner.isCurrent()) {
+      return;
+    }
+    const desired: ScrollAnchorSnapshot = {
+      ...restored,
+      turnId: key,
+      top,
+      inputVersion: anchoring.inputVersion,
+    };
     await nextTick();
+    if (!owner.isCurrent()) {
+      return;
+    }
+    if (
+      desired.source &&
+      options.sourceIdentity &&
+      desired.source !== options.sourceIdentity(key)
+    ) {
+      finishNavigation(owner);
+      return;
+    }
     updateOrigin();
     const index = options.keys().indexOf(key);
     if (index < 0) {
@@ -163,26 +220,28 @@ export function useMeasuredConversationViewport(options: {
     }
     for (let frame = 0; frame < 4; frame++) {
       await nextTick();
-      if (version !== navigation || disposed) {
+      if (!owner.isCurrent()) {
         return;
       }
-      await anchoring.restore({ turnId: key, top });
+      await anchoring.restore(desired);
+      if (!owner.isCurrent()) {
+        return;
+      }
     }
     navigating = false;
-    snapshot = { turnId: key, top };
+    snapshot = desired;
     await settle();
   }
-  async function latest() {
-    const version = ++navigation;
-    readerInput = false;
-    navigating = true;
+  async function latest(owner = beginNavigation()) {
+    if (!owner.isCurrent()) {
+      return;
+    }
     follow.value = true;
     latestAvailable.value = false;
     snapshot = null;
-    anchoring.cancel();
     for (let frame = 0; frame < 4; frame++) {
       await nextTick();
-      if (version !== navigation || disposed) {
+      if (!owner.isCurrent()) {
         return;
       }
       const container = options.surface.value;
@@ -190,6 +249,9 @@ export function useMeasuredConversationViewport(options: {
         container.scrollTop = container.scrollHeight;
       }
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      if (!owner.isCurrent()) {
+        return;
+      }
     }
     navigating = false;
     anchoring.remember();
@@ -213,7 +275,7 @@ export function useMeasuredConversationViewport(options: {
         ...Object.entries(positions.value)
           .filter(([key]) => key !== options.storageKey)
           .slice(-31),
-        [options.storageKey, { turnId: position.turnId, top: position.top }],
+        [options.storageKey, { ...position, inputVersion: undefined }],
       ]);
     }
     disposed = true;
@@ -232,6 +294,8 @@ export function useMeasuredConversationViewport(options: {
     scroll,
     target,
     latest,
+    beginNavigation,
+    finishNavigation,
     follow,
     latestAvailable,
     restoredPosition,

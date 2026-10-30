@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, resolve } from "node:path";
 
-import type { RawEventIdentity, RolloutRef } from "../../shared/types/conversation.ts";
-import type { JsonlRecord } from "./jsonlStream.ts";
-import type { SessionMetaPrefix } from "./sessionMetaPrefix.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import type { SessionMetaPrefix } from "#server/ingestion/sessionMetaPrefix.ts";
+import type { RawEventIdentity, RolloutRef } from "#shared/types/conversation.ts";
 
 const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const filename = new RegExp(

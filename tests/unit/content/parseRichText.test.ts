@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { parseRichText } from "../../../server/content/parseRichText.ts";
-import type { RichTextNode } from "../../../shared/types/richText.ts";
+import { parseRichText } from "#server/content/parseRichText.ts";
+import type { RichTextNode } from "#shared/types/richText.ts";
 
 function descendants(nodes: readonly RichTextNode[]): RichTextNode[] {
   return nodes.flatMap((node) => [node, ...("children" in node ? descendants(node.children) : [])]);

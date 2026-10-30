@@ -1,4 +1,4 @@
-import { InvalidationBus } from "./invalidationBus.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
 
 export interface InvalidationEventStream<Response = void> {
   push(message: { id: string; event: string; data: string }): Promise<void>;

@@ -1,8 +1,8 @@
-import type { ConversationScope } from "../../shared/types/conversation.ts";
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { SessionIndexEntry } from "../metadata/sessionIndex.ts";
-import type { StateMetadataSnapshot, StateThreadMetadata } from "../metadata/stateSnapshot.ts";
-import { resolveThreadFields } from "../metadata/threadFields.ts";
+import type { SessionIndexEntry } from "#server/metadata/sessionIndex.ts";
+import type { StateMetadataSnapshot, StateThreadMetadata } from "#server/metadata/stateSnapshot.ts";
+import { resolveThreadFields } from "#server/metadata/threadFields.ts";
+import type { ConversationScope } from "#shared/types/conversation.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 
 export interface SessionMetadataMergeInput {
   sessionId: string;

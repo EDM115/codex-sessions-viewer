@@ -8,8 +8,8 @@ import {
   loadServerViewerConfig,
   resolvedTrustedMediaRoots,
   saveServerViewerConfig,
-} from "../../../server/core/config.ts";
-import type { ViewerPaths } from "../../../server/core/paths.ts";
+} from "#server/core/config.ts";
+import type { ViewerPaths } from "#server/core/paths.ts";
 
 const temporaryDirectories: string[] = [];
 

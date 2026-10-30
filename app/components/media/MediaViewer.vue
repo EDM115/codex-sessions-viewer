@@ -11,11 +11,8 @@ import {
   PhWarning,
   PhX,
 } from "@phosphor-icons/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
-import { useClipboard } from "../../composables/useClipboard.ts";
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import UiIconButton from "../ui/UiIconButton.vue";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = withDefaults(
   defineProps<{

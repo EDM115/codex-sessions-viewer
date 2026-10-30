@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { parseSessionMetaBytes } from "../../../server/ingestion/sessionMetaPrefix.ts";
+import { parseSessionMetaBytes } from "#server/ingestion/sessionMetaPrefix.ts";
 import {
   classifyCatalogThread,
   classifyNormalizedSession,
   cachedThreadClassification,
   isThreadVisible,
   type CatalogThreadMetadata,
-} from "../../../server/metadata/threadClassification.ts";
-import type { JsonObject } from "../../../shared/types/conversation.ts";
+} from "#server/metadata/threadClassification.ts";
+import type { JsonObject } from "#shared/types/conversation.ts";
+
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 async function rawSession(payload: JsonObject) {

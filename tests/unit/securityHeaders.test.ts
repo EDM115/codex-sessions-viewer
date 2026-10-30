@@ -3,7 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   browserSecurityHeaders,
   contentSecurityPolicy,
-} from "../../server/core/securityHeaders.ts";
+  staticBrowserSecurityHeaders,
+} from "#server/core/securityHeaders.ts";
 
 function directives(policy: string): Map<string, string[]> {
   return new Map(
@@ -36,7 +37,7 @@ describe("browser security headers", () => {
     expect(contentSecurityPolicy).not.toMatch(/unsafe-eval|https?:|\*/u);
   });
 
-  it("exports one immutable header record for live and offline responses", () => {
+  it("exports an immutable header record for live responses", () => {
     expect(Object.isFrozen(browserSecurityHeaders)).toBe(true);
     expect(browserSecurityHeaders).toEqual({
       "Content-Security-Policy": contentSecurityPolicy,
@@ -46,5 +47,26 @@ describe("browser security headers", () => {
       "X-Frame-Options": "DENY",
       "X-Robots-Tag": "noindex, nofollow, noarchive",
     });
+  });
+
+  it("permits only WebAssembly compilation in the static policy and retains every other boundary", () => {
+    const policy = staticBrowserSecurityHeaders["Content-Security-Policy"]!;
+    const parsed = directives(policy);
+    expect(Object.isFrozen(staticBrowserSecurityHeaders)).toBe(true);
+    expect(parsed.get("script-src")).toEqual(["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'"]);
+    expect(parsed.get("script-src")).not.toContain("'unsafe-eval'");
+    expect(policy).not.toMatch(/https?:|\*/u);
+    expect(Object.fromEntries([...parsed].filter(([name]) => name !== "script-src"))).toEqual(
+      Object.fromEntries(
+        [...directives(contentSecurityPolicy)].filter(([name]) => name !== "script-src"),
+      ),
+    );
+    expect(
+      Object.entries(staticBrowserSecurityHeaders).filter(
+        ([name]) => name !== "Content-Security-Policy",
+      ),
+    ).toEqual(
+      Object.entries(browserSecurityHeaders).filter(([name]) => name !== "Content-Security-Policy"),
+    );
   });
 });

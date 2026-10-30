@@ -1,9 +1,9 @@
-import { type SubagentActivity } from "../../shared/types/conversation.ts";
 import {
   classifyThreadMetadata,
   classificationKind,
   type CatalogThreadMetadata,
-} from "../metadata/threadClassification.ts";
+} from "#server/metadata/threadClassification.ts";
+import { type SubagentActivity } from "#shared/types/conversation.ts";
 
 export interface SessionStructure {
   kind: "root" | "subagent" | "auxiliary";

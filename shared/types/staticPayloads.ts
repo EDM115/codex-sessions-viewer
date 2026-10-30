@@ -1,12 +1,26 @@
 import * as z from "zod";
 
-import { jsonValueSchema, turnNavigatorItemSchema } from "./conversation.ts";
-import { conversationProjectSchema, threadClassificationSchema } from "./library.ts";
-import { inspectorRecordSchema, type InspectorRecord } from "./repository.ts";
+import {
+  conversationSummarySchema,
+  jsonValueSchema,
+  turnNavigatorItemSchema,
+} from "#shared/types/conversation.ts";
+import {
+  catalogLibrarySchema,
+  catalogSessionMetadataSchema,
+  conversationProjectSchema,
+  threadClassificationSchema,
+} from "#shared/types/library.ts";
+import { inspectorRecordSchema, type InspectorRecord } from "#shared/types/repository.ts";
 
 export const compactInspectorRecordSchema = inspectorRecordSchema.omit({ rawRecords: true });
 
-export const staticLibraryPayloadSchema = z.strictObject({
+export const staticSessionIndexSchema = z.discriminatedUnion("version", [
+  z.strictObject({ version: z.literal(1), sessions: z.array(conversationSummarySchema) }),
+  z.strictObject({ version: z.literal(2), sessions: z.array(catalogSessionMetadataSchema) }),
+]);
+
+export const legacyStaticLibraryPayloadSchema = z.strictObject({
   version: z.literal(1),
   projects: z.array(conversationProjectSchema),
   entries: z.record(
@@ -23,6 +37,16 @@ export const staticLibraryPayloadSchema = z.strictObject({
     }),
   ),
 });
+
+export const staticCatalogPayloadSchema = z.strictObject({
+  version: z.literal(2),
+  catalog: catalogLibrarySchema,
+});
+export const staticLibraryPayloadSchema = z.discriminatedUnion("version", [
+  legacyStaticLibraryPayloadSchema,
+  staticCatalogPayloadSchema,
+]);
+export type LegacyStaticLibraryPayload = z.infer<typeof legacyStaticLibraryPayloadSchema>;
 
 export type StaticLibraryPayload = z.infer<typeof staticLibraryPayloadSchema>;
 

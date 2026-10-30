@@ -1,15 +1,16 @@
+import { historyActivity, activityObject } from "#shared/timeline/activityPresentation.ts";
+import { expandRecordedCells } from "#shared/timeline/codeMode.ts";
+import { isFinalAnswerPhase } from "#shared/timeline/finalAnswer.ts";
+import { historyItemIslands } from "#shared/timeline/history.ts";
+import { historyItemAttachments } from "#shared/timeline/historyAttachments.ts";
 import type {
   ConversationTurn,
   ConversationMessage,
   ConversationActivity,
   ToolActivity,
-} from "../types/conversation.ts";
-import type { HistoryItem, HistoryTurnWindow, HistoryPresentation } from "../types/history.ts";
-import type { InspectorRecord, InspectorTarget } from "../types/repository.ts";
-import { historyActivity, activityObject } from "./activityPresentation.ts";
-import { expandRecordedCells } from "./codeMode.ts";
-import { isFinalAnswerPhase } from "./finalAnswer.ts";
-import { historyItemIslands } from "./history.ts";
+} from "#shared/types/conversation.ts";
+import type { HistoryItem, HistoryTurnWindow, HistoryPresentation } from "#shared/types/history.ts";
+import type { InspectorRecord, InspectorTarget } from "#shared/types/repository.ts";
 
 export interface HistoryPresentedTurn extends ConversationTurn {
   messageAliases: Record<string, string[]>;
@@ -168,6 +169,9 @@ export function historyGapBeforeItemIds(window: HistoryTurnWindow): string[] {
 
 /** Only message and explicitly expanded reasoning text is eligible for rich presentation */
 export function historyItemMarkdown(item: HistoryItem): string | null {
+  if (item.type === "imageGeneration") {
+    return "";
+  }
   if (item.type === "userMessage" || item.type === "agentMessage") {
     return item.text;
   }
@@ -218,7 +222,9 @@ export function historyWindowPresentation(
               entry.physicalRolloutId === window.physicalRolloutId &&
               entry.turnId === window.turnId &&
               entry.itemId === id &&
-              entry.markdown === item.text,
+              entry.markdown === item.text &&
+              JSON.stringify(entry.attachments ?? []) ===
+                JSON.stringify(historyItemAttachments(item)),
           )
         : undefined;
       messages.push({
@@ -230,6 +236,34 @@ export function historyWindowPresentation(
         attachmentIds: [],
       });
       order.push({ kind: "message", id });
+      continue;
+    }
+    if (item.type === "imageGeneration") {
+      const prepared = presentations.find(
+        (entry) =>
+          entry.threadId === sessionId &&
+          entry.historyEpoch === window.historyEpoch &&
+          entry.contentRevision === window.contentRevision &&
+          entry.physicalRolloutId === window.physicalRolloutId &&
+          entry.turnId === window.turnId &&
+          entry.itemId === id &&
+          JSON.stringify(entry.attachments ?? []) === JSON.stringify(historyItemAttachments(item)),
+      );
+      const media = prepared?.body.children.find((node) => node.type === "media");
+      activities.push({
+        ...base,
+        kind: "media",
+        assetId: media?.type === "media" && media.assetId ? media.assetId : "",
+        mediaType: "image",
+        reference: {
+          kind: "invalid",
+          reason: "missing",
+          preview:
+            media?.type === "media" ? media.originalSource : "Recorded image has not been prepared",
+          sourceHash: null,
+        },
+      });
+      order.push({ kind: "activity", id });
       continue;
     }
     const semantic = historyActivity(item, { turnId: window.turnId, sessionId, rawEventIds: [] });

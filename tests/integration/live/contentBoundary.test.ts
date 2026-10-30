@@ -4,8 +4,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { staticBrowserSecurityHeaders } from "#server/core/securityHeaders.ts";
+
 import { createOfflineServer } from "../../../scripts/offline.ts";
-import { browserSecurityHeaders } from "../../../server/core/securityHeaders.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -62,7 +63,13 @@ describe("offline browser containment", () => {
       const response = await offlineResponse(root, `/${name}`);
       expect(response.status).toBe(200);
       expect(response.headers.get("cache-control")).toBe(expectedCache);
-      for (const [header, value] of Object.entries(browserSecurityHeaders)) {
+      const scriptDirective = response.headers
+        .get("content-security-policy")
+        ?.split(";")
+        .map((directive) => directive.trim())
+        .find((directive) => directive.startsWith("script-src "));
+      expect(scriptDirective).toBe("script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'");
+      for (const [header, value] of Object.entries(staticBrowserSecurityHeaders)) {
         expect(response.headers.get(header), `${name} ${header}`).toBe(value);
       }
     }
@@ -70,7 +77,7 @@ describe("offline browser containment", () => {
     const head = await offlineResponse(root, "/index.html", "HEAD");
     expect(await head.text()).toBe("");
     expect(head.headers.get("content-security-policy")).toBe(
-      browserSecurityHeaders["Content-Security-Policy"],
+      staticBrowserSecurityHeaders["Content-Security-Policy"],
     );
   });
 });

@@ -78,7 +78,7 @@ function capabilities(db) {
   const requiredProjection = ['thread_id','next_rollout_byte_offset','next_rollout_ordinal'];
   const supported = requiredTurns.every((c) => turns.has(c)) && requiredItems.every((c) => items.has(c)) && requiredProjection.every((c) => projection.has(c))
     && indexed('thread_turns',['thread_id','rollout_ordinal']) && indexed('thread_turns',['thread_id','turn_id'])
-    && indexed('thread_items',['thread_id','turn_id','rollout_ordinal']) && indexed('thread_history_projection_state',['thread_id']);
+    && indexed('thread_items',['thread_id','turn_id','rollout_ordinal']) && indexed('thread_items',['thread_id','turn_id','item_id']) && indexed('thread_history_projection_state',['thread_id']);
   if (!supported) throw Error('Unsupported history schema or required page indexes');
   return { supported, updatedAtOrdinal: items.has('updated_at_ordinal'), turnEndOrdinal: turns.has('rollout_end_ordinal'), itemLifecycle: items.has('started_at_ms') && items.has('completed_at_ms') };
 }

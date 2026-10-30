@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 
-import type { JsonlRecord } from "../../server/ingestion/jsonlStream.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
 
 function sha(text: string): string {
   return createHash("sha256").update(text).digest("hex");

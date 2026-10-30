@@ -5,8 +5,9 @@ import { performance } from "node:perf_hooks";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { LiveReconciler } from "../../server/live/reconciler.ts";
-import { LiveViewerRuntime } from "../../server/live/viewerRuntime.ts";
+import { LiveReconciler } from "#server/live/reconciler.ts";
+import { LiveViewerRuntime } from "#server/live/viewerRuntime.ts";
+
 import { createStateDatabase } from "../integration/source-boundary/fixtures.ts";
 
 const rolloutIo = vi.hoisted(() => ({

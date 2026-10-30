@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
-import { buildSidebarGroups } from "../../../shared/library/sidebarGroups.ts";
-import type { CatalogLibrary, CatalogSidebarThread } from "../../../shared/types/library.ts";
+import { classifyCatalogThread } from "#server/metadata/threadClassification.ts";
+import { buildSidebarGroups } from "#shared/library/sidebarGroups.ts";
+import type { CatalogLibrary, CatalogSidebarThread } from "#shared/types/library.ts";
 
 function row(
   id: string,

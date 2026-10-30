@@ -1,16 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { sourceGenerationSchema, type SourceGeneration } from "../../shared/types/conversation.ts";
-import { JsonlStreamParser } from "../ingestion/jsonlStream.ts";
-import type { ResolvedRolloutLineage } from "../ingestion/rolloutLineage.ts";
-import { observeSessionMetaSource } from "../ingestion/sessionMetaPrefix.ts";
-import { validateSourceRanges } from "../ingestion/sourceGeneration.ts";
-import { readStableBytes, stableRead } from "../ingestion/stableRead.ts";
-import { adaptCoreTurnItem } from "./nativeItemAdapter.ts";
+import { adaptCoreTurnItem } from "#server/history/nativeItemAdapter.ts";
 import type {
   CanonicalEvidenceProvider,
   CanonicalEvidenceRange,
-} from "./nativeProjectionQualification.ts";
+} from "#server/history/nativeProjectionQualification.ts";
+import { JsonlStreamParser } from "#server/ingestion/jsonlStream.ts";
+import type { ResolvedRolloutLineage } from "#server/ingestion/rolloutLineage.ts";
+import { observeSessionMetaSource } from "#server/ingestion/sessionMetaPrefix.ts";
+import { validateSourceRanges } from "#server/ingestion/sourceGeneration.ts";
+import { readStableBytes, stableRead } from "#server/ingestion/stableRead.ts";
+import { sourceGenerationSchema, type SourceGeneration } from "#shared/types/conversation.ts";
 
 interface PreparedWindow {
   source: SourceGeneration;

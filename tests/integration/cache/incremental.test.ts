@@ -13,16 +13,16 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
+import { getCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
 import {
   SessionCacheUpdater,
   CACHE_PARSER_VERSION,
   type StableJsonlReader,
-} from "../../../server/cache/sourceManifest.ts";
-import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import * as lineageReader from "../../../server/ingestion/rolloutLineage.ts";
-import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
+} from "#server/cache/sourceManifest.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import * as lineageReader from "#server/ingestion/rolloutLineage.ts";
+import { normalizeSession } from "#server/normalization/normalizeSession.ts";
 
 const temporaryRoots: string[] = [];
 

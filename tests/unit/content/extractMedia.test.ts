@@ -16,11 +16,11 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getCachedAsset } from "../../../server/cache/assetStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { storeEmbeddedMedia, storeReferencedMedia } from "../../../server/content/extractMedia.ts";
-import type { ReferencedMediaSource } from "../../../server/ingestion/discoverSources.ts";
-import { MAX_MEDIA_BYTES } from "../../../shared/types/conversation.ts";
+import { getCachedAsset } from "#server/cache/assetStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { storeEmbeddedMedia, storeReferencedMedia } from "#server/content/extractMedia.ts";
+import type { ReferencedMediaSource } from "#server/ingestion/discoverSources.ts";
+import { MAX_MEDIA_BYTES } from "#shared/types/conversation.ts";
 
 const roots: string[] = [];
 const png = Buffer.from(
@@ -81,7 +81,7 @@ describe("content-addressed media storage", () => {
         expect.objectContaining({ assetId: "asset-missing", status: "missing" }),
       ]);
       const cached = getCachedAsset(database, "asset-diagram");
-      expect(cached).toMatchObject({
+      expect(cached!).toMatchObject({
         status: "available",
         mimeType: "image/png",
         byteSize: png.byteLength,

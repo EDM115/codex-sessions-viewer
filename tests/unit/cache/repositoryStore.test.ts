@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import { upsertCatalogSessions } from "../../../server/cache/catalogStore.ts";
-import { replaceCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
+import { upsertCatalogSessions } from "#server/cache/catalogStore.ts";
+import { replaceCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
 import {
   getCachedInspector,
   getCachedSessionSummary,
   getCachedTurnChunk,
   getCachedTurnNavigator,
   listCachedSessions,
-} from "../../../server/cache/repositoryStore.ts";
+} from "#server/cache/repositoryStore.ts";
+
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import { representativeLargeSession } from "../../performance/fixtures.ts";
 
@@ -201,8 +202,8 @@ describe("bounded cache repository", () => {
       const message = turn.assistantMessages[0]!;
       const tool = turn.activities.find(({ kind }) => kind === "tool");
       const nonTool = turn.activities.find(({ kind }) => kind !== "tool");
-      expect(tool).toBeDefined();
-      expect(nonTool).toBeDefined();
+      expect(tool!).toBeDefined();
+      expect(nonTool!).toBeDefined();
       expect(
         getCachedInspector(database, session.summary.id, { type: "turn", id: turn.id }),
       ).toMatchObject({
@@ -220,7 +221,7 @@ describe("bounded cache repository", () => {
       ).toMatchObject({
         target: { type: "activity", id: tool!.id },
         timeToFirstTokenMs: null,
-        completedAt: tool!.kind === "tool" ? tool.completedAt : null,
+        completedAt: tool!.kind === "tool" ? tool!.completedAt : null,
       });
       expect(
         getCachedInspector(database, session.summary.id, { type: "activity", id: nonTool!.id }),

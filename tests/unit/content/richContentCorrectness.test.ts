@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { parseRichText } from "../../../server/content/parseRichText.ts";
-import type { RichTextNode } from "../../../shared/types/richText.ts";
+import { parseRichText } from "#server/content/parseRichText.ts";
+import type { RichTextNode } from "#shared/types/richText.ts";
 
 const flatten = (nodes: readonly RichTextNode[]): RichTextNode[] =>
   nodes.flatMap((node) => [node, ...("children" in node ? flatten(node.children) : [])]);

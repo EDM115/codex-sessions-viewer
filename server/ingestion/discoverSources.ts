@@ -6,8 +6,8 @@ import type {
   ConversationScope,
   MediaActivity,
   MediaReference,
-} from "../../shared/types/conversation.ts";
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
+} from "#shared/types/conversation.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 
 export interface DiscoveredRolloutSource {
   path: string;

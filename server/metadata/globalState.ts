@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 
 import * as z from "zod";
 
-import { createViewerDiagnostic, type ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import { readStableBytes } from "../ingestion/stableRead.ts";
+import { readStableBytes } from "#server/ingestion/stableRead.ts";
+import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 
 const id = z.string().min(1);
 const strings = z.array(id);

@@ -1,4 +1,4 @@
-import { readonly, ref, toValue, type MaybeRefOrGetter } from "vue";
+import { type MaybeRefOrGetter } from "vue";
 
 import { minimapDestinationIndex } from "#shared/timeline/turnMinimap.ts";
 import type { TurnNavigatorItem } from "#shared/types/conversation.ts";

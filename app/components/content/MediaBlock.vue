@@ -1,12 +1,9 @@
 <script setup lang="ts">
 import { PhDownloadSimple, PhFile, PhImageBroken } from "@phosphor-icons/vue";
-import { computed, onMounted, ref, shallowRef, watch } from "vue";
 
 import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type { RichTextMediaNode } from "#shared/types/richText.ts";
-
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import UiTooltip from "../ui/UiTooltip.vue";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = withDefaults(
   defineProps<{

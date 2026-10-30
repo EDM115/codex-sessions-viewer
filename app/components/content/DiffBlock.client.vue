@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { FileDiffMetadata } from "@pierre/diffs";
-import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import { useContentTheme } from "./useContentTheme.ts";
+import { canRenderRichCode } from "#shared/timeline/boundedWork.ts";
+import { useContentTheme } from "~/components/content/useContentTheme.ts";
 
 const props = defineProps<{ source: string; wrapped: boolean }>();
 interface DiffInstance {
@@ -12,7 +12,7 @@ interface DiffInstance {
   setOptions(options: { overflow: "scroll" | "wrap" }): void;
 }
 const container = ref<HTMLElement | null>(null);
-const state = ref<"error" | "loading" | "ready">("loading");
+const state = ref<"error" | "loading" | "ready" | "plain">("loading");
 const theme = useContentTheme();
 let instances: DiffInstance[] = [];
 let generation = 0;
@@ -30,6 +30,10 @@ async function renderSource(): Promise<void> {
   const current = ++generation;
   const source = props.source;
   clear();
+  if (!canRenderRichCode(source)) {
+    state.value = "plain";
+    return;
+  }
   state.value = "loading";
   try {
     const { FileDiff, parsePatchFiles } = await (library ??= import("@pierre/diffs"));

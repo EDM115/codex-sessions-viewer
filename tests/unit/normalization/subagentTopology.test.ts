@@ -4,8 +4,8 @@ import {
   classifySessionStructure,
   enrichSubagentActivities,
   resolveSubagentTopology,
-} from "../../../server/normalization/subagentTopology.ts";
-import type { SubagentActivity } from "../../../shared/types/conversation.ts";
+} from "#server/normalization/subagentTopology.ts";
+import type { SubagentActivity } from "#shared/types/conversation.ts";
 
 function activity(overrides: Partial<SubagentActivity> = {}): SubagentActivity {
   return {

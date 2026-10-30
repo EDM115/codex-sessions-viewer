@@ -1,8 +1,5 @@
-import {
-  conversationSummarySchema,
-  type ConversationSummary,
-} from "../../../shared/types/conversation.ts";
-import type { CatalogSessionMetadata } from "../../../shared/types/library.ts";
+import { conversationSummarySchema, type ConversationSummary } from "#shared/types/conversation.ts";
+import type { CatalogSessionMetadata } from "#shared/types/library.ts";
 
 // Explicit completed-content fixture for tests that exercise the selected legacy summary adapter
 export function completeSummaryFixture(

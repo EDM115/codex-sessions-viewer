@@ -106,9 +106,7 @@ const exitCode = computed(() => objectValue(props.activity.output)?.["exit_code"
       <div v-if="open" class="conversation-tool-row__detail-body">
         <div class="conversation-tool-row__payload-heading">
           <strong>{{ presentation.category === "shell" ? "Shell" : presentation.label }}</strong
-          ><button type="button" class="ui-button" @click="emit('inspect', activity.id)">
-            Info
-          </button>
+          ><UiButton variant="quiet" @click="emit('inspect', activity.id)"> Info </UiButton>
         </div>
         <p v-if="context"><strong>Location:</strong> {{ context }}</p>
         <template v-if="command !== null && !isScript && presentation.category !== 'edit'">

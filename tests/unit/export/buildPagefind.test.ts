@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { createPagefindTurnRecords } from "../../../server/export/buildPagefind.ts";
+import { createPagefindTurnRecords } from "#server/export/buildPagefind.ts";
+
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 describe("Pagefind turn records", () => {
@@ -12,10 +13,12 @@ describe("Pagefind turn records", () => {
       revision: "sha256:fixture",
     });
 
+    expect(conversation.summary.title).toBe(conversation.summary.id);
+    conversation.summary.title = "Build the parser";
     const records = createPagefindTurnRecords([conversation]);
 
     expect(records).toHaveLength(2);
-    expect(records[0]).toMatchObject({
+    expect(records[0]!).toMatchObject({
       url: "/session/11111111-1111-4111-8111-111111111111#turn-turn-1",
       language: "en",
       meta: {

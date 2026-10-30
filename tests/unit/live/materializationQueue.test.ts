@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   MaterializationQueue,
   type MaterializationPriority,
-} from "../../../server/live/materializationQueue.ts";
-import type { PreparationResult } from "../../../shared/types/library.ts";
+} from "#server/live/materializationQueue.ts";
+import type { PreparationResult } from "#shared/types/library.ts";
 
 interface Deferred {
   promise: Promise<void>;

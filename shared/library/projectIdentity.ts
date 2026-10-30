@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
-import type { CatalogMetadataSnapshot } from "../../server/metadata/catalogMetadata.ts";
-import type { CatalogProject, ResolvedThreadMembership } from "../types/library.ts";
+import type { CatalogMetadataSnapshot } from "#server/metadata/catalogMetadata.ts";
+import type { CatalogProject, ResolvedThreadMembership } from "#shared/types/library.ts";
 
 export interface ConversationProjectSource {
   cwd: string | null;

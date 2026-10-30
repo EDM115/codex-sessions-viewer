@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseDoctorArguments, parseExportArguments } from "../../../server/export/cliArguments.ts";
+import { parseDoctorArguments, parseExportArguments } from "#server/export/cliArguments.ts";
 
 describe("static export command arguments", () => {
   it("parses explicit paths and export controls", () => {

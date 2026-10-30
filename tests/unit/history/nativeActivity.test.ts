@@ -4,8 +4,8 @@ import {
   adaptCoreTurnItem,
   adaptCommandEvent,
   adaptNativeThreadItem,
-} from "../../../server/history/nativeItemAdapter.ts";
-import { nativeActivity, historyActivity } from "../../../shared/timeline/activityPresentation.ts";
+} from "#server/history/nativeItemAdapter.ts";
+import { nativeActivity, historyActivity } from "#shared/timeline/activityPresentation.ts";
 
 const context = { turnId: "turn", sessionId: "thread", rawEventIds: ["original", "update"] };
 describe("native activity semantics", () => {

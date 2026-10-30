@@ -1,5 +1,5 @@
-import { parseDoctorArguments } from "../server/export/cliArguments.ts";
-import { collectDoctorReport, formatDoctorOfflineOutput } from "../server/export/doctorReport.ts";
+import { parseDoctorArguments } from "#server/export/cliArguments.ts";
+import { collectDoctorReport, formatDoctorOfflineOutput } from "#server/export/doctorReport.ts";
 
 const HELP = `Codex Sessions Viewer diagnostics
 
@@ -33,6 +33,11 @@ async function main(): Promise<void> {
       : `Viewer catalog: ${report.cache.catalog.rootCount} roots, ${report.cache.catalog.subagentCount} subagents, ${report.cache.catalog.auxiliaryCount} auxiliaries; ${report.cache.catalog.readyCount} ready, ${report.cache.catalog.coldCount} cold, ${report.cache.catalog.queuedCount} queued, ${report.cache.catalog.loadingCount} loading, ${report.cache.catalog.failedCount} failed.`,
   );
   console.log(`State snapshot: ${report.snapshotManifest}.`);
+  if (report.cache.evidence) {
+    console.log(
+      `Saved viewer evidence (not current source validation): ${JSON.stringify(report.cache.evidence)}`,
+    );
+  }
   for (const line of formatDoctorOfflineOutput(report.offlineOutput)) {
     console.log(line);
   }

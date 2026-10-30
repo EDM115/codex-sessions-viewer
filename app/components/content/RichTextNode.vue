@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { computed } from "vue";
-
 import type { ResolvedAsset } from "#shared/types/repository.ts";
 import type {
   HighlightedCodeNode,
@@ -8,13 +6,7 @@ import type {
   RichTextNode,
 } from "#shared/types/richText.ts";
 import { safeCodeStyle } from "#shared/utils/codeStyles.ts";
-
-import type { MediaViewerItem } from "../../composables/useMediaViewer.ts";
-import CodeBlock from "./CodeBlock.vue";
-import MediaBlock from "./MediaBlock.vue";
-import MermaidBlock from "./MermaidBlock.vue";
-import RichLink from "./RichLink.vue";
-import TableBlock from "./TableBlock.vue";
+import type { MediaViewerItem } from "~/composables/useMediaViewer.ts";
 
 const props = withDefaults(
   defineProps<{
@@ -75,7 +67,7 @@ const elementAttributes = computed(() => {
 
 <template>
   <template v-if="node.type === 'text'">{{ node.text }}</template>
-  <TableBlock
+  <ContentTableBlock
     v-else-if="mode === 'rich' && node.type === 'element' && node.tagName === 'table'"
     :node="node"
     :resolve-asset="resolveAsset"
@@ -93,14 +85,14 @@ const elementAttributes = computed(() => {
       @open-media="emit('openMedia', $event)"
     />
   </component>
-  <RichLink
+  <ContentRichLink
     v-else-if="node.type === 'link'"
     :node="node"
     :resolve-asset="resolveAsset"
     :resolve-favicon="resolveFavicon"
     @open-media="emit('openMedia', $event)"
   />
-  <CodeBlock v-else-if="node.type === 'code'" :node="node" />
+  <ContentCodeBlock v-else-if="node.type === 'code'" :node="node" />
   <aside v-else-if="node.type === 'alert'" class="rich-alert" :data-kind="node.kind">
     <p class="rich-alert__label">{{ node.kind }}</p>
     <RichTextNode
@@ -112,12 +104,12 @@ const elementAttributes = computed(() => {
       @open-media="emit('openMedia', $event)"
     />
   </aside>
-  <MermaidBlock
+  <ContentMermaidBlock
     v-else-if="node.type === 'mermaid'"
     :source="node.source"
     @open-media="emit('openMedia', $event)"
   />
-  <MediaBlock
+  <ContentMediaBlock
     v-else-if="node.type === 'media'"
     :node="node"
     :resolve-asset="resolveAsset"

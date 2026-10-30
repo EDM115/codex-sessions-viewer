@@ -5,14 +5,14 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { openCacheDatabase } from "../../../server/cache/database.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
 import {
   assertSafeRemoteUrl,
   canonicalFaviconOrigin,
   resolveFavicon,
   type FaviconHttpClient,
   type FaviconHttpResponse,
-} from "../../../server/content/favicons.ts";
+} from "#server/content/favicons.ts";
 
 const roots: string[] = [];
 const pixel = Buffer.from(

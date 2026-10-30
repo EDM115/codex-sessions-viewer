@@ -6,7 +6,7 @@ import {
   isoTimestampSchema,
   jsonValueSchema,
   type ConversationSummary,
-} from "./conversation.ts";
+} from "#shared/types/conversation.ts";
 
 export type MaterializationState = "cold" | "queued" | "loading" | "ready" | "failed";
 

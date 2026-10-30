@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
 
-import { parseExportArguments } from "../server/export/cliArguments.ts";
-import { runStaticExport, type StaticExportSummary } from "../server/export/exportPipeline.ts";
-import { CliExportProgress } from "../server/export/exportProgress.ts";
+import { parseExportArguments } from "#server/export/cliArguments.ts";
+import { runStaticExport, type StaticExportSummary } from "#server/export/exportPipeline.ts";
+import { CliExportProgress } from "#server/export/exportProgress.ts";
 
 const HELP = `Codex Sessions Viewer static export
 
@@ -12,7 +12,8 @@ Options:
   --codex-home <path>  Read sessions from this Codex home
   --media-root <path>  Trust local attachments under this root (repeatable)
   --output <path>      Write the generated site to this directory
-  --offline            Disable remote favicon requests
+  --offline            Disable remote favicon and website-preview requests
+  --link-previews       Fetch linked-page previews for this export (optional)
   --force              Retransform every discovered session
   --no-index           Skip Pagefind generation and disable static search
   --help               Show this help and exit`;
@@ -32,6 +33,7 @@ async function main(): Promise<void> {
       codexHome: args.codexHome,
       outputRoot: args.output === undefined ? undefined : resolve(args.output),
       offline: args.offline,
+      enrichPreviews: args.enrichPreviews,
       force: args.force,
       index: args.index,
       trustedMediaRoots: args.trustedMediaRoots,

@@ -10,29 +10,24 @@ import {
   listCatalogSessions,
   markCatalogSessionReady,
   readCatalogLibrary,
-} from "../../../server/cache/catalogStore.ts";
-import { replaceCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import {
-  countCachedSearchResults,
-  searchCachedSessions,
-} from "../../../server/cache/searchStore.ts";
-import type { SourceDiscoveryResult } from "../../../server/ingestion/discoverSources.ts";
+} from "#server/cache/catalogStore.ts";
+import { replaceCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { countCachedSearchResults, searchCachedSessions } from "#server/cache/searchStore.ts";
+import type { SourceDiscoveryResult } from "#server/ingestion/discoverSources.ts";
 import {
   observeSessionMetaSource,
   readSessionMetaPrefix,
   type SessionMetaPrefixObservation,
-} from "../../../server/ingestion/sessionMetaPrefix.ts";
-import { refreshLiveCatalog } from "../../../server/live/catalogBuilder.ts";
-import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import { LiveConversationRepository } from "../../../server/live/repository.ts";
-import type { GlobalStateMetadata } from "../../../server/metadata/globalState.ts";
-import type {
-  StateMetadataSnapshot,
-  StateThreadMetadata,
-} from "../../../server/metadata/stateSnapshot.ts";
-import type { CatalogThreadMetadata } from "../../../server/metadata/threadClassification.ts";
-import type { JsonObject } from "../../../shared/types/conversation.ts";
+} from "#server/ingestion/sessionMetaPrefix.ts";
+import { refreshLiveCatalog } from "#server/live/catalogBuilder.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { LiveConversationRepository } from "#server/live/repository.ts";
+import type { GlobalStateMetadata } from "#server/metadata/globalState.ts";
+import type { StateMetadataSnapshot, StateThreadMetadata } from "#server/metadata/stateSnapshot.ts";
+import type { CatalogThreadMetadata } from "#server/metadata/threadClassification.ts";
+import type { JsonObject } from "#shared/types/conversation.ts";
+
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 import { completeSummaryFixture } from "../../fixtures/cache/summary.ts";
 import {
@@ -68,6 +63,112 @@ const globalState: GlobalStateMetadata = {
 const emptyStateSnapshot: StateMetadataSnapshot = { threads: [], sections: [], spawnEdges: [] };
 
 describe("refreshLiveCatalog", () => {
+  it("writes native ownership atomically and avoids unchanged authority writes while preserving fresh transitions", async () => {
+    const database = openCacheDatabase(":memory:");
+    const snapshot = nativeMetadata({
+      threads: [
+        nativeThread("first", { threadSource: "user" }),
+        nativeThread("second", { threadSource: "user" }),
+      ],
+    });
+    const publish = (value: typeof snapshot) =>
+      refreshLiveCatalog({
+        database,
+        discovery: discovery([]),
+        sessionIndexEntries: [],
+        globalState: value.globalState,
+        stateSnapshot: {
+          threads: value.threads,
+          sections: value.sections,
+          spawnEdges: value.spawnEdges,
+          projects: value.projects,
+        },
+        catalogMetadata: value,
+      });
+    const ownership: { transactional: boolean; changes: number }[] = [];
+    const transactionIds: number[] = [];
+    let transactionId = 0;
+    let failSecond = false;
+    let prepares = 0;
+    const execute = database.exec.bind(database);
+    const execSpy = vi.spyOn(database, "exec").mockImplementation((sql) => {
+      if (/^\s*BEGIN\b/iu.test(sql)) {
+        transactionId += 1;
+      }
+      return execute(sql);
+    });
+    const prepare = database.prepare.bind(database);
+    const spy = vi.spyOn(database, "prepare").mockImplementation((sql) => {
+      const statement = prepare(sql);
+      if (/^\s*INSERT INTO catalog_native_ownership\b/iu.test(sql)) {
+        prepares += 1;
+        const run = statement.run.bind(statement);
+        Object.defineProperty(statement, "run", {
+          value: (...args: Parameters<typeof run>) => {
+            const firstArgument: unknown = args[0];
+            if (failSecond && firstArgument === "second") {
+              throw new Error("Synthetic ownership write failure");
+            }
+            const transactional = database.isTransaction;
+            const result = run(...args);
+            transactionIds.push(transactionId);
+            ownership.push({ transactional, changes: Number(result.changes) });
+            return result;
+          },
+        });
+      }
+      return statement;
+    });
+    try {
+      await publish(snapshot);
+      expect(ownership).toEqual([
+        { transactional: true, changes: 1 },
+        { transactional: true, changes: 1 },
+      ]);
+      expect(prepares).toBe(1);
+      expect(new Set(transactionIds).size).toBe(1);
+      ownership.length = 0;
+      await publish(snapshot);
+      expect(ownership.every((entry) => entry.transactional && entry.changes === 0)).toBe(true);
+      expect(ownership).toHaveLength(2);
+      ownership.length = 0;
+      failSecond = true;
+      await expect(
+        publish({
+          ...snapshot,
+          stateAuthority: "legacy",
+          freshness: { ...snapshot.freshness, state: "retained" },
+        }),
+      ).rejects.toThrow("Synthetic ownership write failure");
+      expect(
+        database.prepare("SELECT id, authority FROM catalog_native_ownership ORDER BY id").all(),
+      ).toEqual([
+        { id: "first", authority: "root" },
+        { id: "second", authority: "root" },
+      ]);
+      failSecond = false;
+      ownership.length = 0;
+      await publish({
+        ...snapshot,
+        stateAuthority: "legacy",
+        freshness: { ...snapshot.freshness, state: "retained" },
+      });
+      expect(ownership).toEqual([
+        { transactional: true, changes: 1 },
+        { transactional: true, changes: 1 },
+      ]);
+      expect(
+        database.prepare("SELECT id, authority FROM catalog_native_ownership ORDER BY id").all(),
+      ).toEqual([
+        { id: "first", authority: "legacy" },
+        { id: "second", authority: "legacy" },
+      ]);
+    } finally {
+      spy.mockRestore();
+      execSpy.mockRestore();
+      database.close();
+    }
+  });
   it.each([false, true])(
     "retains unsupported Section membership while resolving supported siblings (mixed=%s)",
     async (mixed) => {
@@ -354,6 +455,51 @@ describe("refreshLiveCatalog", () => {
     }
   });
 
+  it("qualifies retained native membership fields independently from a fresh JSON projectless assignment", async () => {
+    const database = openCacheDatabase(":memory:");
+    const snapshot = nativeMetadata({
+      threads: [
+        nativeThread("member", { projectId: "work", sectionId: "section", threadSource: "user" }),
+      ],
+      projects: [{ id: "work", name: "Work", roots: [] }],
+      sections: [{ id: "section", name: "Focus" }],
+    });
+    const publish = (value: typeof snapshot) =>
+      refreshLiveCatalog({
+        database,
+        discovery: discovery([]),
+        sessionIndexEntries: [],
+        globalState: value.globalState,
+        stateSnapshot: { ...value, capabilities: value.capabilities ?? undefined },
+        catalogMetadata: value,
+      });
+    try {
+      await publish(snapshot);
+      const retained = {
+        ...snapshot,
+        freshness: { ...snapshot.freshness, state: "retained" as const },
+      };
+      await publish(retained);
+      expect(readCatalogLibrary(database)?.threads[0]).toMatchObject({
+        projectId: "work",
+        membershipFreshness: "retained-unvalidated",
+        sectionFreshness: "retained-unvalidated",
+      });
+      await publish({
+        ...retained,
+        globalState: { ...retained.globalState, projectlessThreadIds: ["member"] },
+      });
+      expect(readCatalogLibrary(database)?.threads[0]).toMatchObject({
+        projectId: null,
+        membershipFreshness: "fresh",
+        sectionId: "section",
+        sectionFreshness: "retained-unvalidated",
+      });
+    } finally {
+      database.close();
+    }
+  });
+
   it("excludes authoritatively removed native sessions from search and counts until they reappear", async () => {
     const database = openCacheDatabase(":memory:");
     const recoveryRoot = await mkdtemp(join(tmpdir(), "catalog-search-reappearance-"));
@@ -589,7 +735,7 @@ describe("refreshLiveCatalog", () => {
         ["saved", "Saved", 1],
         ["none", "Recents", 1],
       ]);
-      expect(catalogSession(database, "root")!?.project.id).toBe("none");
+      expect(catalogSession(database, "root")?.project.id).toBe("none");
       expect(
         listCatalogSessions(database, { scope: "active", projectId: "saved", limit: 1 }).items.map(
           (item) => item.id,
@@ -782,7 +928,7 @@ describe("refreshLiveCatalog", () => {
         discovery: discovery(["root.jsonl"]),
         stateSnapshot: { ...emptyStateSnapshot, threads: [nativeHelper] },
       });
-      expect(catalogSession(database, "root")!?.structuralEvidence?.classification).toMatchObject({
+      expect(catalogSession(database, "root")?.structuralEvidence?.classification).toMatchObject({
         visibility: "internal",
         transportSource: "cli",
         parentThreadId: "owner",
@@ -806,7 +952,7 @@ describe("refreshLiveCatalog", () => {
           ],
         },
       });
-      expect(catalogSession(database, "child")!?.structuralEvidence?.classification).toMatchObject({
+      expect(catalogSession(database, "child")?.structuralEvidence?.classification).toMatchObject({
         visibility: "unresolved",
         parentThreadId: null,
         declarations: expect.arrayContaining([
@@ -815,7 +961,7 @@ describe("refreshLiveCatalog", () => {
           expect.objectContaining({ origin: "spawn-edge", parentThreadIds: ["edge-parent"] }),
         ]),
       });
-      expect(catalogSession(database, "child")!?.parentThreadId).toBeNull();
+      expect(catalogSession(database, "child")?.parentThreadId).toBeNull();
     } finally {
       database.close();
     }
@@ -932,7 +1078,7 @@ describe("refreshLiveCatalog", () => {
           pinned: true,
         },
       });
-      expect(catalogSession(database, "root")!?.summary).not.toHaveProperty("turnCount");
+      expect(catalogSession(database, "root")?.summary).not.toHaveProperty("turnCount");
     } finally {
       database.close();
     }
@@ -967,20 +1113,20 @@ describe("refreshLiveCatalog", () => {
         kind: "subagent",
         parentThreadId: "root",
       });
-      expect(catalogSession(database, "root")!?.childCount).toBe(1);
+      expect(catalogSession(database, "root")?.childCount).toBe(1);
       expect(readPrefix).toHaveBeenCalledTimes(2);
       await refreshLiveCatalog({
         ...options,
         discovery: discovery(["subagent.jsonl"]),
         changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
       });
-      expect(catalogSession(database, "child")!?.kind).toBe("subagent");
+      expect(catalogSession(database, "child")?.kind).toBe("subagent");
       await refreshLiveCatalog({
         ...options,
         discovery: discovery(["root.jsonl", "subagent.jsonl"]),
         changedSourcePaths: [join(fixtureRoot, "root.jsonl")],
       });
-      expect(catalogSession(database, "child")!?.parentThreadId).toBe("root");
+      expect(catalogSession(database, "child")?.parentThreadId).toBe("root");
       database
         .prepare(
           "UPDATE session_catalog SET structural_evidence_json = NULL, session_kind = 'root', parent_thread_id = NULL WHERE id = 'child'",
@@ -992,7 +1138,7 @@ describe("refreshLiveCatalog", () => {
         changedSourcePaths: [],
       });
       expect(repaired.changedIds).toContain("child");
-      expect(catalogSession(database, "child")!?.parentThreadId).toBe("root");
+      expect(catalogSession(database, "child")?.parentThreadId).toBe("root");
       expect(readPrefix).toHaveBeenCalledTimes(3);
       expect(
         (
@@ -1217,7 +1363,7 @@ describe("refreshLiveCatalog", () => {
       expect(
         markCatalogSessionReady(database, summary, { sourceRevision: "stale", sourcePath: path }),
       ).toBe(false);
-      expect(catalogSession(database, "child")!?.parentThreadId).toBeNull();
+      expect(catalogSession(database, "child")?.parentThreadId).toBeNull();
       await refreshLiveCatalog({
         ...options,
         observeSource: async (observedPath) => {
@@ -1237,7 +1383,7 @@ describe("refreshLiveCatalog", () => {
         parentThreadId: "root",
         structuralEvidence: { origin: "materialized", meta: { parentThreadId: "root" } },
       });
-      expect(catalogSession(database, "root")!?.summary.childThreadIds).toEqual(["child"]);
+      expect(catalogSession(database, "root")?.summary.childThreadIds).toEqual(["child"]);
       await refreshLiveCatalog({ ...options, changedSourcePaths: [] });
       expect(catalogSession(database, "child")!).toMatchObject({
         kind: "subagent",
@@ -1349,7 +1495,7 @@ describe("refreshLiveCatalog", () => {
         stateSnapshot: emptyStateSnapshot,
       });
       expect(metadataOnly.changedIds).toEqual(["root"]);
-      expect(catalogSession(database, "root")!?.summary.title).toBe("Renamed root");
+      expect(catalogSession(database, "root")?.summary.title).toBe("Renamed root");
 
       const topology = await refreshLiveCatalog({
         database,
@@ -1366,7 +1512,7 @@ describe("refreshLiveCatalog", () => {
         },
       });
       expect(topology.changedIds).toEqual(["missing-meta", "root"]);
-      expect(catalogSession(database, "root")!?.summary.childThreadIds).toEqual(["missing-meta"]);
+      expect(catalogSession(database, "root")?.summary.childThreadIds).toEqual(["missing-meta"]);
       expect(catalogSession(database, "missing-meta")).toMatchObject({
         kind: "subagent",
         parentThreadId: "root",
@@ -1413,7 +1559,7 @@ describe("refreshLiveCatalog", () => {
 
       expect(changed.changedIds).toEqual(["root"]);
       expect(readPrefix).toHaveBeenCalledTimes(2);
-      expect(catalogSession(database, "root")!?.materialization).toBe("cold");
+      expect(catalogSession(database, "root")?.materialization).toBe("cold");
     } finally {
       database.close();
     }

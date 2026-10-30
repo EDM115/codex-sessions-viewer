@@ -3,7 +3,22 @@ import { lstat, readFile, readdir, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 
-import { resolveConversationProject } from "../../shared/library/projectIdentity.ts";
+import {
+  assertSafeOutputComponent,
+  serializedJson,
+  writeOutputFile,
+} from "#server/export/outputFiles.ts";
+import { writeStaticHistory } from "#server/export/writeStaticHistory.ts";
+import type { HistoryPresentationMedia } from "#server/history/historyPresentation.ts";
+import {
+  classifyNormalizedSession,
+  isThreadVisible,
+} from "#server/metadata/threadClassification.ts";
+import type {
+  NormalizedRawEvent,
+  NormalizedSession,
+} from "#server/normalization/normalizeSession.ts";
+import { resolveConversationProject } from "#shared/library/projectIdentity.ts";
 import type {
   ConversationActivity,
   ConversationMessage,
@@ -11,18 +26,25 @@ import type {
   ConversationTurn,
   JsonValue,
   TurnNavigatorItem,
-} from "../../shared/types/conversation.ts";
-import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { ConversationProject } from "../../shared/types/library.ts";
-import type { InspectorRecord, InspectorTarget, TurnChunk } from "../../shared/types/repository.ts";
-import { classifyNormalizedSession, isThreadVisible } from "../metadata/threadClassification.ts";
-import type { NormalizedRawEvent, NormalizedSession } from "../normalization/normalizeSession.ts";
-import { assertSafeOutputComponent, serializedJson, writeOutputFile } from "./outputFiles.ts";
+  SourceGeneration,
+} from "#shared/types/conversation.ts";
+import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import type { HistoryPage } from "#shared/types/history.ts";
+import {
+  type ConversationProject,
+  catalogSessionMetadataSchema,
+  type CatalogLibrary,
+} from "#shared/types/library.ts";
+import type { InspectorRecord, InspectorTarget, TurnChunk } from "#shared/types/repository.ts";
 
 const DEFAULT_CHUNK_SIZE = 20;
 export const DEFAULT_STATIC_CHUNK_BYTE_LIMIT = 4 * 1024 * 1024;
 
 export interface WriteStaticPayloadOptions {
+  catalog?: CatalogLibrary;
+  histories?: ReadonlyMap<string, HistoryPage>;
+  historySources?: ReadonlyMap<string, readonly SourceGeneration[]>;
+  historyMedia?: HistoryPresentationMedia;
   generatedRoot: string;
   publicRoot?: string | undefined;
   chunkSize?: number | undefined;
@@ -497,18 +519,58 @@ export async function writeStaticPayloads(
   if (options.writeIndex !== false) {
     dispositions.push(
       ...(await writePayload(options, ["sessions", "index.json"], {
-        version: 1,
-        sessions: ordered.map(({ summary }) => summary),
+        version: options.catalog ? 2 : 1,
+        sessions: ordered.map(({ summary }) =>
+          options.catalog ? catalogSessionMetadataSchema.parse(summary) : summary,
+        ),
       })),
     );
     dispositions.push(
-      ...(await writePayload(options, ["projects.json"], staticLibraryPayload(ordered))),
+      ...(await writePayload(
+        options,
+        ["projects.json"],
+        options.catalog
+          ? {
+              version: 2,
+              catalog: {
+                ...options.catalog,
+                threads: ordered.map((conversation) => ({
+                  projectId: null,
+                  hostId: null,
+                  sectionId: null,
+                  sectionPosition: null,
+                  pinned: conversation.summary.pinned,
+                  recencyAt: Date.parse(conversation.summary.updatedAt),
+                  ...options.catalog!.threads.find(
+                    (thread) => thread.id === conversation.summary.id,
+                  ),
+                  id: conversation.summary.id,
+                  title: conversation.summary.title,
+                  scope: conversation.summary.scope,
+                  classification: classifyNormalizedSession(conversation),
+                })),
+              },
+            }
+          : staticLibraryPayload(ordered),
+      )),
     );
   }
   let turnChunkCount = 0;
   for (const conversation of options.writeSessions === false ? [] : ordered) {
     const id = conversation.summary.id;
     assertSafeOutputComponent(id);
+    const history = options.histories?.get(id);
+    if (history) {
+      // oxlint-disable-next-line no-await-in-loop -- The selected saved history is published with its summary and legacy compatibility chunks
+      await writeStaticHistory(
+        history,
+        async (name, value) => {
+          dispositions.push(...(await writePayload(options, ["sessions", id, name], value)));
+        },
+        options.historySources?.get(id),
+        options.historyMedia,
+      );
+    }
     // oxlint-disable-next-line no-await-in-loop -- Each session payload set is published coherently before the next one.
     const summaryDispositions = await writePayload(options, ["sessions", id, "summary.json"], {
       summary: conversation.summary,

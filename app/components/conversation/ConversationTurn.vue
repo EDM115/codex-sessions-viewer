@@ -42,6 +42,7 @@ const finalAssistant = computed(
     <ConversationMessage
       v-if="turn.userMessage !== null"
       :message="turn.userMessage"
+      :data-anchor-entry="`message:${messageKeys?.[turn.userMessage.id] ?? turn.userMessage.id}`"
       :resolve-asset="resolveAsset"
       :resolve-favicon="resolveFavicon"
       :timestamp-format="timestampFormat"
@@ -73,6 +74,7 @@ const finalAssistant = computed(
       v-if="finalAssistant !== null"
       :key="messageKeys?.[finalAssistant.id] ?? finalAssistant.id"
       :message="finalAssistant"
+      :data-anchor-entry="`message:${messageKeys?.[finalAssistant.id] ?? finalAssistant.id}`"
       :resolve-asset="resolveAsset"
       :resolve-favicon="resolveFavicon"
       :timestamp-format="timestampFormat"

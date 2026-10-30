@@ -1,3 +1,4 @@
+import { presentTool } from "#shared/timeline/toolSemantics.ts";
 import type {
   CodeModeEvidence,
   ConversationActivity,
@@ -6,8 +7,7 @@ import type {
   ToolActivity,
   FileChangeActivity,
   SubagentActivity,
-} from "../types/conversation.ts";
-import { presentTool } from "./toolSemantics.ts";
+} from "#shared/types/conversation.ts";
 function activityObject(value: JsonValue | undefined): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
 }

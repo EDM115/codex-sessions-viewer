@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import UiTooltip from "./UiTooltip.vue";
-
 defineProps<{
   href: string;
   label: string;

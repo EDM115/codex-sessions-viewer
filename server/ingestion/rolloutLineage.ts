@@ -1,26 +1,29 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
-import {
-  rolloutRefSchema,
-  type RolloutHistoryBase,
-  type RolloutRef,
-  type SourceGeneration,
-} from "../../shared/types/conversation.ts";
-import { discoverSources } from "./discoverSources.ts";
-import { readStableJsonl, type JsonlRecord } from "./jsonlStream.ts";
+import { discoverSources } from "#server/ingestion/discoverSources.ts";
+import { readStableJsonl, type JsonlRecord } from "#server/ingestion/jsonlStream.ts";
 import {
   qualifyRawRecord,
   parseRolloutFilename,
   rolloutRefFromSource,
   sourceHomePath,
-} from "./rolloutIdentity.ts";
+} from "#server/ingestion/rolloutIdentity.ts";
 import {
   readSessionMetaPrefix,
   CATALOG_METADATA_MAX_BYTES,
   parseSessionMetaBytes,
-} from "./sessionMetaPrefix.ts";
-import { validateSourceGeneration, type GenerationValidationOptions } from "./sourceGeneration.ts";
+} from "#server/ingestion/sessionMetaPrefix.ts";
+import {
+  validateSourceGeneration,
+  type GenerationValidationOptions,
+} from "#server/ingestion/sourceGeneration.ts";
+import {
+  rolloutRefSchema,
+  type RolloutHistoryBase,
+  type RolloutRef,
+  type SourceGeneration,
+} from "#shared/types/conversation.ts";
 
 export interface RolloutSourceResolver {
   resolve(physicalRolloutId: string, signal?: AbortSignal): Promise<RolloutRef | null>;

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   InvalidStaticPayloadPathError,
   readStaticPayloadInput,
-} from "../../../server/export/staticPayloadInput.ts";
+} from "#server/export/staticPayloadInput.ts";
 
 const roots: string[] = [];
 

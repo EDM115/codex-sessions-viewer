@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 
 import * as z from "zod";
 
-import type { ResolvedRolloutLineage } from "../ingestion/rolloutLineage.ts";
-import { SOURCE_GENERATION_PARSER_VERSION } from "../ingestion/sourceGeneration.ts";
+import type { ResolvedRolloutLineage } from "#server/ingestion/rolloutLineage.ts";
+import { SOURCE_GENERATION_PARSER_VERSION } from "#server/ingestion/sourceGeneration.ts";
 
 const rangeSchema = z
   .strictObject({

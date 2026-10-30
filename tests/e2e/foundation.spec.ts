@@ -1,6 +1,8 @@
 import { AxeBuilder } from "@axe-core/playwright";
 import { expect, test } from "@nuxt/test-utils/playwright";
 
+import { historyPageQuerySchema } from "#shared/types/repository.ts";
+
 declare global {
   interface Window {
     emitViewerEvent: (type: string, data: string) => void;
@@ -46,13 +48,15 @@ test("keeps active and archived search scoped in the URL and opens exact turns",
   await expect(search).toBeVisible();
   await search.fill("Handle cancellation");
   await expect(page).toHaveURL(/\?q=Handle\+cancellation$/u);
+  await page.getByRole("button", { name: "Search transcript content", exact: true }).click();
+  await page.getByRole("button", { name: "Search unloaded conversations", exact: true }).click();
   await expect(page.getByText("1 result for “Handle cancellation”")).toBeAttached();
   const activeResult = page
     .locator('[aria-label="Search results"]')
-    .getByRole("link", { name: /Build the parser/u });
+    .getByRole("link", { name: /Parser metadata title/u });
   await expect(activeResult).toHaveAttribute(
     "href",
-    "/session/11111111-1111-4111-8111-111111111111?q=Handle+cancellation&turn=turn-2#turn-turn-2",
+    "/session/11111111-1111-4111-8111-111111111111?q=Handle+cancellation&search=content&turn=turn-2#turn-turn-2",
   );
   const documents: string[] = [];
   page.on("request", (request) => {
@@ -62,7 +66,7 @@ test("keeps active and archived search scoped in the URL and opens exact turns",
   });
   await activeResult.click();
   await expect(page).toHaveURL(
-    /\/session\/11111111-1111-4111-8111-111111111111\?q=Handle\+cancellation&turn=turn-2/u,
+    /\/session\/11111111-1111-4111-8111-111111111111\?q=Handle\+cancellation&search=content&turn=turn-2/u,
   );
   await expect(
     page.getByLabel("Conversation timeline").getByText("Handle cancellation", { exact: true }),
@@ -75,18 +79,19 @@ test("keeps active and archived search scoped in the URL and opens exact turns",
     "aria-selected",
     "true",
   );
+  await page.getByRole("button", { name: "Search transcript content", exact: true }).click();
   await page.getByRole("button", { name: "Search unloaded conversations" }).click();
   await expect(page.getByText("1 result for “Legacy prompt”")).toBeAttached();
   const archivedResult = page
     .locator('[aria-label="Search results"]')
-    .getByRole("link", { name: /Legacy prompt/u });
+    .getByRole("link", { name: /Archived metadata title/u });
   await expect(archivedResult).toHaveAttribute(
     "href",
-    "/session/33333333-3333-4333-8333-333333333333?scope=archived&q=Legacy+prompt&turn=legacy-turn#turn-legacy-turn",
+    "/session/33333333-3333-4333-8333-333333333333?scope=archived&q=Legacy+prompt&search=content&turn=legacy-turn#turn-legacy-turn",
   );
   await archivedResult.click();
   await expect(page).toHaveURL(
-    /\/session\/33333333-3333-4333-8333-333333333333\?scope=archived&q=Legacy\+prompt&turn=legacy-turn/u,
+    /\/session\/33333333-3333-4333-8333-333333333333\?scope=archived&q=Legacy\+prompt&search=content&turn=legacy-turn/u,
   );
   await expect(
     page.getByLabel("Conversation timeline").getByText("Legacy prompt", { exact: true }),
@@ -98,9 +103,9 @@ test("opens an exact turn with the virtualized timeline, minimap, and inspector"
   goto,
 }) => {
   const sessionId = "11111111-1111-4111-8111-111111111111";
-  await goto(`/session/${sessionId}?turn=turn-1#turn-turn-1`, { waitUntil: "hydration" });
+  await goto(`/__fixture/legacy/${sessionId}?turn=turn-1#turn-turn-1`, { waitUntil: "hydration" });
 
-  await expect(page.getByRole("heading", { level: 1 })).toContainText("Build the parser");
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("Parser metadata title");
   await expect(page.locator(".conversation-message--user").first()).toContainText(
     "Build the parser",
   );
@@ -115,19 +120,29 @@ test("opens an exact turn with the virtualized timeline, minimap, and inspector"
     .getByText(/Worked for/)
     .first()
     .click();
+  await expect(page.locator(".conversation-reasoning").first()).toBeVisible();
+  await page.getByText("Work after answer", { exact: false }).first().click();
   const toolGroup = page.locator(".conversation-tool-group").first();
   await expect(toolGroup).toBeVisible();
-  await expect(toolGroup.locator(".conversation-tool-row")).toHaveCount(0);
+  await expect(toolGroup.locator(".conversation-work-row--typed")).toHaveCount(0);
   await toolGroup.locator(":scope > summary").click();
-  const toolRow = toolGroup.locator(".conversation-tool-row").first();
+  await expect(toolGroup.locator(".conversation-work-row--typed")).toContainText("Web search");
+  const toolRow = page.locator(".conversation-tool-row").first();
   await expect(toolRow).toContainText("Read file");
   await expect(toolRow.locator("pre")).toHaveCount(0);
   await toolRow.locator(".conversation-tool-row__header").click();
   await expect(toolRow.locator(".conversation-tool-row__output")).toContainText("ok");
   await expect(toolRow.locator(".conversation-raw pre")).toHaveCount(0);
   await toolRow.locator(".conversation-raw").first().locator("summary").click();
-  await expect(toolRow.locator(".conversation-raw pre").first()).toContainText("README.md");
-  await expect(toolRow).toContainText("filesystem/read_file");
+  await expect(toolRow.locator(".conversation-raw pre").first()).toContainText(
+    "filesystem/read_file",
+  );
+  await toolRow
+    .locator(".conversation-raw")
+    .filter({ hasText: "Technical details · input" })
+    .locator("summary")
+    .click();
+  await expect(toolRow.locator(".conversation-raw pre").last()).toContainText("README.md");
   const infoButton = page.getByRole("button", { name: "Open message info" }).first();
   await infoButton.click();
   await expect(page.getByRole("dialog", { name: "Info" })).toContainText("gpt-exact-1");
@@ -140,6 +155,115 @@ test("opens an exact turn with the virtualized timeline, minimap, and inspector"
   expect(accessibility.violations).toEqual([]);
   await page.getByRole("dialog", { name: "Info" }).press("Escape");
   await expect(infoButton).toBeFocused();
+});
+
+test("opens source-qualified progressive history and navigates recent turns by keyboard", async ({
+  page,
+  goto,
+}) => {
+  const requests: URL[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.endsWith("/turns")) {
+      requests.push(url);
+    }
+  });
+  await page.setViewportSize({ width: 390, height: 800 });
+  await goto("/session/11111111-1111-4111-8111-111111111111?turn=turn-1", {
+    waitUntil: "hydration",
+  });
+  const surface = page.getByLabel("Conversation timeline");
+  await expect(surface.getByText("Build the parser", { exact: true })).toBeVisible();
+  const infoButton = surface.getByRole("button", { name: "Open message info" }).first();
+  await infoButton.click();
+  const info = page.getByRole("dialog", { name: "Info" });
+  await expect(info).toContainText("Loaded source evidence");
+  await expect(info).toContainText("turn-1");
+  await expect(info.locator("pre")).toHaveCount(0);
+  await info.press("Escape");
+  await expect(infoButton).toBeFocused();
+  const navigation = page.getByRole("navigation", { name: "Loaded turn navigation" });
+  const target = navigation.getByRole("button", {
+    name: "Keep the tall timeline turn active while reading",
+    exact: true,
+  });
+  await target.focus();
+  await target.press("Enter");
+  const tallTurn = surface.locator('[data-history-turn="turn-21"]');
+  await expect(tallTurn).toBeVisible();
+  await expect.poll(async () => (await tallTurn.boundingBox())?.height ?? 0).toBeGreaterThan(800);
+  await surface.evaluate((element) => {
+    element.scrollTop += 300;
+  });
+  await expect(tallTurn).toBeVisible();
+  expect(
+    requests.some((url) => {
+      const query = historyPageQuerySchema.parse(
+        JSON.parse(url.searchParams.get("history") ?? "{}"),
+      );
+      return query.anchor?.kind === "turn" && query.anchor.turnId === "turn-21";
+    }),
+  ).toBe(true);
+  expect(requests.every((url) => !url.searchParams.has("legacy"))).toBe(true);
+  await expect.poll(() => surface.locator("[data-history-turn]").count()).toBeLessThan(20);
+});
+
+test("preserves the current progressive reading anchor across deferred opaque-cursor history", async ({
+  page,
+  goto,
+}) => {
+  const sessionId = "11111111-1111-4111-8111-111111111111";
+  let releaseEarlier!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseEarlier = resolve;
+  });
+  const cursors: string[] = [];
+  await page.route(`**/api/sessions/${sessionId}/turns?**`, async (route) => {
+    const query = historyPageQuerySchema.parse(
+      JSON.parse(new URL(route.request().url()).searchParams.get("history") ?? "{}"),
+    );
+    if (query.anchor?.kind === "before") {
+      cursors.push(query.anchor.cursor);
+      await gate;
+    }
+    await route.continue();
+  });
+  await goto(`/session/${sessionId}?turn=turn-21`, { waitUntil: "hydration" });
+  const surface = page.getByLabel("Conversation timeline");
+  const target = surface.locator('[data-history-turn="turn-21"]');
+  await expect(target).toBeVisible();
+  const sourceIdentity = await target.getAttribute("data-anchor-source");
+  const retainedBefore = Number(await surface.getAttribute("data-retained-turns"));
+  await surface
+    .getByRole("button", { name: "Load older turns", exact: true })
+    .evaluate((button) => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+  await expect.poll(() => cursors.length).toBe(1);
+  expect(cursors[0]).toBeTruthy();
+  expect(cursors[0]).not.toMatch(/^\d+$/u);
+  await surface.evaluate((element) => {
+    element.scrollTop += 96;
+  });
+  const before = await target.boundingBox();
+  if (before === null || sourceIdentity === null) {
+    throw new Error("The selected source-qualified reading anchor must be mounted");
+  }
+  const response = page.waitForResponse((received) => {
+    const url = new URL(received.url());
+    if (url.pathname !== `/api/sessions/${sessionId}/turns`) {
+      return false;
+    }
+    const query = historyPageQuerySchema.parse(JSON.parse(url.searchParams.get("history") ?? "{}"));
+    return query.anchor?.kind === "before";
+  });
+  releaseEarlier();
+  expect((await response).ok()).toBe(true);
+  await expect
+    .poll(async () => Number(await surface.getAttribute("data-retained-turns")))
+    .toBeGreaterThan(retainedBefore);
+  await expect(target).toHaveAttribute("data-anchor-source", sourceIdentity);
+  await expect
+    .poll(async () => Math.abs(((await target.boundingBox())?.y ?? 0) - before.y))
+    .toBeLessThanOrEqual(3);
 });
 
 test("preserves a moved reading anchor while a deferred earlier chunk is applied", async ({
@@ -157,7 +281,9 @@ test("preserves a moved reading anchor while a deferred earlier chunk is applied
     await earlierChunkGate;
     await route.continue();
   });
-  await goto(`/session/${sessionId}?turn=turn-21#turn-turn-21`, { waitUntil: "hydration" });
+  await goto(`/__fixture/legacy/${sessionId}?turn=turn-21#turn-turn-21`, {
+    waitUntil: "hydration",
+  });
   const scroller = page.locator(".conversation-timeline");
   const anchorTurn = page.locator('.conversation-turn[data-turn-id="turn-21"]');
   await expect(anchorTurn).toBeVisible();
@@ -198,7 +324,7 @@ test("jumps across chunks from the narrow minimap and restores keyboard focus", 
     }
   });
   await page.setViewportSize({ width: 390, height: 800 });
-  await goto(`/session/${sessionId}`, { waitUntil: "hydration" });
+  await goto(`/__fixture/legacy/${sessionId}`, { waitUntil: "hydration" });
   const toggle = page.getByRole("button", { name: "Open turn minimap" });
 
   await toggle.click();
@@ -267,71 +393,96 @@ test("jumps across chunks from the narrow minimap and restores keyboard focus", 
   await expect(tallMarker).toHaveAttribute("aria-current", "true");
 });
 
-test("coalesces bursty live invalidations without console errors", async ({ page, goto }) => {
-  const sessionId = "11111111-1111-4111-8111-111111111111";
-  await page.addInitScript(() => {
-    const listeners = new Map<string, EventListener[]>();
-    class MockEventSource {
-      addEventListener(type: string, listener: EventListener): void {
-        listeners.set(type, [...(listeners.get(type) ?? []), listener]);
-      }
-
-      removeEventListener(type: string, listener: EventListener): void {
-        listeners.set(
-          type,
-          (listeners.get(type) ?? []).filter((entry) => entry !== listener),
-        );
-      }
-      close(): void {}
-    }
-    Object.defineProperty(window, "EventSource", { configurable: true, value: MockEventSource });
-    Object.defineProperty(window, "viewerEventListenerCount", {
-      configurable: true,
-      value: (): number =>
-        [...listeners.values()].reduce((total, items) => total + items.length, 0),
-    });
-    Object.defineProperty(window, "emitViewerEvent", {
-      configurable: true,
-      value: (type: string, data: string): void => {
-        for (const listener of listeners.get(type) ?? []) {
-          listener(new MessageEvent(type, { data }));
+for (const mode of ["legacy", "progressive"] as const) {
+  test(`${mode} settles bursty live invalidations without console errors`, async ({
+    page,
+    goto,
+  }) => {
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    await page.addInitScript(() => {
+      const listeners = new Map<string, EventListener[]>();
+      class MockEventSource {
+        addEventListener(type: string, listener: EventListener): void {
+          listeners.set(type, [...(listeners.get(type) ?? []), listener]);
         }
-      },
-    });
-  });
-  const consoleErrors: string[] = [];
-  const summaryRequests: string[] = [];
-  page.on("console", (message) => {
-    if (message.type() === "error" || message.type() === "warning") {
-      consoleErrors.push(`${message.type()}: ${message.text()}`);
-    }
-  });
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (url.pathname === `/api/sessions/${sessionId}`) {
-      summaryRequests.push(url.href);
-    }
-  });
-  await goto(`/session/${sessionId}?turn=turn-21`, { waitUntil: "hydration" });
-  await expect
-    .poll(() => page.evaluate(() => window.viewerEventListenerCount()))
-    .toBeGreaterThan(0);
 
-  await page.evaluate((id) => {
-    const event = JSON.stringify({
-      type: "session.updated",
-      ids: [id],
-      revision: "revision-burst",
+        removeEventListener(type: string, listener: EventListener): void {
+          listeners.set(
+            type,
+            (listeners.get(type) ?? []).filter((entry) => entry !== listener),
+          );
+        }
+        close(): void {}
+      }
+      Object.defineProperty(window, "EventSource", { configurable: true, value: MockEventSource });
+      Object.defineProperty(window, "viewerEventListenerCount", {
+        configurable: true,
+        value: (): number =>
+          [...listeners.values()].reduce((total, items) => total + items.length, 0),
+      });
+      Object.defineProperty(window, "emitViewerEvent", {
+        configurable: true,
+        value: (type: string, data: string): void => {
+          for (const listener of listeners.get(type) ?? []) {
+            listener(new MessageEvent(type, { data }));
+          }
+        },
+      });
     });
-    const emit = window.emitViewerEvent;
-    for (let index = 0; index < 5; index += 1) {
-      emit("session.updated", event);
-    }
-  }, sessionId);
+    const consoleErrors: string[] = [];
+    const summaryRequests: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error" || message.type() === "warning") {
+        consoleErrors.push(`${message.type()}: ${message.text()}`);
+      }
+    });
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (url.pathname === `/api/sessions/${sessionId}${mode === "progressive" ? "/turns" : ""}`) {
+        summaryRequests.push(url.href);
+      }
+    });
+    await goto(
+      `${mode === "legacy" ? "/__fixture/legacy" : "/session"}/${sessionId}?turn=turn-21`,
+      { waitUntil: "hydration" },
+    );
+    await expect
+      .poll(() => page.evaluate(() => window.viewerEventListenerCount()))
+      .toBeGreaterThan(0);
+    await expect(
+      page
+        .getByLabel("Conversation timeline")
+        .getByText("Keep the tall timeline turn active while reading", { exact: true }),
+    ).toBeVisible();
 
-  await expect.poll(() => summaryRequests.length).toBe(2);
-  expect(consoleErrors).toEqual([]);
-  await page.getByRole("link", { name: "Open Settings" }).click();
-  await expect(page).toHaveURL(/\/settings$/u);
-  await expect.poll(() => page.evaluate(() => window.viewerEventListenerCount())).toBe(0);
-});
+    await page.evaluate((id) => {
+      const event = JSON.stringify({
+        type: "session.updated",
+        ids: [id],
+        revision: "revision-burst",
+      });
+      const emit = window.emitViewerEvent;
+      for (let index = 0; index < 5; index += 1) {
+        emit("session.updated", event);
+      }
+    }, sessionId);
+
+    if (mode === "legacy") {
+      await expect.poll(() => summaryRequests.length).toBe(2);
+    } else {
+      await expect.poll(() => summaryRequests.length).toBeGreaterThanOrEqual(2);
+      expect(summaryRequests.length).toBeLessThanOrEqual(6);
+      await page.getByRole("button", { name: "Latest content", exact: true }).click();
+      await expect(
+        page
+          .getByLabel("Conversation timeline")
+          .getByText("Timeline response 25.", { exact: true }),
+      ).toBeVisible();
+      expect(summaryRequests.every((url) => !url.includes("legacy="))).toBe(true);
+    }
+    expect(consoleErrors).toEqual([]);
+    await page.getByRole("link", { name: "Open Settings" }).click();
+    await expect(page).toHaveURL(/\/settings$/u);
+    await expect.poll(() => page.evaluate(() => window.viewerEventListenerCount())).toBe(0);
+  });
+}

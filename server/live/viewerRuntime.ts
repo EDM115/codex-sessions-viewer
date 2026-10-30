@@ -3,22 +3,25 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
-import type { ViewerDiagnostic } from "../../shared/types/diagnostics.ts";
-import type { ViewerRuntimeStatus } from "../../shared/types/repository.ts";
-import type { ServerViewerSettings } from "../../shared/types/settings.ts";
-import { listCachedSourcePaths } from "../cache/conversationStore.ts";
-import { openCacheDatabase } from "../cache/database.ts";
-import type { StableJsonlReader } from "../cache/sourceManifest.ts";
+import { listCachedSourcePaths } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import type { StableJsonlReader } from "#server/cache/sourceManifest.ts";
+import type { FaviconHttpClient } from "#server/content/favicons.ts";
+import { LinkPreviewService } from "#server/content/linkPreviews.ts";
 import {
   resolvedTrustedMediaRoots,
   saveServerViewerConfig,
   validateCodexHome,
   type LoadedServerViewerConfig,
-} from "../core/config.ts";
-import type { ViewerPaths } from "../core/paths.ts";
-import { InvalidationBus } from "./invalidationBus.ts";
-import { LiveReconciler } from "./reconciler.ts";
-import { LiveConversationRepository } from "./repository.ts";
+} from "#server/core/config.ts";
+import type { ViewerPaths } from "#server/core/paths.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { LiveReconciler } from "#server/live/reconciler.ts";
+import { LiveConversationRepository } from "#server/live/repository.ts";
+import type { ViewerDiagnostic } from "#shared/types/diagnostics.ts";
+import type { ViewerRuntimeStatus } from "#shared/types/repository.ts";
+import type { RichTextDocument } from "#shared/types/richText.ts";
+import type { ServerViewerSettings } from "#shared/types/settings.ts";
 
 interface RuntimeContext {
   database: DatabaseSync;
@@ -27,6 +30,8 @@ interface RuntimeContext {
 }
 
 export interface LiveViewerRuntimeOptions {
+  faviconClient?: FaviconHttpClient | undefined;
+  previewClient?: FaviconHttpClient | undefined;
   initialReconciliation?: "blocking" | "background" | "deferred" | undefined;
   reconciliationIntervalMs?: number | undefined;
   debounceMs?: number | undefined;
@@ -80,6 +85,7 @@ function cacheMatchesHome(database: DatabaseSync, codexHome: string): boolean {
 }
 
 export class LiveViewerRuntime {
+  #previews: LinkPreviewService | null = null;
   readonly #paths: ViewerPaths;
   readonly #bus: InvalidationBus;
   readonly #options: LiveViewerRuntimeOptions;
@@ -136,6 +142,7 @@ export class LiveViewerRuntime {
       debounceMs: options.debounceMs,
       reconciliationIntervalMs: options.reconciliationIntervalMs,
       fetchFavicons: config.settings.fetchFavicons,
+      faviconClient: options.faviconClient,
       trustedMediaRoots: resolvedTrustedMediaRoots(config.settings),
       readJsonl: options.readJsonl,
       onError: options.onError,
@@ -248,6 +255,19 @@ export class LiveViewerRuntime {
     return this.#context.reconciler.faviconOrigin(key);
   }
 
+  scheduleDocumentFavicons(document: RichTextDocument): void {
+    this.#context.reconciler.scheduleDocumentFavicons(document);
+  }
+
+  resolveLinkPreview(url: string, signal?: AbortSignal) {
+    this.#previews ??= new LinkPreviewService(
+      this.#context.database,
+      join(this.#paths.cacheDir, "previews"),
+      { enabled: this.#settings.fetchLinkPreviews === true, client: this.#options.previewClient },
+    );
+    return this.#previews.resolve(url, signal);
+  }
+
   #createContext(database: DatabaseSync, settings: ServerViewerSettings): RuntimeContext {
     const reconciler = new LiveReconciler({
       bus: this.#bus,
@@ -257,6 +277,7 @@ export class LiveViewerRuntime {
       debounceMs: this.#options.debounceMs,
       reconciliationIntervalMs: this.#options.reconciliationIntervalMs,
       fetchFavicons: settings.fetchFavicons,
+      faviconClient: this.#options.faviconClient,
       trustedMediaRoots: resolvedTrustedMediaRoots(settings),
       readJsonl: this.#options.readJsonl,
       onError: this.#options.onError,
@@ -278,6 +299,8 @@ export class LiveViewerRuntime {
       throw new Error(diagnostic.message);
     }
     const previous = this.#context;
+    await this.#previews?.close();
+    this.#previews = null;
     const homeChanged = resolve(settings.codexHome) !== resolve(this.#settings.codexHome);
     await previous.reconciler.close();
     const candidateDatabase = homeChanged
@@ -322,6 +345,7 @@ export class LiveViewerRuntime {
       return;
     }
     this.#closed = true;
+    await this.#previews?.close();
     await this.#context.reconciler.close();
     if (this.#initialReconciliationStarted) {
       await this.#initialReconciliation.catch(() => undefined);

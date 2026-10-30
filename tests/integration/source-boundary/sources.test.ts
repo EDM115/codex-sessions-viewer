@@ -4,16 +4,13 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-  discoverReferencedMedia,
-  discoverSources,
-} from "../../../server/ingestion/discoverSources.ts";
+import { discoverReferencedMedia, discoverSources } from "#server/ingestion/discoverSources.ts";
 import {
   partitionJsonlTail,
   stableRead,
   type StableReadChunk,
-} from "../../../server/ingestion/stableRead.ts";
-import type { ConversationActivity } from "../../../shared/types/conversation.ts";
+} from "#server/ingestion/stableRead.ts";
+import type { ConversationActivity } from "#shared/types/conversation.ts";
 
 const temporaryDirectories: string[] = [];
 

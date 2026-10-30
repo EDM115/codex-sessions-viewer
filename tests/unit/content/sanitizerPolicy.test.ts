@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { parseRichText } from "../../../server/content/parseRichText.ts";
-import { sanitizeSvg } from "../../../server/content/sanitizeSvg.ts";
+import { parseRichText } from "#server/content/parseRichText.ts";
+import { sanitizeSvg } from "#server/content/sanitizeSvg.ts";
 
 describe("sanitizer policy", () => {
   it("drops active document containers and their bodies while retaining adjacent prose", async () => {

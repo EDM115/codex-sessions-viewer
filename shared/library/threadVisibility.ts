@@ -1,4 +1,4 @@
-import type { ThreadClassification } from "../types/library.ts";
+import type { ThreadClassification } from "#shared/types/library.ts";
 
 export type ThreadVisibilityPurpose = "root" | "child" | "ordinary" | "diagnostic";
 export const visibleRoles = {

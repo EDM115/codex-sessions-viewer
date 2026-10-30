@@ -5,10 +5,11 @@ import {
   listCatalogSessions,
   upsertCatalogSessions,
   type CatalogSessionInput,
-} from "../../../server/cache/catalogStore.ts";
-import { getCachedSession, replaceCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import type { NormalizedSession } from "../../../server/normalization/normalizeSession.ts";
+} from "#server/cache/catalogStore.ts";
+import { getCachedSession, replaceCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import type { NormalizedSession } from "#server/normalization/normalizeSession.ts";
+
 import { cachedSource, normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
 
 async function normalizedFixture(): Promise<NormalizedSession> {

@@ -1,4 +1,4 @@
-import type { PreparationResult } from "../../shared/types/library.ts";
+import type { PreparationResult } from "#shared/types/library.ts";
 
 export type MaterializationPriority = "open" | "visible" | "deep-search";
 

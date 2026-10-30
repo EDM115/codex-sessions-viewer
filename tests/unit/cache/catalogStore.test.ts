@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import type { SQLOutputValue } from "node:sqlite";
+
+import { describe, expect, it, vi } from "vitest";
 
 import {
   catalogMaterializedSessionIds,
@@ -11,11 +13,11 @@ import {
   upsertCatalogSessions,
   writeCatalogLibrary,
   type CatalogSessionInput,
-} from "../../../server/cache/catalogStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import { parseSessionMetaBytes } from "../../../server/ingestion/sessionMetaPrefix.ts";
-import { classifyCatalogThread } from "../../../server/metadata/threadClassification.ts";
-import type { ConversationSummary } from "../../../shared/types/conversation.ts";
+} from "#server/cache/catalogStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import { parseSessionMetaBytes } from "#server/ingestion/sessionMetaPrefix.ts";
+import { classifyCatalogThread } from "#server/metadata/threadClassification.ts";
+import type { ConversationSummary } from "#shared/types/conversation.ts";
 
 function summary(id: string, options: Partial<ConversationSummary> = {}): ConversationSummary {
   return {
@@ -76,6 +78,72 @@ function catalogInput(id: string, options: Partial<CatalogSessionInput> = {}): C
 }
 
 describe("session catalog store", () => {
+  it("paginates saved metadata order without repeated JSON scans and preserves unlisted rows and duplicate-order identity", () => {
+    const database = openCacheDatabase(":memory:");
+    try {
+      upsertCatalogSessions(
+        database,
+        ["a", "b", "c", "recovered"].map((id) => catalogInput(id)),
+      );
+      writeCatalogLibrary(database, {
+        projects: [],
+        sections: [],
+        diagnostics: [],
+        threads: ["c", "a", "a", "b"].map((id) => ({
+          id,
+          title: id,
+          scope: "active",
+          projectId: null,
+          hostId: null,
+          sectionId: null,
+          sectionPosition: null,
+          pinned: false,
+          recencyAt: id === "c" ? 3 : id === "a" ? 2 : 1,
+          classification: classifyCatalogThread({ threadSource: "user" }),
+        })),
+        preferences: {
+          scope: "active",
+          chatSortMode: "updated_at",
+          projectSortMode: "manual",
+          projectOrder: [],
+          pinnedOrder: [],
+          projectThreadOrders: {},
+        },
+      });
+      let plan: Record<string, SQLOutputValue>[] = [];
+      const prepare = database.prepare.bind(database);
+      const spy = vi.spyOn(database, "prepare").mockImplementation((sql) => {
+        const statement = prepare(sql);
+        if (sql.includes("SELECT c.*")) {
+          const all = statement.all.bind(statement);
+          Object.defineProperty(statement, "all", {
+            value: (...parameters: Parameters<typeof all>) => {
+              plan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters);
+              return all(...parameters);
+            },
+          });
+        }
+        return statement;
+      });
+      const first = listCatalogSessions(database, { scope: "active", limit: 2 });
+      const second = listCatalogSessions(database, {
+        scope: "active",
+        cursor: first.nextCursor!,
+        limit: 2,
+      });
+      expect(first.items.map((entry) => entry.id)).toEqual(["recovered", "c"]);
+      expect(second.items.map((entry) => entry.id)).toEqual(["a", "b"]);
+      expect(second.total).toBe(4);
+      expect(second.nextCursor).toBeNull();
+      expect(plan.length).toBeGreaterThan(0);
+      expect(plan.some((row) => String(row["detail"]).includes("CORRELATED SCALAR SUBQUERY"))).toBe(
+        false,
+      );
+      spy.mockRestore();
+    } finally {
+      database.close();
+    }
+  });
   it("carries observed child identity from catalog classification without preparation or runtime status", () => {
     const database = openCacheDatabase(":memory:");
     const classification = classifyCatalogThread({

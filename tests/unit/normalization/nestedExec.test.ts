@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveNestedExecActivities } from "../../../server/normalization/nestedExec.ts";
-import type { ToolActivity } from "../../../shared/types/conversation.ts";
+import { deriveNestedExecActivities } from "#server/normalization/nestedExec.ts";
+import type { ToolActivity } from "#shared/types/conversation.ts";
 
 function outer(input: string, output: ToolActivity["output"] = null): ToolActivity {
   return {

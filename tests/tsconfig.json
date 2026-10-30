@@ -1,0 +1,5 @@
+{
+  "extends": "../tsconfig.custom.json",
+  "include": ["./**/*.ts"],
+  "exclude": ["./nuxt/**/*", "./fixtures/nuxt-history/**/*", "./fixtures/nuxt-viewport/**/*"]
+}

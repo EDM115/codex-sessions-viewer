@@ -2,12 +2,13 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@nuxt/test-utils/playwright";
 
-import { parseRichText } from "../../server/content/parseRichText.ts";
+import { parseRichText } from "#server/content/parseRichText.ts";
 import type {
   ConversationMessage,
   ConversationSummary,
   ConversationTurn,
-} from "../../shared/types/conversation.ts";
+} from "#shared/types/conversation.ts";
+import type { RichTextCodeNode } from "#shared/types/richText.ts";
 
 test.use({
   nuxt: {
@@ -17,6 +18,140 @@ test.use({
     build: true,
   },
 });
+
+for (const kind of ["prepared-highlight", "diff"] as const) {
+  test(`oversized ${kind} payload retains plain source without building a rich tree`, async ({
+    context,
+    page,
+    goto,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.addInitScript(() => {
+      const writeText = navigator.clipboard.writeText.bind(navigator.clipboard);
+      navigator.clipboard.writeText = (text) => {
+        sessionStorage.setItem("giant-code-copy", text);
+        return writeText(text);
+      };
+    });
+    const lines = Array.from(
+      { length: 1500 },
+      (_, index) => `const value${index} = '<source & literal>';`,
+    );
+    const source =
+      kind === "diff"
+        ? `diff --git a/large.ts b/large.ts\n--- a/large.ts\n+++ b/large.ts\n@@ -0,0 +1,1500 @@\n${lines.map((line) => `+${line}`).join("\n")}\n`
+        : lines.join("\n");
+    const node: RichTextCodeNode = {
+      type: "code",
+      language: kind === "diff" ? "diff" : "ts",
+      title: null,
+      source,
+      highlighted: {
+        type: "root",
+        children: [
+          {
+            type: "element",
+            tagName: "pre",
+            attributes: {},
+            children: [
+              {
+                type: "element",
+                tagName: "code",
+                attributes: {},
+                children: lines.map((line, index) => ({
+                  type: "element",
+                  tagName: "span",
+                  attributes: {},
+                  children: [{ type: "text", text: `${index ? "\n" : ""}${line}` }],
+                })),
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const answer = {
+      ...(await message("giant", "")),
+      sourceMarkdown: source,
+      body: { type: "document" as const, children: [node] },
+    };
+    const turn: ConversationTurn = {
+      id: "rich-turn",
+      sourceTurnId: null,
+      sessionId,
+      index: 0,
+      userMessage: null,
+      assistantMessages: [answer],
+      activities: [],
+      startedAt: timestamp,
+      completedAt: timestamp,
+      durationMs: 0,
+      timeToFirstTokenMs: null,
+      tokenDelta: null,
+      models: [],
+      reasoningEfforts: [],
+      toolCounts: {},
+      diagnosticIds: [],
+    };
+    await page.route(`**/api/sessions/${sessionId}**`, (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/turns")) {
+        return route.fulfill({
+          json: {
+            sessionId,
+            turns: [turn],
+            previousCursor: null,
+            nextCursor: null,
+            revision: "giant",
+          },
+        });
+      }
+      if (path.endsWith("/navigator")) {
+        return route.fulfill({
+          json: [
+            {
+              turnId: "rich-turn",
+              index: 0,
+              userMessageId: null,
+              promptPreview: "Giant prepared payload",
+              assistantPreview: "",
+              proseLengthBucket: 4,
+              createdAt: timestamp,
+            },
+          ],
+        });
+      }
+      return route.fulfill({ json: summary });
+    });
+    await goto(`/session/${sessionId}?turn=rich-turn`, { waitUntil: "hydration" });
+    const block = page.locator(".rich-code-block");
+    await expect(block).toHaveCount(1);
+    await expect(block.locator("code span")).toHaveCount(0);
+    await expect(block.locator(".rich-diff__rendered [data-diff-file]")).toHaveCount(0);
+    expect(await block.locator("pre > code").textContent()).toBe(source);
+    await block.getByRole("button", { name: "Copy code", exact: true }).click();
+    await expect(
+      block.getByRole("button", { name: "Copied: Copy code", exact: true }),
+    ).toBeVisible();
+    expect(await page.evaluate(() => sessionStorage.getItem("giant-code-copy"))).toBe(source);
+    // Windows clipboard text uses CRLF, the source passed into the native API remains exact
+    expect(
+      (await page.evaluate(() => navigator.clipboard.readText())).replaceAll("\r\n", "\n"),
+    ).toBe(source);
+    await block.getByRole("button", { name: "Wrap code", exact: true }).click();
+    await page.setViewportSize({ width: 375, height: 900 });
+    expect(await block.locator("*").count()).toBeLessThan(40);
+    expect(await block.locator("pre > code").textContent()).toBe(source);
+    console.log(
+      JSON.stringify({
+        preparedKind: kind,
+        sourceCharacters: source.length,
+        sourceLines: source.split("\n").length,
+        blockElements: await block.locator("*").count(),
+      }),
+    );
+  });
+}
 
 const sessionId = "88888888-8888-4888-8888-888888888888";
 const timestamp = "2026-09-14T12:00:00.000Z";

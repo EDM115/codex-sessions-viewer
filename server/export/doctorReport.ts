@@ -2,13 +2,11 @@ import { lstat, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import {
-  viewerDiagnosticCodeSchema,
-  type ViewerDiagnostic,
-} from "../../shared/types/diagnostics.ts";
-import { loadServerViewerConfig } from "../core/config.ts";
-import type { ViewerPaths } from "../core/paths.ts";
-import { discoverSources } from "../ingestion/discoverSources.ts";
+import { loadServerViewerConfig } from "#server/core/config.ts";
+import type { ViewerPaths } from "#server/core/paths.ts";
+import { inspectCacheEvidence } from "#server/export/cacheEvidenceReport.ts";
+import { discoverSources } from "#server/ingestion/discoverSources.ts";
+import { viewerDiagnosticCodeSchema, type ViewerDiagnostic } from "#shared/types/diagnostics.ts";
 
 export interface CollectDoctorReportOptions {
   cwd?: string | undefined;
@@ -21,6 +19,7 @@ export interface DoctorCacheReport {
   sessionCount: number;
   diagnosticCount: number;
   size: number | null;
+  evidence?: ReturnType<typeof inspectCacheEvidence>;
   catalog: {
     rootCount: number;
     subagentCount: number;
@@ -190,6 +189,7 @@ async function inspectViewerCache(
             typeof diagnosticRow?.["count"] === "number" ? diagnosticRow["count"] : 0,
           size: metadata.size,
           catalog: hasCatalog ? catalogCounts : null,
+          evidence: inspectCacheEvidence(database),
         },
         diagnostics,
       };

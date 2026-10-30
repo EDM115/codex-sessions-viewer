@@ -396,7 +396,7 @@ function listConditions(query: SessionListQuery): { sql: string; values: Array<s
   }
   if (query.query?.trim()) {
     conditions.push(
-      "(lower(c.title) LIKE ? ESCAPE '\\' OR lower((SELECT s.preview FROM sessions s WHERE s.id = c.id)) LIKE ? ESCAPE '\\')",
+      "(lower(c.title) LIKE ? ESCAPE '\\' OR lower(c.project_name) LIKE ? ESCAPE '\\')",
     );
     const pattern = likeValue(query.query.trim().toLocaleLowerCase("en-US"));
     values.push(pattern, pattern);
@@ -487,13 +487,15 @@ export function listCatalogSessions(
   const total = requiredNumber(totalRow ?? {}, "count");
   const rows = database
     .prepare(`
+      ${orderedIds ? "WITH display_order AS MATERIALIZED (SELECT value AS id, min(CAST(key AS INTEGER)) AS position FROM json_each(?) GROUP BY value)" : ""}
       SELECT c.*
       FROM session_catalog c
+      ${orderedIds ? "LEFT JOIN display_order ON display_order.id = c.id" : ""}
       WHERE ${conditions.sql}
-      ORDER BY ${orderedIds ? "(SELECT key FROM json_each(?) WHERE value = c.id)," : ""} c.updated_at DESC, c.id
+      ORDER BY ${orderedIds ? "display_order.position," : ""} c.updated_at DESC, c.id
       LIMIT ? OFFSET ?
     `)
-    .all(...conditions.values, ...(orderedIds ? [json(orderedIds)] : []), limit, offset);
+    .all(...(orderedIds ? [json(orderedIds)] : []), ...conditions.values, limit, offset);
   const items = rows.map((row) => {
     const record = catalogRecord(row);
     if (record.kind === "auxiliary") {

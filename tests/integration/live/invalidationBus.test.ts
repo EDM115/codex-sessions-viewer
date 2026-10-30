@@ -1,11 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  connectInvalidationStream,
-  sendInvalidationStream,
-} from "../../../server/live/eventStream.ts";
-import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
+import { connectInvalidationStream, sendInvalidationStream } from "#server/live/eventStream.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import type { ViewerInvalidation } from "#shared/types/repository.ts";
 
 describe("live invalidation bus", () => {
   it("validates compact events and removes disconnected listeners immediately", () => {

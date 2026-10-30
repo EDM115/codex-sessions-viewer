@@ -7,7 +7,7 @@ import {
   type SearchQuery,
   type SessionListQuery,
   type TurnChunkQuery,
-} from "../../shared/types/repository.ts";
+} from "#shared/types/repository.ts";
 
 const booleanQuerySchema = z.enum(["true", "false"]).transform((value) => value === "true");
 const pageLimitQuerySchema = z

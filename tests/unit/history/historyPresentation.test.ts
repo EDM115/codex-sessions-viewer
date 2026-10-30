@@ -5,19 +5,20 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { getCachedAsset } from "#server/cache/assetStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
 import { storeEmbeddedMedia } from "#server/content/extractMedia.ts";
-
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import * as richText from "../../../server/content/parseRichText.ts";
-import { HistoryPager } from "../../../server/history/historyPager.ts";
-import { prepareHistoryPresentation } from "../../../server/history/historyPresentation.ts";
-import { JsonlStreamParser, type JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
-import { RolloutStore } from "../../../server/ingestion/rolloutStream.ts";
-import { normalizeSession } from "../../../server/normalization/normalizeSession.ts";
+import * as richText from "#server/content/parseRichText.ts";
+import { HistoryPager } from "#server/history/historyPager.ts";
+import { prepareHistoryPresentation } from "#server/history/historyPresentation.ts";
+import { JsonlStreamParser, type JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
+import { normalizeSession } from "#server/normalization/normalizeSession.ts";
 import {
   historyWindowInspector,
   historyWindowPresentation,
-} from "../../../shared/timeline/historyPresentation.ts";
+} from "#shared/timeline/historyPresentation.ts";
+import type { HistoryTurnWindow } from "#shared/types/history.ts";
+
 import { canonicalRecords, fixtureRef } from "../../fixtures/history/nativeHistory.ts";
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -27,6 +28,107 @@ function deferred<T>() {
   return { promise, resolve };
 }
 describe("immutable history formatting", () => {
+  it("projects no asset authority until generated media has a matching prepared presentation", () => {
+    const item = {
+      id: "generated",
+      type: "imageGeneration" as const,
+      result: "aW1hZ2U=",
+      savedPath: null,
+      fileId: null,
+      startedAtMs: null,
+      completedAtMs: null,
+      evidence: null,
+    };
+    const window: HistoryTurnWindow = {
+      turnId: "turn",
+      physicalRolloutId: "physical",
+      historyEpoch: "epoch",
+      contentRevision: "revision",
+      order: 0,
+      status: "completed",
+      startedAt: null,
+      completedAt: null,
+      durationMs: null,
+      opening: { itemId: null, item: null, availability: "absent" },
+      items: [
+        {
+          physicalRolloutId: "physical",
+          itemId: item.id,
+          item,
+          ordinal: 0,
+          updatedAtOrdinal: 0,
+          detail: "full",
+        },
+      ],
+      itemsView: "full",
+      beforeCursor: null,
+      afterCursor: null,
+      loadedRanges: [],
+      coverage: { status: "complete", segments: [], gaps: [] },
+      finalAnswerItemId: null,
+    };
+    expect(historyWindowPresentation("stable", window).activities).toEqual([
+      expect.objectContaining({ kind: "media", assetId: "" }),
+    ]);
+    const prepared = {
+      threadId: "stable",
+      physicalRolloutId: "physical",
+      historyEpoch: "epoch",
+      contentRevision: "revision",
+      turnId: "turn",
+      itemId: "generated",
+      markdown: "",
+      attachments: [{ mediaType: "image" as const, source: "data:image/png;base64,aW1hZ2U=" }],
+      body: {
+        type: "document" as const,
+        children: [
+          {
+            type: "media" as const,
+            mediaType: "image" as const,
+            source: "asset" as const,
+            assetId: "saved-generated",
+            originalSource: "retained.png",
+            alt: "Generated image",
+            title: null,
+          },
+        ],
+      },
+    };
+    expect(historyWindowPresentation("stable", window, [prepared]).activities).toEqual([
+      expect.objectContaining({ kind: "media", assetId: "saved-generated" }),
+    ]);
+    expect(
+      historyWindowPresentation("stable", window, [{ ...prepared, contentRevision: "stale" }])
+        .activities,
+    ).toEqual([expect.objectContaining({ kind: "media", assetId: "" })]);
+  });
+  it("notifies selected-content enrichment from the actual rich document on fresh and cached presentation", async () => {
+    const onDocument = vi.fn();
+    const query = {
+      threadId: "links",
+      historyEpoch: "links-epoch",
+      contentRevision: "links-v1",
+      physicalRolloutId: "links-physical",
+      turnId: "turn",
+      itemId: "item",
+      markdown: "[Example](https://example.com/path)",
+    };
+    const options = {
+      cacheScope: "selected-links",
+      storeEmbeddedMedia: async () => undefined,
+      onDocument,
+    };
+    const result = await prepareHistoryPresentation(query, undefined, options);
+    expect(onDocument).toHaveBeenCalledExactlyOnceWith(result.body);
+    await prepareHistoryPresentation(query, undefined, options);
+    expect(onDocument).toHaveBeenCalledTimes(2);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(async () =>
+      prepareHistoryPresentation(query, controller.signal, options),
+    ).rejects.toThrow();
+    expect(onDocument).toHaveBeenCalledTimes(2);
+  });
   it("registers only supplied embedded media without requiring a normalized session or reading local image references", async () => {
     const root = await mkdtemp(join(tmpdir(), "history-embedded-"));
     const database = openCacheDatabase(":memory:");

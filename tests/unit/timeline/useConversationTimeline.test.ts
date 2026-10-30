@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  mergeConversationTurns,
-  recentChunkCursor,
-} from "../../../shared/timeline/conversation.ts";
-import type { ConversationTurn } from "../../../shared/types/conversation.ts";
+import { mergeConversationTurns, recentChunkCursor } from "#shared/timeline/conversation.ts";
+import type { ConversationTurn } from "#shared/types/conversation.ts";
 
 function turn(index: number, revision = "initial"): ConversationTurn {
   return {

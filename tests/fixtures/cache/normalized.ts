@@ -1,14 +1,14 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { CachedSourceWrite } from "../../../server/cache/conversationStore.ts";
-import { JsonlStreamParser, type JsonlRecord } from "../../../server/ingestion/jsonlStream.ts";
+import type { CachedSourceWrite } from "#server/cache/conversationStore.ts";
+import { JsonlStreamParser, type JsonlRecord } from "#server/ingestion/jsonlStream.ts";
 import {
   normalizeSession,
   NORMALIZATION_PARSER_VERSION,
   type NormalizedSession,
-} from "../../../server/normalization/normalizeSession.ts";
-import type { ConversationScope, SourceFingerprint } from "../../../shared/types/conversation.ts";
+} from "#server/normalization/normalizeSession.ts";
+import type { ConversationScope, SourceFingerprint } from "#shared/types/conversation.ts";
 
 export async function normalizedRolloutFixture(options: {
   name: "legacy.jsonl" | "modern.jsonl";

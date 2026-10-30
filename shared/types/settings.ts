@@ -5,12 +5,13 @@ import {
   viewerThemeSchema,
   type DisclosureDefault,
   type ViewerTheme,
-} from "./conversation.ts";
+} from "#shared/types/conversation.ts";
 
 export interface ServerViewerSettings {
   codexHome: string;
   port: number;
   fetchFavicons: boolean;
+  fetchLinkPreviews?: boolean | undefined;
   trustedMediaRoots?: string[] | undefined;
 }
 
@@ -57,6 +58,7 @@ export const serverViewerSettingsSchema = z.strictObject({
   codexHome: z.string().trim().min(1),
   port: z.int().min(1).max(65_535),
   fetchFavicons: z.boolean(),
+  fetchLinkPreviews: z.boolean().optional(),
   trustedMediaRoots: z
     .array(
       z

@@ -1,6 +1,6 @@
 import type { Virtualizer } from "@tanstack/vue-virtual";
 
-import { shouldAdjustForMeasuredRow } from "./scrollAnchoring.ts";
+import { shouldAdjustForMeasuredRow } from "#shared/timeline/scrollAnchoring.ts";
 
 export function installConversationScrollPolicy(
   instance: Virtualizer<HTMLElement, Element>,

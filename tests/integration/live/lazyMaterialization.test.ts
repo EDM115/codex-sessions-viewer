@@ -5,15 +5,15 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { catalogSession } from "../../../server/cache/catalogStore.ts";
-import { getCachedSession } from "../../../server/cache/conversationStore.ts";
-import { openCacheDatabase } from "../../../server/cache/database.ts";
-import type { LoadedServerViewerConfig } from "../../../server/core/config.ts";
-import { readStableJsonl } from "../../../server/ingestion/jsonlStream.ts";
-import { InvalidationBus } from "../../../server/live/invalidationBus.ts";
-import { LiveReconciler } from "../../../server/live/reconciler.ts";
-import { LiveViewerRuntime } from "../../../server/live/viewerRuntime.ts";
-import type { ViewerInvalidation } from "../../../shared/types/repository.ts";
+import { catalogSession } from "#server/cache/catalogStore.ts";
+import { getCachedSession } from "#server/cache/conversationStore.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import type { LoadedServerViewerConfig } from "#server/core/config.ts";
+import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
+import { InvalidationBus } from "#server/live/invalidationBus.ts";
+import { LiveReconciler } from "#server/live/reconciler.ts";
+import { LiveViewerRuntime } from "#server/live/viewerRuntime.ts";
+import type { ViewerInvalidation } from "#shared/types/repository.ts";
 
 const temporaryRoots: string[] = [];
 const fixtureSessionId = "11111111-1111-4111-8111-111111111111";

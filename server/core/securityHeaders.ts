@@ -26,3 +26,13 @@ export const browserSecurityHeaders: Readonly<Record<string, string>> = Object.f
   "X-Frame-Options": "DENY",
   "X-Robots-Tag": "noindex, nofollow, noarchive",
 });
+
+// Pagefind compiles same-origin WebAssembly, this does not enable JavaScript eval
+export const staticBrowserSecurityHeaders: Readonly<Record<string, string>> = Object.freeze({
+  ...browserSecurityHeaders,
+  "Content-Security-Policy": directives
+    .map((directive) =>
+      directive.startsWith("script-src ") ? `${directive} 'wasm-unsafe-eval'` : directive,
+    )
+    .join("; "),
+});

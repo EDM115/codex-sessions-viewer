@@ -50,7 +50,10 @@ if (typeof sessionId !== "string" || sessionId.trim() === "") {
 }
 
 async function loadConversation() {
-  if (repository.capabilities().progressiveHistory) {
+  if (
+    repository.capabilities().progressiveHistory ||
+    (await repository.supportsHistory?.(sessionId, { signal: selectionController.signal }))
+  ) {
     const metadata = await repository.getSessionMetadata(sessionId, {
       signal: selectionController.signal,
     });
@@ -111,6 +114,7 @@ useHead(() => ({
         :initial-chunk="data.initialChunk"
         :initial-target-turn-id="targetTurnId"
         :mode="mode"
+        :legacy-evidence="mode === 'static'"
         @open-child="openChild"
       >
         <template #actions="{ summary }">

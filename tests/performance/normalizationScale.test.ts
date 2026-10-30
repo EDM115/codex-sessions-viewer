@@ -2,8 +2,8 @@ import { performance } from "node:perf_hooks";
 
 import { describe, expect, it } from "vitest";
 
-import type { JsonlRecord } from "../../server/ingestion/jsonlStream.ts";
-import { normalizeSession } from "../../server/normalization/normalizeSession.ts";
+import type { JsonlRecord } from "#server/ingestion/jsonlStream.ts";
+import { normalizeSession } from "#server/normalization/normalizeSession.ts";
 
 function scaleRecords(turnCount: number): JsonlRecord[] {
   const values: JsonlRecord["value"][] = [

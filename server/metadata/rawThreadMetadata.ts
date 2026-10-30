@@ -1,7 +1,7 @@
 import * as z from "zod";
 
-import { jsonValueSchema, type JsonValue } from "../../shared/types/conversation.ts";
-import type { CatalogThreadMetadata } from "./threadClassification.ts";
+import type { CatalogThreadMetadata } from "#server/metadata/threadClassification.ts";
+import { jsonValueSchema, type JsonValue } from "#shared/types/conversation.ts";
 
 const optionalText = z.string().nullable().optional();
 const parent = z
