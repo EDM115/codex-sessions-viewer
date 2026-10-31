@@ -274,6 +274,10 @@ test("opens nested static subagents locally with independent embedded controls a
   const parentScroll = await parentTimeline.evaluate((element) => element.scrollTop);
   await panel.getByRole("button", { name: /Child fixture/u }).click();
   await expect(panel.getByText("Child fixture assistant 39", { exact: true })).toBeVisible();
+  await expect(panel.getByText("40 saved turns", { exact: true })).toBeVisible();
+  await expect(
+    panel.getByText(/Contents and counts describe only the saved records/u),
+  ).toBeVisible();
   expect(childCursors[0]).toBe("1");
   await expect(page).toHaveURL(parentUrl);
   await expect(parentTimeline).toHaveAttribute("data-parent-sentinel", "preserved");

@@ -12,6 +12,57 @@ import { getSourceManifestEntry, SessionCacheUpdater } from "#server/cache/sourc
 import { prepareConversationForExport } from "#server/export/prepareConversation.ts";
 import { RolloutStore } from "#server/ingestion/rolloutStream.ts";
 
+import { ancestryThread, mixedAncestryFixture } from "../../fixtures/history/mixedAncestry.ts";
+
+it.each([false, true])(
+  "materializes a plain leaf with a compressed ancestor and logical cutoff (crossThread=%s)",
+  async (crossThread) => {
+    const root = await mkdtemp(join(tmpdir(), "mixed-cache-"));
+    const fixture = await mixedAncestryFixture(join(root, "home"), {
+      compressed: true,
+      crossThread,
+    });
+    const database = openCacheDatabase(":memory:");
+    const store = new RolloutStore({ cacheDirectory: join(root, "decoded") });
+    const updater = new SessionCacheUpdater(database, {
+      openRollout: (ref, signal) => store.open(ref, signal),
+      retainLiveSources: false,
+    });
+    try {
+      const before = await readFile(fixture.basePath);
+      expect(await updater.update({ path: fixture.leafPath, scope: "active" })).toMatchObject({
+        status: "updated",
+      });
+      const first = getCachedSession(database, ancestryThread)!;
+      expect(JSON.stringify(first.turns)).toContain("LEAF_ANSWER");
+      expect(JSON.stringify(first.turns).includes("ANCESTOR_A")).toBe(!crossThread);
+      expect(JSON.stringify(first.turns)).not.toContain("EXCLUDED_SUFFIX");
+      expect(await readFile(fixture.basePath)).toEqual(before);
+      expect(
+        getSourceManifestEntry(database, fixture.leafPath)?.generation?.dependencies,
+      ).toHaveLength(1);
+      await fixture.writeBase("ANCESTOR_B");
+      expect(await updater.update({ path: fixture.leafPath, scope: "active" })).toMatchObject({
+        status: "updated",
+      });
+      const second = getCachedSession(database, ancestryThread)!;
+      expect(JSON.stringify(second.turns).includes("ANCESTOR_B")).toBe(!crossThread);
+      expect(JSON.stringify(second.turns)).not.toContain("ANCESTOR_A");
+      expect(searchCachedSessions(database, { scope: "active", query: "ANCESTOR_A" }).total).toBe(
+        0,
+      );
+      expect(searchCachedSessions(database, { scope: "active", query: "ANCESTOR_B" }).total).toBe(
+        crossThread ? 0 : 1,
+      );
+    } finally {
+      updater.clear();
+      await store.close();
+      database.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 it("invalidates normalized, search and rich content after stopped-viewer same-path recompression with equal encoded length and mtime", async () => {
   const root = await mkdtemp(join(tmpdir(), "materialized-zstd-"));
   const path = join(

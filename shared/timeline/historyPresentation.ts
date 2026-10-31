@@ -183,11 +183,167 @@ export function historyItemMarkdown(item: HistoryItem): string | null {
   return null;
 }
 
+type MessageIdentity = Pick<ConversationMessage, "id" | "role" | "sourceMarkdown" | "phase">;
+
+/** Classify retained message owners without preparing bodies or decoding activity payloads */
+export function historyWindowMessageIdentity(window: HistoryTurnWindow) {
+  const items = new Map<string, HistoryItem>();
+  if (window.opening.item) {
+    items.set(window.opening.item.id, window.opening.item);
+  }
+  for (const entry of window.items) {
+    if (entry.item) {
+      items.set(entry.itemId, entry.item);
+    }
+  }
+  const orderedMessages = [...items].map(([id, item]): MessageIdentity | null =>
+    item.type === "userMessage" || item.type === "agentMessage"
+      ? {
+          id,
+          role: item.type === "userMessage" ? "user" : "assistant",
+          sourceMarkdown: item.text,
+          phase: item.type === "agentMessage" ? item.phase : null,
+        }
+      : null,
+  );
+  const duplicateMessageIds = new Set<string>();
+  const messageAliases: Record<string, string[]> = {};
+  const islands = historyItemIslands(window);
+  let previousMessage: MessageIdentity | null = null;
+  const sourceEnvelope = (id: string) =>
+    activityObject(activityObject(items.get(id)?.evidence)?.["source"]);
+  function provedMessagePair(first: MessageIdentity, second: MessageIdentity): boolean {
+    if (first.role !== second.role || first.sourceMarkdown !== second.sourceMarkdown) {
+      return false;
+    }
+    if (
+      !(
+        first.phase === second.phase ||
+        first.phase === null ||
+        second.phase === null ||
+        (isFinalAnswerPhase(first.phase) && isFinalAnswerPhase(second.phase))
+      )
+    ) {
+      return false;
+    }
+    if (
+      ![first, second].every(
+        (message) =>
+          window.items.some((entry) => entry.itemId === message.id && entry.detail === "full") ||
+          (window.opening.itemId === message.id && window.opening.availability === "available"),
+      )
+    ) {
+      return false;
+    }
+    if (!islands.some((island) => island.includes(first.id) && island.includes(second.id))) {
+      return false;
+    }
+    const firstSource = sourceEnvelope(first.id);
+    const secondSource = sourceEnvelope(second.id);
+    if (firstSource?.["type"] === secondSource?.["type"]) {
+      return false;
+    }
+    const canonical =
+      firstSource?.["type"] === "response_item"
+        ? first
+        : secondSource?.["type"] === "response_item"
+          ? second
+          : null;
+    const notification =
+      firstSource?.["type"] === "event_msg"
+        ? first
+        : secondSource?.["type"] === "event_msg"
+          ? second
+          : null;
+    if (!canonical || !notification) {
+      return false;
+    }
+    const payload = activityObject(sourceEnvelope(canonical.id)?.["payload"]);
+    const echo = activityObject(sourceEnvelope(notification.id)?.["payload"]);
+    if (
+      payload?.["type"] !== "message" ||
+      payload["role"] !== canonical.role ||
+      echo?.["type"] !== (canonical.role === "assistant" ? "agent_message" : "user_message")
+    ) {
+      return false;
+    }
+    const identity = (value: ReturnType<typeof activityObject>, ...keys: string[]) =>
+      keys
+        .map((key) => value?.[key])
+        .find(
+          (candidate): candidate is string => typeof candidate === "string" && candidate !== "",
+        ) ?? null;
+    const canonicalId = identity(payload, "id", "item_id", "message_id");
+    const notificationId = identity(echo, "id", "item_id", "message_id");
+    const canonicalTurn =
+      identity(payload, "turn_id", "turnId") ??
+      identity(
+        activityObject(payload["internal_chat_message_metadata_passthrough"]),
+        "turn_id",
+        "turnId",
+      );
+    const notificationTurn = identity(echo, "turn_id", "turnId");
+    if (canonicalTurn && notificationTurn && canonicalTurn !== notificationTurn) {
+      return false;
+    }
+    if (notificationId !== null) {
+      return canonicalId !== null && notificationId === canonicalId;
+    }
+    // An idless final echo needs a selected member of its proved pair, equal ordinary prose stays separate
+    return (
+      canonicalId !== null &&
+      (canonical.id === window.finalAnswerItemId || notification.id === window.finalAnswerItemId) &&
+      isFinalAnswerPhase(canonical.phase) &&
+      isFinalAnswerPhase(notification.phase)
+    );
+  }
+  for (const message of orderedMessages) {
+    if (!message) {
+      previousMessage = null;
+      continue;
+    }
+    if (previousMessage && provedMessagePair(previousMessage, message)) {
+      const chosen = message.id === window.finalAnswerItemId ? message : previousMessage;
+      messageAliases[chosen.id] = [
+        ...new Set([...(messageAliases[previousMessage.id] ?? [previousMessage.id]), message.id]),
+      ];
+      if (message.id === window.finalAnswerItemId) {
+        duplicateMessageIds.add(previousMessage.id);
+        previousMessage = message;
+      } else {
+        duplicateMessageIds.add(message.id);
+      }
+    } else {
+      previousMessage = message;
+    }
+  }
+  return {
+    messageAliases: Object.fromEntries(
+      orderedMessages
+        .filter(
+          (message): message is MessageIdentity =>
+            message !== null && !duplicateMessageIds.has(message.id),
+        )
+        .map((message) => [message.id, messageAliases[message.id] ?? [message.id]]),
+    ),
+    duplicateMessageIds,
+    unknownIds: [
+      ...new Set([
+        ...window.items.filter((entry) => entry.item === null).map((entry) => entry.itemId),
+        ...(window.opening.itemId !== null && window.opening.item === null
+          ? [window.opening.itemId]
+          : []),
+      ]),
+    ],
+  };
+}
+
 /** Adapt only the loaded slice to the established message/work renderers, retain the full history evidence separately */
 export function historyWindowPresentation(
   sessionId: string,
   window: HistoryTurnWindow,
   presentations: readonly HistoryPresentation[] = [],
+  identity = historyWindowMessageIdentity(window),
 ): HistoryPresentedTurn {
   const messages: ConversationMessage[] = [];
   const activities: ConversationActivity[] = [];
@@ -304,121 +460,7 @@ export function historyWindowPresentation(
     }
     order.push({ kind: "activity", id });
   }
-  const duplicateMessageIds = new Set<string>();
-  const messageAliases: Record<string, string[]> = {};
-  const islands = historyItemIslands(window);
-  let previousMessage: ConversationMessage | null = null;
-  const sourceEnvelope = (id: string) =>
-    activityObject(activityObject(items.get(id)?.evidence)?.["source"]);
-  function provedMessagePair(first: ConversationMessage, second: ConversationMessage): boolean {
-    if (first.role !== second.role || first.sourceMarkdown !== second.sourceMarkdown) {
-      return false;
-    }
-    if (
-      !(
-        first.phase === second.phase ||
-        first.phase === null ||
-        second.phase === null ||
-        (isFinalAnswerPhase(first.phase) && isFinalAnswerPhase(second.phase))
-      )
-    ) {
-      return false;
-    }
-    if (
-      ![first, second].every(
-        (message) =>
-          window.items.some((entry) => entry.itemId === message.id && entry.detail === "full") ||
-          (window.opening.itemId === message.id && window.opening.availability === "available"),
-      )
-    ) {
-      return false;
-    }
-    if (!islands.some((island) => island.includes(first.id) && island.includes(second.id))) {
-      return false;
-    }
-    const firstSource = sourceEnvelope(first.id);
-    const secondSource = sourceEnvelope(second.id);
-    if (firstSource?.["type"] === secondSource?.["type"]) {
-      return false;
-    }
-    const canonical =
-      firstSource?.["type"] === "response_item"
-        ? first
-        : secondSource?.["type"] === "response_item"
-          ? second
-          : null;
-    const notification =
-      firstSource?.["type"] === "event_msg"
-        ? first
-        : secondSource?.["type"] === "event_msg"
-          ? second
-          : null;
-    if (!canonical || !notification) {
-      return false;
-    }
-    const payload = activityObject(sourceEnvelope(canonical.id)?.["payload"]);
-    const echo = activityObject(sourceEnvelope(notification.id)?.["payload"]);
-    if (
-      payload?.["type"] !== "message" ||
-      payload["role"] !== canonical.role ||
-      echo?.["type"] !== (canonical.role === "assistant" ? "agent_message" : "user_message")
-    ) {
-      return false;
-    }
-    const identity = (value: ReturnType<typeof activityObject>, ...keys: string[]) =>
-      keys
-        .map((key) => value?.[key])
-        .find(
-          (candidate): candidate is string => typeof candidate === "string" && candidate !== "",
-        ) ?? null;
-    const canonicalId = identity(payload, "id", "item_id", "message_id");
-    const notificationId = identity(echo, "id", "item_id", "message_id");
-    const canonicalTurn =
-      identity(payload, "turn_id", "turnId") ??
-      identity(
-        activityObject(payload["internal_chat_message_metadata_passthrough"]),
-        "turn_id",
-        "turnId",
-      );
-    const notificationTurn = identity(echo, "turn_id", "turnId");
-    if (canonicalTurn && notificationTurn && canonicalTurn !== notificationTurn) {
-      return false;
-    }
-    if (notificationId !== null) {
-      return canonicalId !== null && notificationId === canonicalId;
-    }
-    // An idless final echo needs a selected member of its proved pair, equal ordinary prose stays separate
-    return (
-      canonicalId !== null &&
-      (canonical.id === window.finalAnswerItemId || notification.id === window.finalAnswerItemId) &&
-      isFinalAnswerPhase(canonical.phase) &&
-      isFinalAnswerPhase(notification.phase)
-    );
-  }
-  for (const reference of order) {
-    const message =
-      reference.kind === "message"
-        ? messages.find((entry) => entry.id === reference.id)
-        : undefined;
-    if (!message) {
-      previousMessage = null;
-      continue;
-    }
-    if (previousMessage && provedMessagePair(previousMessage, message)) {
-      const chosen = message.id === window.finalAnswerItemId ? message : previousMessage;
-      messageAliases[chosen.id] = [
-        ...new Set([...(messageAliases[previousMessage.id] ?? [previousMessage.id]), message.id]),
-      ];
-      if (message.id === window.finalAnswerItemId) {
-        duplicateMessageIds.add(previousMessage.id);
-        previousMessage = message;
-      } else {
-        duplicateMessageIds.add(message.id);
-      }
-    } else {
-      previousMessage = message;
-    }
-  }
+  const duplicateMessageIds = identity.duplicateMessageIds;
   const visibleMessages = messages.filter((message) => !duplicateMessageIds.has(message.id));
   const outputIds = new Set<string>();
   for (const activity of activities) {
@@ -508,9 +550,7 @@ export function historyWindowPresentation(
   }
   const user = visibleMessages.find((message) => message.role === "user") ?? null;
   return {
-    messageAliases: Object.fromEntries(
-      visibleMessages.map((message) => [message.id, messageAliases[message.id] ?? [message.id]]),
-    ),
+    messageAliases: identity.messageAliases,
     id: window.turnId,
     sourceTurnId: window.boundary?.sourceTurnId ?? null,
     sessionId,

@@ -20,8 +20,8 @@ import {
   CACHE_PARSER_VERSION,
   type StableJsonlReader,
 } from "#server/cache/sourceManifest.ts";
+import * as lineageReader from "#server/ingestion/completeRollout.ts";
 import { readStableJsonl } from "#server/ingestion/jsonlStream.ts";
-import * as lineageReader from "#server/ingestion/rolloutLineage.ts";
 import { normalizeSession } from "#server/normalization/normalizeSession.ts";
 
 const temporaryRoots: string[] = [];
@@ -119,9 +119,9 @@ describe("incremental session cache", () => {
         const oldManifest = database
           .prepare("SELECT sha256, generation_json FROM source_files WHERE path = ?")
           .get(path);
-        const actualRead = lineageReader.readPlainRolloutLineage;
+        const actualRead = lineageReader.readCompleteRollout;
         const spy = vi
-          .spyOn(lineageReader, "readPlainRolloutLineage")
+          .spyOn(lineageReader, "readCompleteRollout")
           .mockImplementationOnce(async (...args) => {
             entered();
             await gate;

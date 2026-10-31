@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { writeStaticPayloads } from "#server/export/writeStaticPayloads.ts";
 import { classifyCatalogThread } from "#server/metadata/threadClassification.ts";
 import type { CatalogLibrary } from "#shared/types/library.ts";
+import { staticSessionIndexSchema } from "#shared/types/staticPayloads.ts";
 import { StaticConversationRepository } from "~/repositories/static.ts";
 
 import { normalizedRolloutFixture } from "../../fixtures/cache/normalized.ts";
@@ -31,7 +32,16 @@ describe("static v2 catalog writer/reader parity", () => {
     const ids = ["recent", "native-none", "second", "section-chat", "hidden"];
     const conversations = ids.map((id) => ({
       ...structuredClone(template),
-      summary: { ...template.summary, id, title: id, parentThreadId: null, childThreadIds: [] },
+      summary: {
+        ...template.summary,
+        id,
+        title: id,
+        parentThreadId: null,
+        childThreadIds: [],
+        models: [id === "second" ? "model-b" : "model-a"],
+        toolCounts: id === "section-chat" ? { read: 1, shell: 0 } : { shell: 1, read: 0 },
+        hasMedia: id === "native-none" || id === "second",
+      },
       classification:
         id === "hidden" ? classifyCatalogThread({ threadSource: "guardian" }) : classification,
     }));
@@ -126,6 +136,54 @@ describe("static v2 catalog writer/reader parity", () => {
     ).toEqual([{ id: "section-chat", projectId: null }]);
     expect((await repository.listSessions({ scope: "active", query: "hidden" })).total).toBe(0);
     expect(
+      (await repository.listSessions({ scope: "active", model: "model-a" })).items.map(
+        ({ id }) => id,
+      ),
+    ).toEqual(["section-chat", "native-none", "recent"]);
+    expect((await repository.listSessions({ scope: "active", model: "absent" })).total).toBe(0);
+    expect(
+      (await repository.listSessions({ scope: "active", tool: "read" })).items.map(({ id }) => id),
+    ).toEqual(["section-chat"]);
+    expect((await repository.listSessions({ scope: "active", tool: "absent" })).total).toBe(0);
+    expect(
+      (await repository.listSessions({ scope: "active", tool: "shell" })).items.map(({ id }) => id),
+    ).toEqual(["second", "native-none", "recent"]);
+    expect(
+      (await repository.listSessions({ scope: "active", hasMedia: true })).items.map(
+        ({ id }) => id,
+      ),
+    ).toEqual(["second", "native-none"]);
+    expect(
+      (await repository.listSessions({ scope: "active", hasMedia: false })).items.map(
+        ({ id }) => id,
+      ),
+    ).toEqual(["section-chat", "recent"]);
+    expect(
+      await repository.listSessions({
+        scope: "active",
+        groupId: "project:none",
+        model: "model-a",
+        tool: "shell",
+        hasMedia: true,
+      }),
+    ).toMatchObject({ total: 1, items: [{ id: "native-none" }] });
+    const first = await repository.listSessions({
+      scope: "active",
+      model: "model-a",
+      tool: "shell",
+      limit: 1,
+    });
+    expect(first).toMatchObject({ total: 2, nextCursor: "1", items: [{ id: "native-none" }] });
+    expect(
+      await repository.listSessions({
+        scope: "active",
+        model: "model-a",
+        tool: "shell",
+        limit: 1,
+        cursor: first.nextCursor!,
+      }),
+    ).toMatchObject({ total: 2, nextCursor: null, items: [{ id: "recent" }] });
+    expect(
       requested.every(
         (path) => path === "/payloads/projects.json" || path === "/payloads/sessions/index.json",
       ),
@@ -135,6 +193,20 @@ describe("static v2 catalog writer/reader parity", () => {
     ) as { version: number; sessions: unknown[] };
     expect(index.version).toBe(2);
     expect(index.sessions[0]).not.toHaveProperty("turnCount");
+    const stale = staticSessionIndexSchema.parse(index);
+    if (stale.version !== 2 || stale.filterFacets?.["recent"] === undefined) {
+      throw new Error("Expected saved export filter observations");
+    }
+    stale.filterFacets["recent"].revision = "different-content-revision";
+    const staleRepository = new StaticConversationRepository(async (path) =>
+      path.endsWith("sessions/index.json")
+        ? stale
+        : (JSON.parse(await readFile(join(generatedRoot, path), "utf8")) as unknown),
+    );
+    expect((await staleRepository.listSessions({ scope: "active" })).total).toBe(4);
+    await expect(
+      staleRepository.listSessions({ scope: "active", model: "model-a" }),
+    ).rejects.toMatchObject({ code: "static.filter_facets_unavailable" });
     for (const [groupId, id] of [
       ["project:none", "native-none"],
       ["recents:none", "recent"],

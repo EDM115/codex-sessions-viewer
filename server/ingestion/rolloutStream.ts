@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { mkdir, opendir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve, relative } from "node:path";
+import { basename, dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import * as z from "zod";
@@ -284,12 +284,16 @@ export class RolloutStore {
         existing = dirname(existing);
       }
     }
-    if (!relative(owned, source).startsWith("..")) {
+    const contained = (parent: string, child: string) => {
+      const path = relative(parent, child);
+      return path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path);
+    };
+    if (contained(owned, source)) {
       throw new Error("rollout.source_cache_overlap");
     }
     if (/[\\/](?:sessions|archived_sessions)[\\/]/u.test(source)) {
       const sourceHome = await realpath(sourceHomePath(source));
-      if (!relative(sourceHome, owned).startsWith("..")) {
+      if (contained(sourceHome, owned)) {
         throw new Error("rollout.source_cache_overlap");
       }
     }

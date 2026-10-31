@@ -13,6 +13,7 @@ export interface SelectedLineageOptions {
   maxSegments?: number;
   maxBoundaryBytes?: number;
   prepareCompressedAncestors?: boolean;
+  resolvePhysical?: (physical: string, signal?: AbortSignal) => Promise<RolloutRef | null>;
 }
 /** Known catalog/source references only, missing ancestry stays unresolved */
 export async function resolveSelectedRolloutLineage(
@@ -74,10 +75,15 @@ export async function resolveSelectedRolloutLineage(
         );
         const plain = matches.filter((source) => source.representation === "plain-jsonl");
         const choices = plain.length ? plain : matches;
-        if (choices.length !== 1) {
+        const selected =
+          choices.length === 1
+            ? choices[0]!
+            : choices.length === 0 && options.prepareCompressedAncestors === true
+              ? await options.resolvePhysical?.(physical, resolveSignal)
+              : null;
+        if (!selected) {
           return null;
         }
-        const selected = choices[0]!;
         return selected.representation === "zstd-jsonl" &&
           options.prepareCompressedAncestors !== true
           ? selected

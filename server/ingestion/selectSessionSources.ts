@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import type { DiscoveredRolloutSource } from "#server/ingestion/discoverSources.ts";
 import {
@@ -43,6 +43,7 @@ export interface SessionSourceSelectionResult {
 }
 
 export interface SessionSourceSelectionOptions {
+  codexHome?: string;
   currentRolloutPaths?: ReadonlyMap<string, string>;
   prefixBytes?: number | undefined;
   readPrefix?: typeof readSessionMetaPrefix | undefined;
@@ -55,8 +56,44 @@ function filenameSessionId(path: string): string | null {
   return parseRolloutFilename(path)?.stableThreadId ?? null;
 }
 
+function representationPathKey(path: string): string {
+  const normalized = resolve(path);
+  const platformPath = process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  return platformPath.replace(/\.zst$/u, "");
+}
+
 function candidateSessionId(entry: SelectedSessionSource): string | null {
-  return entry.prefix.meta?.id ?? filenameSessionId(entry.source.path);
+  return (
+    entry.prefix.meta?.id ??
+    filenameSessionId(entry.source.path) ??
+    entry.source.stableThreadId ??
+    null
+  );
+}
+
+function sourceReference(entry: SelectedSessionSource): RolloutRef {
+  const ref = rolloutRefFromSource(entry.source.path, entry.prefix.meta);
+  return ref.stableThreadId.startsWith("path:") && entry.source.stableThreadId
+    ? {
+        ...ref,
+        stableThreadId: entry.source.stableThreadId,
+        physicalRolloutId: entry.source.stableThreadId,
+      }
+    : ref;
+}
+
+function allowedCurrentPath(path: string, options: SessionSourceSelectionOptions): boolean {
+  const absolute = resolve(options.codexHome ?? process.cwd(), path);
+  return (
+    (options.codexHome === undefined
+      ? isAbsolute(path)
+      : ["sessions", "archived_sessions"].some((directory) => {
+          const child = relative(resolve(options.codexHome!, directory), absolute);
+          return (
+            child !== "" && child !== ".." && !child.startsWith(`..${sep}`) && !isAbsolute(child)
+          );
+        })) && /\.jsonl(?:\.zst)?$/iu.test(absolute)
+  );
 }
 
 function recordSessionId(records: readonly JsonlRecord[]): string | null {
@@ -172,6 +209,24 @@ export async function selectSessionSources(
   options: SessionSourceSelectionOptions = {},
 ): Promise<SessionSourceSelectionResult> {
   const prefixed = await readPrefixes(sources, options);
+  for (const entry of prefixed) {
+    if (parseRolloutFilename(entry.source.path) !== null) {
+      continue;
+    }
+    const owners = [...(options.currentRolloutPaths ?? [])].filter(
+      ([, path]) =>
+        allowedCurrentPath(path, options) &&
+        representationPathKey(resolve(options.codexHome ?? process.cwd(), path)) ===
+          representationPathKey(entry.source.path),
+    );
+    if (
+      owners.length === 1 &&
+      (entry.prefix.meta?.id === owners[0]![0] ||
+        (entry.prefix.status === "missing" && entry.prefix.meta === null))
+    ) {
+      entry.source = { ...entry.source, stableThreadId: owners[0]![0] };
+    }
+  }
   const diagnostics = prefixed.flatMap(({ prefix }) => prefix.diagnostics);
   let bytesRead = prefixed.reduce((total, { prefix }) => total + prefix.bytesRead, 0);
   const groups = new Map<string, SelectedSessionSource[]>();
@@ -179,7 +234,11 @@ export async function selectSessionSources(
     const sessionId = candidateSessionId(entry);
     const physicalId = parseRolloutFilename(entry.source.path)?.physicalRolloutId ?? sessionId;
     const key =
-      physicalId === null ? `path:${resolve(entry.source.path)}` : `physical:${physicalId}`;
+      entry.source.stableThreadId && parseRolloutFilename(entry.source.path) === null
+        ? `declared-path:${representationPathKey(entry.source.path)}`
+        : physicalId === null
+          ? `path:${resolve(entry.source.path)}`
+          : `physical:${physicalId}`;
     const group = groups.get(key) ?? [];
     group.push(entry);
     groups.set(key, group);
@@ -243,9 +302,7 @@ export async function selectSessionSources(
   const physicalSegments = selected.toSorted((left, right) =>
     left.source.path.localeCompare(right.source.path),
   );
-  const historyGraph = physicalSegments.map((entry) =>
-    rolloutRefFromSource(entry.source.path, entry.prefix.meta),
-  );
+  const historyGraph = physicalSegments.map(sourceReference);
   const physicalOwners = new Map(
     historyGraph.map((ref) => [ref.physicalRolloutId, ref.stableThreadId]),
   );
@@ -262,20 +319,47 @@ export async function selectSessionSources(
   );
   const logical = new Map<string, SelectedSessionSource>();
   for (const [id, path] of options.currentRolloutPaths ?? []) {
-    const physicalId = parseRolloutFilename(path)?.physicalRolloutId;
-    const current = physicalSegments.find(
+    const currentPath = resolve(options.codexHome ?? process.cwd(), path);
+    const currentPathKey = representationPathKey(currentPath);
+    const allowed = allowedCurrentPath(path, options);
+    const candidates = physicalSegments.filter(
       (entry, index) =>
         historyGraph[index]!.stableThreadId === id &&
-        (resolve(entry.source.path) === resolve(path) ||
-          (physicalId !== undefined && historyGraph[index]!.physicalRolloutId === physicalId)),
+        representationPathKey(entry.source.path) === currentPathKey,
     );
-    if (current !== undefined) {
-      logical.set(id, current);
+    if (allowed && candidates.length === 1) {
+      logical.set(id, candidates[0]!);
+    } else {
+      diagnostics.push(
+        createViewerDiagnostic({
+          code: "source.current_rollout_unresolved",
+          severity: "warning",
+          area: "source",
+          sessionId: id,
+          path: currentPath,
+          message:
+            "The declared current rollout could not be resolved uniquely inside the selected source roots, no competing history was selected.",
+          details: {
+            declaredPath: path,
+            reason: !allowed
+              ? "outside-root"
+              : physicalSegments.filter((_, index) => historyGraph[index]!.stableThreadId === id)
+                    .length > 1
+                ? "ambiguous"
+                : "missing",
+          },
+        }),
+      );
     }
   }
   for (const entry of leaves) {
     const id = candidateSessionId(entry) ?? entry.source.path;
-    if (options.currentRolloutPaths?.has(id)) {
+    const claimedPath = [...(options.currentRolloutPaths?.values() ?? [])].some(
+      (path) =>
+        representationPathKey(resolve(options.codexHome ?? process.cwd(), path)) ===
+        representationPathKey(entry.source.path),
+    );
+    if (options.currentRolloutPaths?.has(id) || claimedPath) {
       continue;
     }
     if (logical.has(id)) {
@@ -298,12 +382,14 @@ export async function selectSessionSources(
     physicalSegments,
     historyGraph,
     representationChoices: [...groups.values()].map((group) => {
-      const candidates = group.map((entry) =>
-        rolloutRefFromSource(entry.source.path, entry.prefix.meta),
-      );
+      const candidates = group.map(sourceReference);
       const physicalRolloutId = candidates[0]!.physicalRolloutId;
       const selectedPath =
-        historyGraph.find((ref) => ref.physicalRolloutId === physicalRolloutId)?.sourcePath ?? null;
+        historyGraph.find(
+          (ref) =>
+            ref.physicalRolloutId === physicalRolloutId &&
+            group.some((entry) => entry.source.path === ref.sourcePath),
+        )?.sourcePath ?? null;
       return { physicalRolloutId, selectedPath, candidates };
     }),
     diagnostics,

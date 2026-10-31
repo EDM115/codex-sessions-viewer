@@ -35,6 +35,31 @@ function change(
   };
 }
 describe("observed file counters", () => {
+  it("restores native file disclosure intent after closing and reopening the outer group", async () => {
+    const wrapper = await mountSuspended(ConversationFileChanges, {
+      props: { activities: [change("content", "add", 1, 0)] },
+    });
+    try {
+      const outer = wrapper.find("details");
+      expect(wrapper.find('[data-test="diff"]').exists()).toBe(false);
+      (outer.element as HTMLDetailsElement).open = true;
+      await outer.trigger("toggle");
+      expect(wrapper.find('[data-test="diff"]').exists()).toBe(false);
+      const inner = wrapper.findAll("details")[1]!;
+      (inner.element as HTMLDetailsElement).open = true;
+      await inner.trigger("toggle");
+      expect(wrapper.find('[data-test="diff"]').exists()).toBe(true);
+      (outer.element as HTMLDetailsElement).open = false;
+      await outer.trigger("toggle");
+      expect(wrapper.find('[data-test="diff"]').exists()).toBe(false);
+      (outer.element as HTMLDetailsElement).open = true;
+      await outer.trigger("toggle");
+      expect((wrapper.findAll("details")[1]!.element as HTMLDetailsElement).open).toBe(true);
+      expect(wrapper.findAll("summary")[1]!.attributes("aria-expanded")).toBe("true");
+    } finally {
+      wrapper.unmount();
+    }
+  });
   it("renders unavailable update counts explicitly instead of zero", async () => {
     const wrapper = await mountSuspended(ConversationFileChanges, {
       props: { activities: [change(null, "update", null, null)] },

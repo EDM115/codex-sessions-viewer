@@ -22,12 +22,21 @@ import { zstdCompressSync } from "node:zlib";
 
 import { setup, $fetch, url, createPage, useTestContext } from "@nuxt/test-utils/e2e";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as z from "zod";
 
 import type { CachedContentFile } from "#server/cache/contentStore.ts";
 import { rolloutRefFromSource } from "#server/ingestion/rolloutIdentity.ts";
 import { mergeHistoryWindows } from "#shared/timeline/history.ts";
+import { rawEventIdentitySchema } from "#shared/types/conversation.ts";
+import { historyNavigatorPageSchema, historyPageSchema } from "#shared/types/history.ts";
 import { LiveApiConversationRepository } from "~/repositories/live.ts";
 
+import {
+  ancestryThread,
+  ancestryRecords,
+  mixedAncestryFixture,
+  jsonl,
+} from "../fixtures/history/mixedAncestry.ts";
 import { canonicalRecords } from "../fixtures/history/nativeHistory.ts";
 import { cutoffReviewRecords, parentReviewRecords } from "../fixtures/history/parentReviews.ts";
 import { createStateDatabase } from "../integration/source-boundary/fixtures.ts";
@@ -120,6 +129,363 @@ async function validatedQuery(query: string, kind: "list" | "turn" | "search") {
   return { body: await response.json(), status: response.status };
 }
 describe("actual Nuxt progressive HTTP routes", () => {
+  it("keeps preview keyboard traversal next to its inline link in both directions", async () => {
+    await fixture({
+      records: canonicalRecords(
+        "[First](https://example.com/first) [Next](https://example.com/next)",
+      ),
+    });
+    const page = await createPage();
+    const failures: string[] = [];
+    page.on("pageerror", (error) => failures.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") {
+        failures.push(message.text());
+      }
+    });
+    try {
+      await page.route("**/api/favicons/**", (route) =>
+        route.fulfill({
+          contentType: "image/png",
+          body: Buffer.from(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "base64",
+          ),
+        }),
+      );
+      await page.route("**/api/link-previews", (route) =>
+        route.fulfill({
+          json: {
+            version: 1,
+            provenance: "viewer-enrichment",
+            url: "https://example.com/first",
+            finalUrl: null,
+            revision: "fixture",
+            availability: "unavailable",
+            reason: "unavailable",
+            title: null,
+            description: null,
+            image: null,
+            fetchedAt: null,
+            retryAt: null,
+          },
+        }),
+      );
+      await page.goto(url("/"));
+      const first = page.getByRole("link", { name: "First", exact: true });
+      const next = page.getByRole("link", { name: "Next", exact: true });
+      await first.focus();
+      await page.locator(".website-preview").waitFor();
+      await page.keyboard.press("Tab");
+      expect(
+        await page
+          .locator(".website-preview a")
+          .evaluate((element) => element === document.activeElement),
+      ).toBe(true);
+      await page.keyboard.press("Shift+Tab");
+      expect(await first.evaluate((element) => element === document.activeElement)).toBe(true);
+      expect(failures).toEqual([]);
+      await page.keyboard.press("Tab");
+      await page.keyboard.press("Tab");
+      expect(await next.evaluate((element) => element === document.activeElement)).toBe(true);
+      await page.keyboard.press("Escape");
+      expect(await next.evaluate((element) => element === document.activeElement)).toBe(true);
+      await page.keyboard.press("Shift+Tab");
+      expect(await first.evaluate((element) => element === document.activeElement)).toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
+  it.each(["turns", "navigator"] as const)(
+    "requalifies a cursor-free latest %s request after a valid append crosses its open lease",
+    async (route) => {
+      const f = await fixture();
+      const before = await readFile(f.path);
+      const suffix = jsonl(
+        ancestryRecords("thread-1", "fresh-after-append", "FRESH_LATEST_AFTER_APPEND").slice(1),
+      );
+      const query = { anchor: { kind: "latest" }, limit: 5 } as const;
+      const endpoint = `/api/sessions/thread-1/${route}?history=${encodeURIComponent(JSON.stringify(query))}`;
+      await $fetch("/api/__fixture/control", {
+        method: "POST",
+        body: { action: "gate", enabled: true },
+      });
+      const pending = fetch(url(endpoint));
+      try {
+        await vi.waitFor(async () => expect((await snapshot()).gate?.entered).toBe(true));
+        const gated = await snapshot();
+        expect(gated.gate?.aborted).toBe(false);
+        expect(gated.rolloutOpens).toBeGreaterThan(0);
+        await appendFile(f.path, suffix);
+        const after = await readFile(f.path);
+        expect(after).toEqual(Buffer.concat([before, Buffer.from(suffix)]));
+        await $fetch("/api/__fixture/control", {
+          method: "POST",
+          body: { action: "gate", enabled: false },
+        });
+        const response = await pending;
+        const body: unknown = await response.json();
+        console.log(
+          JSON.stringify({
+            condition: "fresh-latest-source-boundary",
+            route: endpoint,
+            query,
+            gateEntered: gated.gate?.entered,
+            beforeSha256: createHash("sha256").update(before).digest("hex"),
+            afterSha256: createHash("sha256").update(after).digest("hex"),
+            status: response.status,
+            body,
+          }),
+        );
+        expect(response.status).toBe(200);
+        const result =
+          route === "navigator"
+            ? historyNavigatorPageSchema.parse(body)
+            : historyPageSchema.parse(body);
+        expect(result.threadId).toBe("thread-1");
+        expect(result.turns.at(-1)?.turnId).toBe("fresh-after-append");
+        expect(result.turns.every((turn) => turn.physicalRolloutId === "thread-1")).toBe(true);
+        expect(result.historyEpoch).toBeTruthy();
+        expect(result.contentRevision).toBeTruthy();
+        const authority = (await snapshot()).authority.map((row) => {
+          const stored = z.object({ evidence_json: z.string() }).parse(row);
+          return z
+            .object({
+              epoch: z.string(),
+              proofs: z.array(
+                z.object({
+                  physical: z.string(),
+                  ranges: z.array(
+                    z.object({
+                      start: z.int().nonnegative(),
+                      endExclusive: z.int().nonnegative(),
+                      sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+                    }),
+                  ),
+                }),
+              ),
+            })
+            .parse(JSON.parse(stored.evidence_json));
+        });
+        expect(authority).toHaveLength(1);
+        expect(authority[0]?.epoch).toBe(result.historyEpoch);
+        expect(authority[0]?.proofs.map((proof) => proof.physical)).toEqual(["thread-1"]);
+        const proofs = authority[0]!.proofs[0]!.ranges;
+        expect(proofs.length).toBeGreaterThan(0);
+        expect(
+          proofs.some(
+            (proof) => proof.start <= before.length && proof.endExclusive === after.length,
+          ),
+        ).toBe(true);
+        for (const proof of proofs) {
+          expect(proof.endExclusive).toBeGreaterThan(proof.start);
+          expect(proof.endExclusive).toBeLessThanOrEqual(after.length);
+          expect(proof.sha256).toBe(
+            createHash("sha256")
+              .update(after.subarray(proof.start, proof.endExclusive))
+              .digest("hex"),
+          );
+        }
+        const ranges = result.coverage.segments.flatMap((segment) => segment.coveredRanges);
+        expect(ranges.length).toBeGreaterThan(0);
+        for (const range of ranges) {
+          if (range.startDecodedByte === undefined || range.endDecodedByteExclusive === undefined) {
+            throw new Error("The fresh plain source must retain decoded byte-range coverage");
+          }
+          const { startDecodedByte, endDecodedByteExclusive } = range;
+          expect(range.physicalRolloutId).toBe("thread-1");
+          expect(
+            proofs.some(
+              (proof) =>
+                proof.start <= startDecodedByte && proof.endExclusive >= endDecodedByteExclusive,
+            ),
+          ).toBe(true);
+        }
+        const itemProofs = result.turns.flatMap((turn) =>
+          "items" in turn
+            ? turn.items.map((entry) =>
+                z.object({ rawIdentity: rawEventIdentitySchema }).parse(entry.item?.evidence),
+              )
+            : [],
+        );
+        expect(route === "navigator" || itemProofs.length > 0).toBe(true);
+        for (const { rawIdentity } of itemProofs) {
+          expect(rawIdentity.physicalRolloutId).toBe("thread-1");
+          expect(rawIdentity.rangeSha256).toBe(
+            createHash("sha256")
+              .update(after.subarray(rawIdentity.decodedByteStart, rawIdentity.decodedByteEnd))
+              .digest("hex"),
+          );
+        }
+        expect(await readFile(f.path)).toEqual(after);
+      } finally {
+        await $fetch("/api/__fixture/control", {
+          method: "POST",
+          body: { action: "gate", enabled: false },
+        });
+        await pending.catch(() => undefined);
+      }
+    },
+  );
+  it("keeps the real reading position on automatic raw append with follow disabled", async () => {
+    const records = ancestryRecords("thread-1", "reading-0", "Reading answer 0 ".repeat(120));
+    for (let index = 1; index < 12; index += 1) {
+      records.push(
+        ...ancestryRecords(
+          "thread-1",
+          `reading-${index}`,
+          `Reading answer ${index} `.repeat(120),
+        ).slice(1),
+      );
+    }
+    const f = await fixture({ records });
+    const page = await createPage();
+    const failures: string[] = [];
+    page.on("pageerror", (error) => failures.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") {
+        failures.push(message.text());
+      }
+    });
+    try {
+      await page.addInitScript(() =>
+        localStorage.setItem(
+          "codex-sessions-viewer:presentation:v1",
+          JSON.stringify({ version: 1, settings: { liveFollow: false } }),
+        ),
+      );
+      await page.goto(url("/"));
+      await page.addStyleTag({
+        content:
+          "html,body,#__nuxt,main {height:100%;margin:0} .progressive-workbench {box-sizing:border-box}",
+      });
+      const surface = page.locator(".progressive-conversation");
+      await page.locator('[data-history-turn="reading-11"]').waitFor();
+      await surface.evaluate((element) => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new Event("scroll"));
+        element.dispatchEvent(new WheelEvent("wheel", { deltaY: -10 }));
+      });
+      const anchor = page.locator('[data-history-turn="reading-7"]');
+      await anchor.waitFor();
+      const relativeTop = () =>
+        anchor.evaluate(
+          (element) =>
+            element.getBoundingClientRect().top -
+            element.closest(".progressive-conversation")!.getBoundingClientRect().top,
+        );
+      const before = await relativeTop();
+      await appendFile(
+        f.path,
+        jsonl(ancestryRecords("thread-1", "reading-12", "AUTOMATIC_FOLLOW_DISABLED").slice(1)),
+      );
+      await vi.waitFor(
+        async () =>
+          expect(
+            await page.locator('nav[aria-label="Loaded turn navigation"]').textContent(),
+          ).toContain("question reading-12"),
+        { timeout: 3000 },
+      );
+      await vi.waitFor(async () =>
+        expect(Math.abs((await relativeTop()) - before)).toBeLessThanOrEqual(3),
+      );
+      expect(
+        await page.getByRole("button", { name: "Latest content", exact: true }).isVisible(),
+      ).toBe(true);
+      expect(failures).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+  it.each([{ compressed: true }, { padding: 300 * 1024 }])(
+    "prepares noncurrent physical ancestry only after an explicit older HTTP request (%j)",
+    async (options) => {
+      const root = await mkdtemp(join(httpRoot, "a-"));
+      const f = await mixedAncestryFixture(join(root, "home"), options);
+      const state = createStateDatabase(join(f.home, "state_5.sqlite"));
+      state.prepare("UPDATE threads SET id = ?, rollout_path = ?").run(ancestryThread, f.leafPath);
+      state.close();
+      await $fetch("/api/__fixture/control", { method: "POST", body: { action: "reset", root } });
+      await client.getSessionMetadata(ancestryThread);
+      expect((await snapshot()).rolloutIo).toBe(0);
+      const recent = await client.getHistoryPage(ancestryThread, { anchor: { kind: "latest" } });
+      expect(recent.turns.map((turn) => turn.turnId)).toEqual(["leaf-turn"]);
+      expect((await snapshot()).decoderChunks).toBe(0);
+      const older = await client.getHistoryPage(ancestryThread, {
+        anchor: { kind: "before", cursor: recent.beforeCursor! },
+      });
+      expect(older.turns.map((turn) => turn.turnId)).toContain("base-turn");
+      expect(JSON.stringify(older)).not.toContain("EXCLUDED_SUFFIX");
+      expect((await snapshot()).fullReads).toBe(0);
+    },
+  );
+  it("produces selected raw-only SSE on append, replacement and disappearance and stops probes on disconnect", async () => {
+    const f = await fixture();
+    await client.getSessionMetadata("thread-1");
+    expect((await snapshot()).rolloutIo).toBe(0);
+    const baseline = (await snapshot()).listeners;
+    const abort = new AbortController();
+    const response = await fetch(url("/api/events?threadId=thread-1"), { signal: abort.signal });
+    const reader = response.body!.getReader();
+    const frames: string[] = [];
+    const readNextFrame = async (): Promise<void> => {
+      if (abort.signal.aborted) {
+        return;
+      }
+      const next = await reader.read();
+      if (next.done) {
+        return;
+      }
+      frames.push(new TextDecoder().decode(next.value));
+      return readNextFrame();
+    };
+    const readFrames = readNextFrame().catch((error: unknown) => {
+      if (!abort.signal.aborted) {
+        throw error;
+      }
+      return undefined;
+    });
+    try {
+      await client.getHistoryPage("thread-1", { anchor: { kind: "latest" } });
+      await vi.waitFor(() => expect(frames.join("")).toContain("event: session.updated"));
+      frames.length = 0;
+      await appendFile(
+        f.path,
+        jsonl(ancestryRecords("thread-1", "raw-appended", "AUTO_SSE_APPEND").slice(1)),
+      );
+      await vi.waitFor(() => expect(frames.join("")).toContain("event: session.updated"), {
+        timeout: 2500,
+      });
+      expect(
+        JSON.stringify(await client.getHistoryPage("thread-1", { anchor: { kind: "latest" } })),
+      ).toContain("AUTO_SSE_APPEND");
+      frames.length = 0;
+      await writeFile(
+        f.path,
+        jsonl(ancestryRecords("thread-1", "replacement", "AUTO_SSE_REPLACED")),
+      );
+      await vi.waitFor(() => expect(frames.join("")).toContain("event: session.updated"), {
+        timeout: 2500,
+      });
+      const replacement = await client.getHistoryPage("thread-1", { anchor: { kind: "latest" } });
+      expect(JSON.stringify(replacement)).toContain("AUTO_SSE_REPLACED");
+      frames.length = 0;
+      await rm(f.path);
+      await vi.waitFor(() => expect(frames.join("")).toContain("event: session.updated"), {
+        timeout: 2500,
+      });
+      expect(
+        (await client.getHistoryPage("thread-1", { anchor: { kind: "latest" } })).coverage.status,
+      ).toBe("unresolved");
+    } finally {
+      abort.abort();
+      await readFrames;
+    }
+    await vi.waitFor(async () => expect((await snapshot()).listeners).toBe(baseline));
+    const inactive = await snapshot();
+    await new Promise((settle) => setTimeout(settle, 1200));
+    expect((await snapshot()).rolloutIo).toBe(inactive.rolloutIo);
+  }, 15000);
   it("resolves a direct target through bounded preparation without walking every earlier history page", async () => {
     const records: unknown[] = canonicalRecords();
     records.splice(
@@ -613,13 +979,6 @@ describe("actual Nuxt progressive HTTP routes", () => {
           },
         }) + "\n",
       );
-      await $fetch("/api/__fixture/control", {
-        method: "POST",
-        body: {
-          action: "publish",
-          event: { type: "session.updated", ids: ["thread-1"], revision: "updated-answer" },
-        },
-      });
       await dialog.waitFor({ state: "hidden" });
       await page.getByText("answer B", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Open message info", exact: true }).click();

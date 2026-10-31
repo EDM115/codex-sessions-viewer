@@ -70,6 +70,7 @@ import {
   type StaticLibraryPayload,
   type LegacyStaticLibraryPayload,
   staticSessionIndexSchema,
+  type StaticSessionFilterFacets,
 } from "#shared/types/staticPayloads.ts";
 import type { RepositoryRequester } from "~/repositories/live.ts";
 
@@ -124,7 +125,10 @@ async function browserRequest(
     signal: options.signal,
   });
   if (!response.ok) {
-    throw new Error(`Static viewer payload request failed with HTTP ${response.status}.`);
+    throw Object.assign(
+      new Error(`Static viewer payload request failed with HTTP ${response.status}.`),
+      { statusCode: response.status },
+    );
   }
   return response.json() as Promise<unknown>;
 }
@@ -396,7 +400,12 @@ export class StaticConversationRepository implements ConversationRepository {
     const index = await this.index(options);
     const library = await this.library(options);
     if (library?.version === 2) {
-      return this.catalogSessions(library.catalog, index.sessions, query);
+      return this.catalogSessions(
+        library.catalog,
+        index.sessions,
+        query,
+        index.version === 2 ? index.filterFacets : undefined,
+      );
     }
     if (index.version !== 1) {
       throw new Error("The static v2 catalog is missing or invalid");
@@ -441,6 +450,7 @@ export class StaticConversationRepository implements ConversationRepository {
     catalog: CatalogLibrary,
     summaries: readonly CatalogSessionMetadata[],
     query: SessionListQuery,
+    filterFacets?: Readonly<Record<string, StaticSessionFilterFacets>>,
   ) {
     const child = query.parentThreadId !== undefined && query.parentThreadId !== "__root__";
     const groups = buildSidebarGroups(catalog, { ...catalog.preferences, scope: query.scope });
@@ -476,7 +486,30 @@ export class StaticConversationRepository implements ConversationRepository {
         ) {
           return false;
         }
-        return query.cwd === undefined || summary?.cwd === query.cwd;
+        if (query.cwd !== undefined && summary?.cwd !== query.cwd) {
+          return false;
+        }
+        if (query.model !== undefined || query.tool !== undefined || query.hasMedia !== undefined) {
+          const facets = filterFacets?.[thread.id];
+          if (facets === undefined || facets.revision !== summary?.revision) {
+            throw Object.assign(
+              new Error(
+                "Saved filter observations are unavailable for this archive, regenerate the export to filter by model, tool or media",
+              ),
+              { code: "static.filter_facets_unavailable" },
+            );
+          }
+          if (query.model !== undefined && !facets.models.includes(query.model)) {
+            return false;
+          }
+          if (query.tool !== undefined && !facets.tools.includes(query.tool)) {
+            return false;
+          }
+          if (query.hasMedia !== undefined && facets.hasMedia !== query.hasMedia) {
+            return false;
+          }
+        }
+        return true;
       })
       .toSorted((a, b) =>
         group
@@ -824,12 +857,8 @@ export class StaticConversationRepository implements ConversationRepository {
         `/payloads/sessions/${encodeURIComponent(id)}/history-index.json`,
         options,
       )
-        .catch(() => null)
         .then((value) => {
           options.signal?.throwIfAborted();
-          if (value === null) {
-            return null;
-          }
           const manifest = staticHistoryManifestSchema.parse(value);
           if (manifest.threadId !== id) {
             throw new Error("history.static_owner_mismatch");
@@ -837,6 +866,19 @@ export class StaticConversationRepository implements ConversationRepository {
           return manifest;
         })
         .catch((error: unknown) => {
+          if (options.signal?.aborted) {
+            this.historyManifests.delete(id);
+            options.signal.throwIfAborted();
+          }
+          if (
+            error !== null &&
+            typeof error === "object" &&
+            (("statusCode" in error && error.statusCode === 404) ||
+              ("status" in error && error.status === 404) ||
+              ("code" in error && error.code === "ENOENT"))
+          ) {
+            return null;
+          }
           this.historyManifests.delete(id);
           throw error;
         });

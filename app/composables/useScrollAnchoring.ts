@@ -19,6 +19,9 @@ export function useScrollAnchoring(
   virtualStart: (turnId: string) => number | null = () => null,
   virtualAnchor: () => ScrollAnchorSnapshot | null = () => null,
   sourceIdentity: (turnId: string) => string | null = () => null,
+  writeScroll: (container: HTMLElement, top: number) => void = (container, top) => {
+    container.scrollTop = top;
+  },
 ) {
   let inputVersion = 0;
   let remembered: ScrollAnchorSnapshot | null = null;
@@ -35,7 +38,7 @@ export function useScrollAnchoring(
         ];
   }
 
-  function capture(): ScrollAnchorSnapshot | null {
+  function capture(preferred?: ScrollAnchorSnapshot | null): ScrollAnchorSnapshot | null {
     const container = scrollElement.value;
     if (container === null) {
       return null;
@@ -43,11 +46,32 @@ export function useScrollAnchoring(
     // Newly mounted rows can temporarily overlap: their DOM has its real height
     // while transforms still use estimates. Keep identity and offset in the
     // virtualizer's coordinate model until its measurements settle.
-    const virtualSnapshot = fallbackSnapshot();
     const containerTop = container.getBoundingClientRect().top;
+    const elements = turnElements();
+    const preferredElement = preferred
+      ? elements.find((candidate) => turnKey(candidate) === preferred.turnId)
+      : undefined;
+    const preferredStart = preferred ? virtualStart(preferred.turnId) : null;
+    const preserveChoice =
+      preferred &&
+      (preferred.inputVersion === undefined || preferred.inputVersion === inputVersion) &&
+      (preferredElement !== undefined || preferredStart !== null) &&
+      (!preferred.source ||
+        preferred.source ===
+          (sourceIdentity(preferred.turnId) ?? preferredElement?.dataset["anchorSource"]));
+    const virtualSnapshot = preserveChoice
+      ? {
+          turnId: preferred.turnId,
+          top:
+            preferredStart !== null
+              ? preferredStart - container.scrollTop
+              : preferredElement!.getBoundingClientRect().top - containerTop,
+          inputVersion,
+        }
+      : fallbackSnapshot();
     const element = virtualSnapshot
-      ? turnElements().find((candidate) => turnKey(candidate) === virtualSnapshot.turnId)
-      : turnElements().find((candidate) => candidate.getBoundingClientRect().bottom > containerTop);
+      ? elements.find((candidate) => turnKey(candidate) === virtualSnapshot.turnId)
+      : elements.find((candidate) => candidate.getBoundingClientRect().bottom > containerTop);
     const turnId = element?.dataset["turnId"] ?? element?.dataset["anchorTurnId"];
     const snapshot =
       virtualSnapshot ??
@@ -58,10 +82,12 @@ export function useScrollAnchoring(
       return null;
     }
     const source = sourceIdentity(snapshot.turnId) ?? element?.dataset["anchorSource"];
-    const entry = entryElements(element).find((candidate) => {
-      const rect = candidate.getBoundingClientRect();
-      return rect.height > 0 && rect.bottom > containerTop && rect.top <= containerTop;
-    });
+    const entry = preserveChoice
+      ? entryElements(element).find((candidate) => entryKey(candidate) === preferred.entry?.key)
+      : entryElements(element).find((candidate) => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.height > 0 && rect.bottom > containerTop && rect.top <= containerTop;
+        });
     return {
       ...snapshot,
       ...(source ? { source } : {}),
@@ -103,20 +129,23 @@ export function useScrollAnchoring(
     activeTransaction = null;
   }
 
-  function remember(): void {
+  function remember(preferred?: ScrollAnchorSnapshot | null): void {
     if (activeTransaction === null) {
-      remembered = capture();
+      remembered = capture(preferred);
     }
   }
 
-  async function restore(snapshot: ScrollAnchorSnapshot | null = remembered): Promise<void> {
+  async function restore(
+    snapshot: ScrollAnchorSnapshot | null = remembered,
+    surface?: { top: number; width: number },
+  ): Promise<"settled" | "clamped" | "unmounted" | "cancelled"> {
     const container = scrollElement.value;
     if (
       container === null ||
       snapshot === null ||
       (snapshot.inputVersion !== undefined && snapshot.inputVersion !== inputVersion)
     ) {
-      return;
+      return "cancelled";
     }
     const version = inputVersion;
     const currentTransaction = ++transaction;
@@ -126,43 +155,67 @@ export function useScrollAnchoring(
       version === inputVersion &&
       currentTransaction === transaction &&
       scrollElement.value === container;
-    const apply = () => {
+    const writePosition = (desired: number): "settled" | "clamped" | "cancelled" => {
+      writeScroll(container, Math.max(0, desired));
       if (!valid()) {
-        return;
+        return "cancelled";
       }
+      if (Math.abs(container.scrollTop - desired) <= 0.5) {
+        return "settled";
+      }
+      const maximum = Math.max(0, container.scrollHeight - container.clientHeight);
+      return (desired < 0 && container.scrollTop <= 0.5) ||
+        (desired > maximum && Math.abs(container.scrollTop - maximum) <= 0.5)
+        ? "clamped"
+        : "cancelled";
+    };
+    const apply = (): "settled" | "clamped" | "unmounted" | "cancelled" => {
+      if (!valid()) {
+        return "cancelled";
+      }
+      const bounds = container.getBoundingClientRect();
+      const surfaceShift = surface?.width === bounds.width ? surface.top - bounds.top : 0;
       const element = turnElements().find((candidate) => turnKey(candidate) === snapshot.turnId);
       if (
         snapshot.source &&
         snapshot.source !== (sourceIdentity(snapshot.turnId) ?? element?.dataset["anchorSource"])
       ) {
-        return;
+        return "cancelled";
       }
       if (element !== undefined) {
         const entry =
           snapshot.entry &&
           entryElements(element).find((candidate) => entryKey(candidate) === snapshot.entry!.key);
-        const delta = scrollAnchorAdjustment(entry && snapshot.entry ? snapshot.entry : snapshot, {
-          top:
-            (entry || element).getBoundingClientRect().top - container.getBoundingClientRect().top,
-        });
+        const previous = entry && snapshot.entry ? snapshot.entry : snapshot;
+        const delta = scrollAnchorAdjustment(
+          { top: previous.top + surfaceShift },
+          { top: (entry || element).getBoundingClientRect().top - bounds.top },
+        );
         if (Math.abs(delta) > 0.5) {
-          container.scrollTop += delta;
+          const result = writePosition(container.scrollTop + delta);
+          return result === "settled" && snapshot.entry && !entry ? "unmounted" : result;
         }
+        return snapshot.entry && !entry ? "unmounted" : "settled";
       } else {
         // The virtual range may have moved after a prepend or a width invalidation.
         // Resolve the stable ID in the new measurements before waiting for its DOM.
         const start = virtualStart(snapshot.turnId);
         if (start !== null) {
-          container.scrollTop = Math.max(0, start - snapshot.top);
+          const result = writePosition(start - snapshot.top - surfaceShift);
+          return result === "settled" && snapshot.entry ? "unmounted" : result;
         }
+        return "cancelled";
       }
     };
     try {
       await nextTick();
-      apply();
+      const first = apply();
+      if (first === "cancelled") {
+        return first;
+      }
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
       await nextTick();
-      apply();
+      return apply();
     } finally {
       if (activeTransaction === currentTransaction) {
         activeTransaction = null;

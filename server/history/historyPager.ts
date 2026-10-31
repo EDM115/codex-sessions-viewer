@@ -11,6 +11,7 @@ import type { NativeHistoryService } from "#server/history/nativeHistoryService.
 import { RolloutHistoryReader } from "#server/history/rolloutHistoryReader.ts";
 import type { ResolvedRolloutLineage } from "#server/ingestion/rolloutLineage.ts";
 import type { SeekableRollout } from "#server/ingestion/rolloutStream.ts";
+import { SelectedPhysicalSources } from "#server/ingestion/selectedPhysicalSources.ts";
 import { resolveSelectedRolloutLineage } from "#server/ingestion/selectedRolloutLineage.ts";
 import type { RolloutRef } from "#shared/types/conversation.ts";
 import type { HistoryPage, HistoryTurnWindow } from "#shared/types/history.ts";
@@ -34,6 +35,7 @@ interface PagerOptions {
   open: (ref: RolloutRef, signal?: AbortSignal) => Promise<SeekableRollout>;
   epochAuthority?: HistoryEpochAuthority;
   native?: NativeHistoryService;
+  onLineage?: (lineage: ResolvedRolloutLineage) => void;
 }
 interface Job {
   family: string;
@@ -45,6 +47,7 @@ interface Job {
   run: () => Promise<void>;
 }
 interface IssuedBoundary {
+  lineage: string;
   thread: string;
   epoch: string;
   physical: string;
@@ -61,6 +64,7 @@ export class HistoryPager {
   readonly #jobs = new Map<string, Job>();
   #active: Job | null = null;
   readonly #issued = new Map<string, IssuedBoundary>();
+  readonly #physicalSources = new SelectedPhysicalSources();
   #closed = false;
   constructor(options: PagerOptions) {
     this.#options = options;
@@ -238,9 +242,14 @@ export class HistoryPager {
   ): Promise<HistoryPage | HistoryTurnWindow> {
     signal.throwIfAborted();
     try {
+      this.#physicalSources.beginLineage(ref);
       const lineage = await resolveSelectedRolloutLineage(ref, known, signal, {
         open: this.#options.open,
+        prepareCompressedAncestors: query.anchor.kind !== "latest",
+        resolvePhysical: (physical, resolveSignal) =>
+          this.#physicalSources.resolve(ref, physical, resolveSignal),
       });
+      this.#options.onLineage?.(lineage);
       let result: HistoryPage | HistoryTurnWindow | null = null;
       const cursor = "cursor" in query.anchor ? query.anchor.cursor : null;
       const issued = cursor ? this.#issued.get(cursor) : undefined;
@@ -271,7 +280,9 @@ export class HistoryPager {
       }
       if (!result) {
         result =
-          cursor && !cursor.startsWith("raw-v1-") && issued
+          cursor &&
+          issued &&
+          (!cursor.startsWith("raw-v1-") || issued.lineage !== lineage.historyEpoch)
             ? await this.#recover(lineage, query, issued, signal)
             : "turnId" in query
               ? await this.#raw.readItems(lineage, query, signal)
@@ -309,7 +320,7 @@ export class HistoryPager {
         );
       }
       const remember = (cursorValue: string | null, boundary: IssuedBoundary) => {
-        if (!cursorValue || cursorValue.startsWith("raw-v1-")) {
+        if (!cursorValue) {
           return;
         }
         this.#issued.set(cursorValue, boundary);
@@ -322,6 +333,7 @@ export class HistoryPager {
           const item = direction === "before" ? turn.items[0] : turn.items.at(-1);
           if (item) {
             remember(direction === "before" ? turn.beforeCursor : turn.afterCursor, {
+              lineage: lineage.historyEpoch,
               thread: ref.stableThreadId,
               epoch: result.historyEpoch,
               physical: turn.physicalRolloutId,
@@ -338,6 +350,7 @@ export class HistoryPager {
           const turn = direction === "before" ? turns[0] : turns.at(-1);
           if (turn) {
             remember(direction === "before" ? result.beforeCursor : result.afterCursor, {
+              lineage: lineage.historyEpoch,
               thread: ref.stableThreadId,
               epoch: result.historyEpoch,
               physical: turn.physicalRolloutId,
@@ -354,6 +367,9 @@ export class HistoryPager {
     } catch (error) {
       signal.throwIfAborted();
       const reason = error instanceof Error ? error.message : String(error);
+      if (reason === "lineage.preparation_pending") {
+        throw error;
+      }
       if (
         /cursor|epoch_publication_superseded|source.changed|lineage_metadata_changed|rollout.superseded/iu.test(
           reason,
@@ -425,7 +441,9 @@ export class HistoryPager {
     }
     const recovered = await this.#raw.read(
       lineage,
-      { anchor: { kind: "turn", turnId: issued.turn }, limit: 1 },
+      issued.lineage !== lineage.historyEpoch
+        ? { anchor: { kind: "latest" }, limit: issued.limit }
+        : { anchor: { kind: "turn", turnId: issued.turn }, limit: 1 },
       signal,
     );
     const boundary = issued.direction === "before" ? recovered.turns[0] : recovered.turns.at(-1);
@@ -453,5 +471,6 @@ export class HistoryPager {
       job.controller.abort();
     }
     await Promise.allSettled([...this.#jobs.values()].map((job) => job.promise));
+    await this.#physicalSources.close();
   }
 }

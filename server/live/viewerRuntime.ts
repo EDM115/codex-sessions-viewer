@@ -246,6 +246,9 @@ export class LiveViewerRuntime {
   whenRecoverySettled(): Promise<void> {
     return this.#context.reconciler.whenRecoverySettled();
   }
+  observeSelectedHistory(id: string): () => void {
+    return this.#context.reconciler.observeSelectedHistory(id);
+  }
 
   whenReady(): Promise<void> {
     return this.#initialReconciliation;

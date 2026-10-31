@@ -4,9 +4,10 @@ import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { constants, createZstdDecompress } from "node:zlib";
 
+import { isCodexEventEnvelope } from "#server/normalization/eventSchema.ts";
 import type { RolloutRef } from "#shared/types/conversation.ts";
 
-export const ZSTD_DECODER_VERSION = `node-${process.versions.node}-zstd-${process.versions["zstd"]}-jsonl-v1`;
+export const ZSTD_DECODER_VERSION = `node-${process.versions.node}-zstd-${process.versions["zstd"]}-jsonl-v2`;
 export interface DecodeLimits {
   maxDecodedBytes: number;
   maxRecordBytes: number;
@@ -40,12 +41,18 @@ export class RolloutFramingValidator {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(this.#pending);
     this.#pending = Buffer.alloc(0);
     const value: unknown = JSON.parse(text);
-    if (value === null || typeof value !== "object" || Array.isArray(value) || !("type" in value)) {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      !isCodexEventEnvelope(value)
+    ) {
       throw new Error("rollout.unsupported_format");
     }
     if (this.#records === 0) {
       const payload = "payload" in value ? value.payload : null;
       if (
+        !("type" in value) ||
         value.type !== "session_meta" ||
         payload === null ||
         typeof payload !== "object" ||

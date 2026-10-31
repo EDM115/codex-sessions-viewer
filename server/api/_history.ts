@@ -30,7 +30,7 @@ export function historyFailure(error: unknown): never {
   }
   if (
     error instanceof Error &&
-    /rollout.cache_owned_elsewhere|rollout.turn_unavailable|rollout.source_unresolved/u.test(
+    /rollout.cache_owned_elsewhere|rollout.turn_unavailable|rollout.source_unresolved|lineage.preparation_pending/u.test(
       error.message,
     )
   ) {

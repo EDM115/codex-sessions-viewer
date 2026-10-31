@@ -960,6 +960,18 @@ export function useProgressiveHistoryTimeline(options: {
       },
     );
   }
+  async function finishLatest(initial: Promise<void>, owner: ScrollNavigationOwner) {
+    let current = initial;
+    while (!disposed && owner.isCurrent()) {
+      // oxlint-disable-next-line no-await-in-loop -- Each continuation follows the request that replaced the completed request
+      await current;
+      const replacement = pending.get("latest")?.promise;
+      if (!replacement || replacement === current) {
+        return;
+      }
+      current = replacement;
+    }
+  }
   return {
     setExpanded(keys: readonly string[]) {
       expandedItems = new Set(keys.slice(0, 128));
@@ -1028,7 +1040,14 @@ export function useProgressiveHistoryTimeline(options: {
         navigationTarget = { turnId: null, owner };
       }
       stale.value = windows.value.length > 0;
-      return request("latest", { anchor: { kind: "latest" }, limit: 5 }, true, undefined, owner);
+      const latestRequest = request(
+        "latest",
+        { anchor: { kind: "latest" }, limit: 5 },
+        true,
+        undefined,
+        owner,
+      );
+      return owner ? finishLatest(latestRequest, owner) : latestRequest;
     },
     loadItems(turnId: string, anchor: HistoryItemQuery["anchor"] = { kind: "latest" }) {
       return requestItems(`items:${turnId}:${JSON.stringify(anchor)}`, turnId, anchor);

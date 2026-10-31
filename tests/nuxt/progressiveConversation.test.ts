@@ -2,22 +2,26 @@ import { mountSuspended, mockComponent } from "@nuxt/test-utils/runtime";
 import { flushPromises } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  ConversationAttachment,
-  ConversationInspector,
-  ConversationTurn,
-  ConversationMessage,
-} from "#components";
+import { ConversationAttachment, ConversationInspector, ConversationTurn } from "#components";
+import * as activityPresentation from "#shared/timeline/activityPresentation.ts";
+import * as codeMode from "#shared/timeline/codeMode.ts";
+import { retainHistoryWindows } from "#shared/timeline/history.ts";
 import type {
   ConversationTurn as LegacyTurn,
   ConversationSummary,
 } from "#shared/types/conversation.ts";
-import type { HistoryPage, HistoryTurnWindow } from "#shared/types/history.ts";
+import type {
+  HistoryNavigatorPage,
+  HistoryPage,
+  HistoryTurnWindow,
+} from "#shared/types/history.ts";
 import { catalogSessionMetadataSchema } from "#shared/types/library.ts";
 import type { ResolvedAsset, ViewerInvalidation } from "#shared/types/repository.ts";
 import ProgressiveConversationView from "~/components/conversation/ProgressiveConversationView.vue";
 import type { useProgressiveHistoryTimeline } from "~/composables/useConversationTimeline.ts";
 import type { useMeasuredConversationViewport } from "~/composables/useMeasuredConversationViewport.ts";
+import { usePresentationSettings } from "~/composables/usePresentationSettings.ts";
+import { useScrollAnchoring } from "~/composables/useScrollAnchoring.ts";
 import { LiveApiConversationRepository } from "~/repositories/live.ts";
 import { StaticConversationRepository } from "~/repositories/static.ts";
 
@@ -157,7 +161,793 @@ function pageRepository(window: HistoryTurnWindow) {
   });
 }
 
+// Deterministic retention controls update the producer's ref behind its readonly consumer facade
+function publishRetainedWindows(
+  timeline: ReturnType<typeof useProgressiveHistoryTimeline>,
+  windows: HistoryTurnWindow[],
+) {
+  expect(Reflect.set(toRaw(timeline.windows), "value", windows)).toBe(true);
+}
+
+function pairedMessageWindows(order: "canonical-first" | "echo-first") {
+  const source = disjointWindow();
+  const tail = source.items[1]!;
+  if (tail.item?.type !== "agentMessage") {
+    throw new Error("Expected fixture answer");
+  }
+  const canonical = {
+    ...tail,
+    itemId: "canonical",
+    item: {
+      ...tail.item,
+      id: "canonical",
+      evidence: {
+        source: {
+          type: "response_item",
+          payload: { type: "message", id: "canonical", role: "assistant", phase: "final_answer" },
+        },
+      },
+    },
+  };
+  const echo = {
+    ...tail,
+    itemId: "echo",
+    item: {
+      ...tail.item,
+      id: "echo",
+      evidence: {
+        source: { type: "event_msg", payload: { type: "agent_message", phase: "final_answer" } },
+      },
+    },
+  };
+  const ordered = (order === "canonical-first" ? [canonical, echo] : [echo, canonical]).map(
+    (item, index) => ({
+      ...item,
+      decodedByteStart: 900 + index * 10,
+      decodedByteEnd: 910 + index * 10,
+      updatedAtDecodedByte: 900 + index * 10,
+    }),
+  );
+  const initial = ordered[0]!;
+  const selected = ordered[1]!;
+  const first: HistoryTurnWindow = {
+    ...source,
+    finalAnswerItemId: initial.itemId,
+    items: [source.items[0]!, initial],
+    itemIslands: [["prefix"], [initial.itemId]],
+  };
+  const joined: HistoryTurnWindow = {
+    ...source,
+    finalAnswerItemId: selected.itemId,
+    items: [source.items[0]!, ...ordered],
+    itemIslands: [["prefix"], ordered.map((item) => item.itemId)],
+  };
+  return { first, joined, initial, selected };
+}
+
+function inventoryWindow() {
+  const source = disjointWindow();
+  const sentinel = '{"unrelatedSentinel":"do not decode for membership"}';
+  source.items.push({
+    ...source.items[1]!,
+    itemId: "outer-output",
+    item: {
+      id: "outer-output",
+      type: "functionCallOutput",
+      name: "exec",
+      namespace: "functions",
+      output: sentinel,
+      startedAtMs: null,
+      completedAtMs: null,
+      evidence: {
+        source: {
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "outer",
+            name: "exec",
+            namespace: "functions",
+            output: sentinel,
+            internal_chat_message_metadata_passthrough: {
+              cell_id: "cell",
+              executed_tool_calls: [{ name: "read_file", arguments: { path: "benign.txt" } }],
+              tool_calls_complete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  return { source, sentinel };
+}
+
 describe("progressive and legacy presentation paths", () => {
+  it.each(["canonical-first", "echo-first"] as const)(
+    "keeps distinct current keys and the selected second reading entry after a same-ID qualification split: %s",
+    async (order) => {
+      const { first, joined, initial, selected } = pairedMessageWindows(order);
+      const repository = pageRepository(first);
+      vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+        queueMicrotask(() => callback(performance.now()));
+        return 1;
+      });
+      const wrapper = await mountSuspended(ProgressiveConversationView, {
+        props: {
+          metadata: catalogSessionMetadataSchema.parse(summary),
+          repository,
+          targetTurnId: null,
+        },
+      });
+      try {
+        await flushPromises();
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exposes the actual component's retained producer and viewport
+        const state = wrapper.vm as unknown as {
+          timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+          viewport: ReturnType<typeof useMeasuredConversationViewport>;
+          entryRetained(key: string, entry: string): boolean | undefined;
+        };
+        const originalKey = wrapper
+          .get(`[data-message-id="${initial.itemId}"]`)
+          .attributes("data-anchor-entry");
+        publishRetainedWindows(state.timeline, [joined]);
+        await nextTick();
+        expect(
+          wrapper.get(`[data-message-id="${selected.itemId}"]`).attributes("data-anchor-entry"),
+        ).toBe(originalKey);
+        const rows = state.viewport.rows.value;
+        const mountedRows = vi.spyOn(state.viewport.rows, "value", "get").mockReturnValue([]);
+        publishRetainedWindows(
+          state.timeline,
+          retainHistoryWindows(state.timeline.windows.value, "B"),
+        );
+        await nextTick();
+        expect(wrapper.find("[data-history-turn]").exists()).toBe(false);
+        expect(state.timeline.windows.value[0]!.items.map((item) => item.itemId)).toEqual(
+          joined.items.map((item) => item.itemId),
+        );
+        mountedRows.mockReturnValue(rows);
+        publishRetainedWindows(
+          state.timeline,
+          state.timeline.windows.value.map((window) => ({ ...window })),
+        );
+        await nextTick();
+        const keys = wrapper.getComponent(ConversationTurn).props("messageKeys")!;
+        expect.soft(new Set([keys[initial.itemId], keys[selected.itemId]]).size).toBe(2);
+        expect(`message:${keys[selected.itemId]}`).toBe(originalKey);
+        const disclosure = wrapper.get<HTMLDetailsElement>(".conversation-work-stream");
+        disclosure.element.open = true;
+        await disclosure.trigger("toggle");
+        await flushPromises();
+        await state.viewport.settle();
+        const container = wrapper.get<HTMLElement>(".progressive-conversation").element;
+        const canvas = wrapper.get<HTMLElement>(".history-canvas").element;
+        const turn = wrapper.get<HTMLElement>("[data-history-turn]").element;
+        const reading = wrapper.get<HTMLElement>(`[data-message-id="${selected.itemId}"]`).element;
+        let growth = 0;
+        container.getBoundingClientRect = () => new DOMRect(0, 0, 800, 800);
+        canvas.getBoundingClientRect = () =>
+          new DOMRect(0, -container.scrollTop, 800, 3000 + growth);
+        turn.getBoundingClientRect = canvas.getBoundingClientRect;
+        for (const element of turn.querySelectorAll<HTMLElement>(
+          "[data-anchor-entry], [data-message-id]",
+        )) {
+          element.getBoundingClientRect = () =>
+            new DOMRect(
+              0,
+              (element === reading ? 700 + growth : 100) - container.scrollTop,
+              800,
+              element === reading ? 1000 : 100,
+            );
+        }
+        container.scrollTop = 800;
+        const rowKey = turn.dataset["anchorTurnId"]!;
+        const readingSnapshot = useScrollAnchoring(
+          ref(container),
+          () => 0,
+          () => ({ turnId: rowKey, top: -container.scrollTop }),
+        ).capture();
+        expect(readingSnapshot?.entry).toEqual({ key: originalKey, top: -100 });
+        growth = 150;
+        await state.viewport.target(rowKey, -800, undefined, readingSnapshot!);
+        expect(reading.getBoundingClientRect().top).toBe(-100);
+        expect(container.scrollTop).toBe(950);
+        expect(state.viewport.follow.value).toBe(false);
+        mountedRows.mockRestore();
+      } finally {
+        wrapper.unmount();
+      }
+    },
+  );
+  it.each(["canonical-first", "echo-first"] as const)(
+    "bounds current alias ownership through mounted splits, merges, successor eviction and returning seed collisions: %s",
+    async (order) => {
+      const { first, joined, initial, selected } = pairedMessageWindows(order);
+      const wrapper = await mountSuspended(ProgressiveConversationView, {
+        props: {
+          metadata: catalogSessionMetadataSchema.parse(summary),
+          repository: pageRepository(first),
+          targetTurnId: null,
+        },
+      });
+      try {
+        await flushPromises();
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU checks the production alias registry through immutable retained-window publications
+        const state = wrapper.vm as unknown as {
+          timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+          messageKeysByIdentity: Map<string, string>;
+          entryRetained(key: string, entry: string): boolean | undefined;
+        };
+        const originalKey = wrapper.getComponent(ConversationTurn).props("messageKeys")![
+          initial.itemId
+        ]!;
+        const keys = () => wrapper.getComponent(ConversationTurn).props("messageKeys")!;
+        publishRetainedWindows(state.timeline, [joined]);
+        await nextTick();
+        for (const change of ["text", "phase", "text", "phase"] as const) {
+          const split = {
+            ...joined,
+            items: joined.items.map((item) =>
+              item.itemId === initial.itemId && item.item?.type === "agentMessage"
+                ? {
+                    ...item,
+                    item: {
+                      ...item.item,
+                      ...(change === "text"
+                        ? { text: "Different same-ID content" }
+                        : { phase: "commentary" }),
+                    },
+                  }
+                : item,
+            ),
+          };
+          publishRetainedWindows(state.timeline, [split]);
+          // oxlint-disable-next-line no-await-in-loop -- Each split must be observed before the following merge
+          await nextTick();
+          expect(keys()[selected.itemId]).toBe(originalKey);
+          expect(new Set([keys()[initial.itemId], keys()[selected.itemId]]).size).toBe(2);
+          expect(state.messageKeysByIdentity.size).toBe(3);
+          publishRetainedWindows(state.timeline, [joined]);
+          // oxlint-disable-next-line no-await-in-loop -- Re-prove the pair before the next same-ID change
+          await nextTick();
+          expect(keys()[selected.itemId]).toBe(originalKey);
+          expect(Object.keys(keys())).toEqual(["prefix", selected.itemId]);
+          expect(state.messageKeysByIdentity.size).toBe(3);
+        }
+        publishRetainedWindows(state.timeline, [
+          {
+            ...joined,
+            finalAnswerItemId: initial.itemId,
+            items: joined.items.filter((item) => item.itemId !== selected.itemId),
+          },
+        ]);
+        await nextTick();
+        expect(keys()[initial.itemId]).toBe(originalKey);
+        expect(state.messageKeysByIdentity.size).toBe(2);
+        publishRetainedWindows(state.timeline, [joined]);
+        await nextTick();
+        expect(keys()[selected.itemId]).toBe(originalKey);
+        publishRetainedWindows(state.timeline, [
+          { ...joined, items: joined.items.filter((item) => item.itemId !== initial.itemId) },
+        ]);
+        await nextTick();
+        expect(keys()[selected.itemId]).toBe(originalKey);
+        expect(state.messageKeysByIdentity.size).toBe(2);
+        const returned = {
+          ...joined,
+          items: joined.items.map((item) =>
+            item.itemId === initial.itemId && item.item?.type === "agentMessage"
+              ? { ...item, item: { ...item.item, text: "Returning seed is a distinct message" } }
+              : item,
+          ),
+        };
+        publishRetainedWindows(state.timeline, [returned]);
+        await nextTick();
+        expect(keys()[selected.itemId]).toBe(originalKey);
+        expect(keys()[initial.itemId]).not.toBe(originalKey);
+        expect(new Set(Object.values(keys())).size).toBe(3);
+        publishRetainedWindows(state.timeline, [joined]);
+        await nextTick();
+        publishRetainedWindows(state.timeline, [
+          {
+            ...joined,
+            items: joined.items.map((item) =>
+              item.itemId === selected.itemId
+                ? {
+                    ...item,
+                    item: {
+                      id: selected.itemId,
+                      type: "reasoning" as const,
+                      summary: ["Changed kind"],
+                      content: [],
+                      startedAtMs: null,
+                      completedAtMs: null,
+                      evidence: null,
+                    },
+                  }
+                : item,
+            ),
+          },
+        ]);
+        await nextTick();
+        expect(keys()[initial.itemId]).not.toBe(originalKey);
+        expect(
+          state.entryRetained(
+            JSON.stringify([joined.physicalRolloutId, joined.turnId]),
+            `message:${originalKey}`,
+          ),
+        ).toBe(false);
+        expect(state.messageKeysByIdentity.size).toBe(2);
+      } finally {
+        wrapper.unmount();
+      }
+    },
+  );
+  it("retires an evicted alias owner when two distinct current classes are possible successors", async () => {
+    const { first, joined } = pairedMessageWindows("canonical-first");
+    const echo = joined.items.find((item) => item.itemId === "echo")!;
+    const echo2 = { ...echo, itemId: "echo-2", item: { ...echo.item!, id: "echo-2" } };
+    const grouped = {
+      ...joined,
+      finalAnswerItemId: "canonical",
+      items: [...joined.items, echo2],
+      itemIslands: [["prefix"], ["canonical", "echo", "echo-2"]],
+    };
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository: pageRepository(first),
+        targetTurnId: null,
+      },
+    });
+    try {
+      await flushPromises();
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU publishes the real retained alias class before owner eviction
+      const state = wrapper.vm as unknown as {
+        timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+        entryRetained(key: string, entry: string): boolean | undefined;
+        messageKeysByIdentity: Map<string, string>;
+      };
+      publishRetainedWindows(state.timeline, [grouped]);
+      await nextTick();
+      const oldKey = wrapper.getComponent(ConversationTurn).props("messageKeys")!["canonical"]!;
+      expect(wrapper.getComponent(ConversationTurn).props("turn").assistantMessages).toHaveLength(
+        1,
+      );
+      publishRetainedWindows(state.timeline, [
+        {
+          ...grouped,
+          finalAnswerItemId: "echo-2",
+          items: grouped.items.filter((item) => item.itemId !== "canonical"),
+        },
+      ]);
+      await nextTick();
+      const keys = wrapper.getComponent(ConversationTurn).props("messageKeys")!;
+      expect(new Set([keys["echo"], keys["echo-2"]]).size).toBe(2);
+      expect(Object.values(keys)).not.toContain(oldKey);
+      expect(
+        state.entryRetained(
+          JSON.stringify([joined.physicalRolloutId, joined.turnId]),
+          `message:${oldKey}`,
+        ),
+      ).toBe(false);
+      expect(state.messageKeysByIdentity.size).toBe(3);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+  it("checks hidden message membership without decoding unrelated tool output or Code Mode inventory", async () => {
+    const { source, sentinel } = inventoryWindow();
+    const repository = pageRepository(source);
+    const getPage = vi.spyOn(repository, "getHistoryPage");
+    const getItems = vi.spyOn(repository, "getTurnItems");
+    const prepare = vi.spyOn(repository, "prepareHistoryPresentation");
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository,
+        targetTurnId: null,
+      },
+    });
+    try {
+      await flushPromises();
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exercises the actual pending-entry predicate with no mounted row
+      const state = wrapper.vm as unknown as {
+        timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+        viewport: ReturnType<typeof useMeasuredConversationViewport>;
+        entryRetained(key: string, entry: string): boolean | undefined;
+      };
+      const anchorKey = wrapper.get('[data-message-id="tail"]').attributes("data-anchor-entry");
+      if (!anchorKey) {
+        throw new Error("Expected the rendered message anchor");
+      }
+      const mountedRows = vi.spyOn(state.viewport.rows, "value", "get").mockReturnValue([]);
+      publishRetainedWindows(
+        state.timeline,
+        state.timeline.windows.value.map((window) => ({ ...window })),
+      );
+      await nextTick();
+      expect(wrapper.find("[data-history-turn]").exists()).toBe(false);
+      const requests = [
+        getPage.mock.calls.length,
+        getItems.mock.calls.length,
+        prepare.mock.calls.length,
+      ];
+      const parse = vi.spyOn(JSON, "parse").mockClear();
+      const activity = vi.spyOn(activityPresentation, "historyActivity").mockClear();
+      const expand = vi.spyOn(codeMode, "expandRecordedCells").mockClear();
+      expect(
+        state.entryRetained(JSON.stringify([source.physicalRolloutId, source.turnId]), anchorKey),
+      ).toBe(true);
+      expect(
+        state.entryRetained(JSON.stringify([source.physicalRolloutId, source.turnId]), anchorKey),
+      ).toBe(true);
+      expect(parse.mock.calls.filter(([value]) => value === sentinel)).toHaveLength(0);
+      expect(activity).not.toHaveBeenCalled();
+      expect(expand).not.toHaveBeenCalled();
+      expect([
+        getPage.mock.calls.length,
+        getItems.mock.calls.length,
+        prepare.mock.calls.length,
+      ]).toEqual(requests);
+      parse.mockRestore();
+      activity.mockRestore();
+      expand.mockRestore();
+      mountedRows.mockRestore();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+  it.each(["outer-output", "code-mode:outer-output:attempt:0"])(
+    "uses already-published activity identity and returns unknown across hidden qualification changes: %s",
+    async (id) => {
+      const { source, sentinel } = inventoryWindow();
+      const repository = pageRepository(source);
+      const getPage = vi.spyOn(repository, "getHistoryPage");
+      const getItems = vi.spyOn(repository, "getTurnItems");
+      const prepare = vi.spyOn(repository, "prepareHistoryPresentation");
+      const wrapper = await mountSuspended(ProgressiveConversationView, {
+        props: {
+          metadata: catalogSessionMetadataSchema.parse(summary),
+          repository,
+          targetTurnId: null,
+        },
+      });
+      try {
+        await flushPromises();
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU queries the real component's one-entry provenance through retained-window changes
+        const state = wrapper.vm as unknown as {
+          timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+          viewport: ReturnType<typeof useMeasuredConversationViewport>;
+          entryRetained(key: string, entry: string): boolean | undefined;
+        };
+        const rowKey = JSON.stringify([source.physicalRolloutId, source.turnId]);
+        const entryKey = `activity:${id}`;
+        expect(
+          wrapper
+            .getComponent(ConversationTurn)
+            .props("turn")
+            .activities.some((activity) => activity.id === id),
+        ).toBe(true);
+        expect(state.entryRetained(rowKey, entryKey)).toBe(true);
+        const mountedRows = vi.spyOn(state.viewport.rows, "value", "get").mockReturnValue([]);
+        publishRetainedWindows(state.timeline, [...state.timeline.windows.value]);
+        await nextTick();
+        expect(wrapper.find("[data-history-turn]").exists()).toBe(false);
+        const requests = [
+          getPage.mock.calls.length,
+          getItems.mock.calls.length,
+          prepare.mock.calls.length,
+        ];
+        const parse = vi.spyOn(JSON, "parse").mockClear();
+        const activity = vi.spyOn(activityPresentation, "historyActivity").mockClear();
+        const expand = vi.spyOn(codeMode, "expandRecordedCells").mockClear();
+        expect(state.entryRetained(rowKey, entryKey)).toBe(true);
+        publishRetainedWindows(
+          state.timeline,
+          retainHistoryWindows(state.timeline.windows.value, "B"),
+        );
+        await nextTick();
+        expect(state.entryRetained(rowKey, entryKey)).toBeUndefined();
+        publishRetainedWindows(
+          state.timeline,
+          state.timeline.windows.value.map((window) => ({
+            ...window,
+            items: window.items.filter((item) => item.itemId !== "outer-output"),
+          })),
+        );
+        await nextTick();
+        expect(state.entryRetained(rowKey, entryKey)).toBe(false);
+        expect(parse.mock.calls.filter(([value]) => value === sentinel)).toHaveLength(0);
+        expect(activity).not.toHaveBeenCalled();
+        expect(expand).not.toHaveBeenCalled();
+        expect([
+          getPage.mock.calls.length,
+          getItems.mock.calls.length,
+          prepare.mock.calls.length,
+        ]).toEqual(requests);
+        parse.mockRestore();
+        activity.mockRestore();
+        expand.mockRestore();
+        mountedRows.mockRestore();
+      } finally {
+        wrapper.unmount();
+      }
+    },
+  );
+  it.each([false, true])(
+    "finishes owned Latest on an automatic replacement page while reader cancellation still wins (cancelled=%s)",
+    async (cancelled) => {
+      const source = disjointWindow();
+      const repository = pageRepository(source);
+      const requests: Array<{ signal?: AbortSignal; resolve: (page: HistoryPage) => void }> = [];
+      vi.spyOn(repository, "getHistoryPage").mockImplementation(
+        (_id, _query, options) =>
+          new Promise<HistoryPage>((resolve, reject) => {
+            requests.push({ signal: options?.signal, resolve });
+            options?.signal?.addEventListener("abort", () => reject(options.signal!.reason), {
+              once: true,
+            });
+          }),
+      );
+      let invalidate!: Parameters<typeof repository.subscribe>[0];
+      vi.spyOn(repository, "subscribe").mockImplementation((listener) => {
+        invalidate = listener;
+        return () => {};
+      });
+      vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+        queueMicrotask(() => callback(performance.now()));
+        return 1;
+      });
+      let preferences!: ReturnType<typeof usePresentationSettings>;
+      let previousFollow = true;
+      const wrapper = await mountSuspended({
+        setup() {
+          preferences = usePresentationSettings();
+          previousFollow = preferences.settings.liveFollow;
+          onMounted(() => preferences.setLiveFollow(false));
+          return () =>
+            h(ProgressiveConversationView, {
+              metadata: catalogSessionMetadataSchema.parse(summary),
+              repository,
+              targetTurnId: null,
+            });
+        },
+      });
+      try {
+        const component = wrapper.getComponent(ProgressiveConversationView);
+        const surface = component.get<HTMLElement>(".progressive-conversation").element;
+        let position = 0;
+        const total = () =>
+          Number(surface.dataset.retainedTurns) > 0 ? 2000 : surface.clientHeight;
+        vi.spyOn(surface, "scrollHeight", "get").mockImplementation(total);
+        Object.defineProperty(surface, "scrollTop", {
+          get: () => position,
+          set: (value: number) => {
+            position = Math.max(0, Math.min(total() - surface.clientHeight, value));
+          },
+        });
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exposes the mounted production script-setup methods
+        const state = component.vm as unknown as {
+          readInput(event: Event): void;
+          viewport: ReturnType<typeof useMeasuredConversationViewport>;
+        };
+        const latest = vi.spyOn(state.viewport, "latest");
+        expect(requests).toHaveLength(1);
+        invalidate({ type: "session.updated", ids: ["thread"], revision: "initial-notification" });
+        if (cancelled) {
+          state.readInput(new WheelEvent("wheel", { deltaY: -10 }));
+        }
+        await flushPromises();
+        expect(requests).toHaveLength(2);
+        expect(requests[0]?.signal?.aborted).toBe(true);
+        expect(latest).not.toHaveBeenCalled();
+        requests[1]!.resolve(historyPage(source));
+        await flushPromises();
+        expect(surface.dataset.retainedTurns).toBe("1");
+        expect(surface.scrollTop).toBe(cancelled ? 0 : 1200);
+        expect(latest).toHaveBeenCalledTimes(cancelled ? 0 : 1);
+      } finally {
+        preferences.setLiveFollow(previousFollow);
+        wrapper.unmount();
+      }
+    },
+  );
+  it("captures unobserved reader movement before a delayed navigator changes surface geometry", async () => {
+    const source = disjointWindow();
+    const repository = pageRepository(source);
+    let resolveNavigator!: (value: HistoryNavigatorPage) => void;
+    const navigation = new Promise<HistoryNavigatorPage>((resolve) => {
+      resolveNavigator = resolve;
+    });
+    vi.spyOn(repository, "getHistoryNavigator").mockImplementation(() => navigation);
+    vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+      queueMicrotask(() => callback(performance.now()));
+      return 1;
+    });
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository,
+        targetTurnId: source.turnId,
+      },
+    });
+    try {
+      await flushPromises();
+      const surface = wrapper.get<HTMLElement>(".progressive-conversation").element;
+      const canvas = wrapper.get<HTMLElement>(".history-canvas").element;
+      const target = wrapper.get<HTMLElement>("[data-history-turn]").element;
+      const surfaceTop = () => (wrapper.find("nav").exists() ? 161.59375 : 100);
+      surface.getBoundingClientRect = () => new DOMRect(0, surfaceTop(), 800, 800);
+      canvas.getBoundingClientRect = () =>
+        new DOMRect(0, surfaceTop() + 32 - surface.scrollTop, 800, 2000);
+      target.getBoundingClientRect = () =>
+        new DOMRect(0, surfaceTop() + 32 - surface.scrollTop, 800, 1000);
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exposes the mounted production script-setup methods
+      const state = wrapper.vm as unknown as {
+        viewport: ReturnType<typeof useMeasuredConversationViewport>;
+      };
+      await state.viewport.target(JSON.stringify([source.physicalRolloutId, source.turnId]));
+      surface.scrollTop += 96;
+      const before = target.getBoundingClientRect().top;
+      resolveNavigator({ ...historyPage(source), turns: [] });
+      await flushPromises();
+      await state.viewport.settle();
+      expect(wrapper.find("nav").exists()).toBe(true);
+      expect(target.getBoundingClientRect().top).toBe(before);
+      expect(state.viewport.follow.value).toBe(false);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+  it("processes automatic history for a direct target while explicit Latest still requests navigation", async () => {
+    const selected = disjointWindow();
+    const latest = { ...structuredClone(selected), turnId: "latest", order: 2 };
+    const repository = pageRepository(selected);
+    const read = vi
+      .spyOn(repository, "getHistoryPage")
+      .mockImplementation(async (_id, query) =>
+        historyPage(query.anchor.kind === "turn" ? selected : latest),
+      );
+    let invalidate!: Parameters<typeof repository.subscribe>[0];
+    vi.spyOn(repository, "subscribe").mockImplementation((listener) => {
+      invalidate = listener;
+      return () => {};
+    });
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository,
+        targetTurnId: selected.turnId,
+      },
+    });
+    try {
+      await flushPromises();
+      expect(wrapper.get(".progressive-conversation").attributes("data-retained-turns")).toBe("1");
+      invalidate({ type: "session.updated", ids: ["thread"], revision: "notification" });
+      await flushPromises();
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(wrapper.get(".progressive-conversation").attributes("data-retained-turns")).toBe("2");
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Latest content")!
+        .trigger("click");
+      await flushPromises();
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(wrapper.get(".progressive-conversation").attributes("data-retained-turns")).toBe("2");
+    } finally {
+      wrapper.unmount();
+    }
+  });
+  it("refreshes navigator append and epoch changes while preserving a deliberately paged slice and exposing retry", async () => {
+    const window = disjointWindow();
+    const repository = pageRepository(window);
+    let epoch = "epoch";
+    let revision = "A";
+    let failOlder = false;
+    const history = vi
+      .spyOn(repository, "getHistoryPage")
+      .mockImplementation(async () =>
+        historyPage({ ...window, historyEpoch: epoch, contentRevision: revision }),
+      );
+    let invalidate!: Parameters<typeof repository.subscribe>[0];
+    vi.spyOn(repository, "subscribe").mockImplementation((listener) => {
+      invalidate = listener;
+      return () => {};
+    });
+    const navigate = vi
+      .spyOn(repository, "getHistoryNavigator")
+      .mockImplementation(async (_id, query) => {
+        if (query.anchor.kind === "before" && failOlder) {
+          throw new Error("history.invalid_cursor");
+        }
+        const older = query.anchor.kind === "before";
+        return {
+          ...historyPage({ ...window, historyEpoch: epoch, contentRevision: revision }),
+          beforeCursor: older ? null : "older-navigation",
+          turns: [
+            {
+              turnId: older ? "older-turn" : `latest-${revision}`,
+              physicalRolloutId: "physical",
+              order: older ? 0 : 2,
+              status: "completed",
+              promptPreview: older ? "OLDER NAVIGATION" : `LATEST ${revision}`,
+            },
+          ],
+        };
+      });
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository,
+        targetTurnId: null,
+      },
+    });
+    try {
+      await flushPromises();
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).toContain("LATEST A");
+      revision = "B";
+      invalidate({ type: "session.updated", ids: ["thread"], revision });
+      await flushPromises();
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).toContain("LATEST B");
+      const older = wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Older navigation")!;
+      failOlder = true;
+      await older.trigger("click");
+      await flushPromises();
+      expect(wrapper.text()).toContain("Retry navigation");
+      failOlder = false;
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Retry navigation")!
+        .trigger("click");
+      await flushPromises();
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).toContain(
+        "OLDER NAVIGATION",
+      );
+      revision = "C";
+      invalidate({ type: "session.updated", ids: ["thread"], revision });
+      await flushPromises();
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).toContain(
+        "OLDER NAVIGATION",
+      );
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).toContain("LATEST C");
+      epoch = "replacement";
+      revision = "D";
+      invalidate({ type: "session.updated", ids: ["thread"], revision });
+      await flushPromises();
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).toContain("LATEST D");
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).not.toContain(
+        "OLDER NAVIGATION",
+      );
+      let finishLate!: (page: HistoryNavigatorPage) => void;
+      const late = new Promise<HistoryNavigatorPage>((resolve) => {
+        finishLate = resolve;
+      });
+      navigate.mockImplementationOnce(() => late);
+      revision = "E";
+      invalidate({ type: "session.updated", ids: ["thread"], revision });
+      await flushPromises();
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Older navigation")!
+        .trigger("click");
+      await flushPromises();
+      finishLate({ ...historyPage({ ...window, historyEpoch: "retired-owner" }), turns: [] });
+      await flushPromises();
+      revision = "F";
+      invalidate({ type: "session.updated", ids: ["thread"], revision });
+      await flushPromises();
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).toContain(
+        "OLDER NAVIGATION",
+      );
+      expect(wrapper.get('nav[aria-label="Loaded turn navigation"]').text()).toContain("LATEST F");
+      expect(navigate).toHaveBeenCalled();
+      expect(history).toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+    }
+  });
   it("waits for a real attachment ID while still resolving a known missing asset", async () => {
     const resolveAsset = vi.fn<(id: string) => Promise<ResolvedAsset>>(async (id) => ({
       id,
@@ -400,7 +1190,7 @@ describe("progressive and legacy presentation paths", () => {
       // oxlint-disable-next-line no-await-in-loop -- Render the new measured window before checking its cache
       await flushPromises();
       expect(state.messageKeysByIdentity.size).toBeLessThanOrEqual(
-        wrapper.findAll("[data-history-turn]").length * 2,
+        state.timeline.windows.value.length * 2,
       );
     }
     expect(state.timeline.windows.value).toHaveLength(60);
@@ -519,9 +1309,6 @@ describe("progressive and legacy presentation paths", () => {
       const anchorKey = original.getAttribute("data-anchor-entry");
       invalidate({ type: "session.updated", ids: ["thread"], revision: "A" });
       await flushPromises();
-      const updated = wrapper
-        .findAllComponents(ConversationMessage)
-        .find((component) => component.props("message").id === selected.itemId)!;
       expect(wrapper.get(`[data-message-id="${selected.itemId}"]`).element).toBe(original);
       expect(anchorKey).toBeTruthy();
       expect(
@@ -531,15 +1318,244 @@ describe("progressive and legacy presentation paths", () => {
       expect(wrapper.find(`[data-entry-id="${initial.itemId}"]`).exists()).toBe(false);
       expect(wrapper.findAll(".conversation-message--assistant")).toHaveLength(1);
       expect(joined.finalAnswerItemId).toBe(selected.itemId);
-      await updated.get('[aria-label="Open message info"]').trigger("click");
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exposes the actual producer's retained-entry predicate
+      const state = wrapper.vm as unknown as {
+        entryRetained(key: string, entry: string): boolean | undefined;
+        timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+        viewport: ReturnType<typeof useMeasuredConversationViewport>;
+        messageKeysByIdentity: Map<string, string>;
+      };
+      const rowKey = JSON.stringify([joined.physicalRolloutId, joined.turnId]);
+      expect(state.entryRetained(rowKey, anchorKey!)).toBe(true);
+      const rows = state.viewport.rows.value;
+      const mountedRows = vi.spyOn(state.viewport.rows, "value", "get");
+      for (let cycle = 0; cycle < 3; cycle++) {
+        mountedRows.mockReturnValue([]);
+        publishRetainedWindows(
+          state.timeline,
+          state.timeline.windows.value.map((current) => ({ ...current })),
+        );
+        // oxlint-disable-next-line no-await-in-loop -- Each cycle must publish the virtual unmount before its remount
+        await nextTick();
+        expect(wrapper.find("[data-history-turn]").exists()).toBe(false);
+        expect(state.entryRetained(rowKey, anchorKey!)).toBe(true);
+        expect(state.messageKeysByIdentity.size).toBeLessThanOrEqual(3);
+        mountedRows.mockReturnValue(rows);
+        publishRetainedWindows(
+          state.timeline,
+          state.timeline.windows.value.map((current) => ({ ...current })),
+        );
+        // oxlint-disable-next-line no-await-in-loop -- Observe the key used by each remounted production message
+        await nextTick();
+        expect(
+          wrapper.get(`[data-message-id="${selected.itemId}"]`).attributes("data-anchor-entry"),
+        ).toBe(anchorKey);
+      }
+      mountedRows.mockRestore();
+      await wrapper
+        .get(`[data-message-id="${selected.itemId}"] [aria-label="Open message info"]`)
+        .trigger("click");
       expect(wrapper.getComponent(ConversationInspector).props("record")?.target).toEqual({
         type: "message",
         id: selected.itemId,
       });
       expect(legacyInspector).not.toHaveBeenCalled();
+      const retained = state.timeline.windows.value[0]!;
+      for (let revision = 0; revision < 3; revision++) {
+        const replacementId = `replacement-${revision}`;
+        publishRetainedWindows(state.timeline, [
+          {
+            ...retained,
+            contentRevision: `revision-${revision}`,
+            finalAnswerItemId: replacementId,
+            items: [
+              retained.items[0]!,
+              { ...selected, itemId: replacementId, item: { ...selected.item, id: replacementId } },
+            ],
+          },
+        ]);
+        // oxlint-disable-next-line no-await-in-loop -- Each revision replaces retained identity ownership before the bound is checked
+        await nextTick();
+        expect(state.messageKeysByIdentity.size).toBe(2);
+        expect(state.entryRetained(rowKey, anchorKey!)).toBe(false);
+      }
+      publishRetainedWindows(
+        state.timeline,
+        state.timeline.windows.value.map((current) => ({ ...current, historyEpoch: "next-epoch" })),
+      );
+      await nextTick();
+      expect(state.messageKeysByIdentity.size).toBe(2);
+      expect(
+        [...state.messageKeysByIdentity.keys()].every((key) =>
+          key.startsWith('["physical","turn","next-epoch"]:'),
+        ),
+      ).toBe(true);
+      expect(state.entryRetained(rowKey, anchorKey!)).toBe(false);
       wrapper.unmount();
     },
   );
+  it.each(["evicted", "unmounted", "unknown"] as const)(
+    "uses actual progressive entry ownership while the selected turn is retained: %s",
+    async (retention) => {
+      const source = disjointWindow();
+      const repository = pageRepository(source);
+      const getPage = vi.spyOn(repository, "getHistoryPage");
+      const getItems = vi.spyOn(repository, "getTurnItems");
+      vi.spyOn(globalThis, "requestAnimationFrame").mockImplementation((callback) => {
+        queueMicrotask(() => callback(performance.now()));
+        return 1;
+      });
+      const wrapper = await mountSuspended(ProgressiveConversationView, {
+        props: {
+          metadata: catalogSessionMetadataSchema.parse(summary),
+          repository,
+          targetTurnId: null,
+        },
+      });
+      try {
+        await flushPromises();
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exposes the mounted production viewport and retained data store
+        const state = wrapper.vm as unknown as {
+          timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+          viewport: ReturnType<typeof useMeasuredConversationViewport>;
+          entryRetained(key: string, entry: string): boolean | undefined;
+        };
+        const container = wrapper.get<HTMLElement>(".progressive-conversation").element;
+        const canvas = wrapper.get<HTMLElement>(".history-canvas").element;
+        const turn = wrapper.get<HTMLElement>("[data-history-turn]").element;
+        const entry = wrapper.get<HTMLElement>('[data-message-id="tail"]').element;
+        const prefix = wrapper.get<HTMLElement>('[data-message-id="prefix"]').element;
+        let height = 1600;
+        let position = 0;
+        let entryOffset = 300;
+        Object.defineProperty(container, "scrollTop", {
+          get: () => position,
+          set: (value: number) => {
+            position = Math.max(0, Math.min(height - 800, value));
+          },
+        });
+        vi.spyOn(container, "scrollHeight", "get").mockImplementation(() => height);
+        container.getBoundingClientRect = () => new DOMRect(0, 0, 800, 800);
+        canvas.getBoundingClientRect = () => new DOMRect(0, -position, 800, height);
+        turn.getBoundingClientRect = () => new DOMRect(0, -position, 800, height);
+        prefix.getBoundingClientRect = () => new DOMRect(0, -position, 800, 200);
+        entry.getBoundingClientRect = () => new DOMRect(0, entryOffset - position, 800, 1000);
+        container.scrollTop = 600;
+        state.viewport.scroll();
+        state.viewport.capture();
+        height = 1200;
+        container.scrollTop = 400;
+        await state.viewport.settle();
+        expect(position).toBe(400);
+        const rowKey = turn.dataset["anchorTurnId"]!;
+        const anchorKey = entry.dataset["anchorEntry"]!;
+        const retained = state.timeline.windows.value[0]!;
+        const requests = [getPage.mock.calls.length, getItems.mock.calls.length];
+        if (retention === "unmounted") {
+          entry.remove();
+        } else {
+          publishRetainedWindows(state.timeline, [
+            {
+              ...retained,
+              items:
+                retention === "evicted"
+                  ? retained.items.slice(0, 1)
+                  : retained.items.map((item) =>
+                      item.itemId === "tail"
+                        ? Object.assign({}, item, { item: null, detail: "unresolved" as const })
+                        : item,
+                    ),
+            },
+          ]);
+          await nextTick();
+        }
+        expect(state.entryRetained(rowKey, anchorKey)).toBe(
+          retention === "evicted" ? false : retention === "unknown" ? undefined : true,
+        );
+        expect(state.timeline.windows.value[0]?.turnId).toBe("turn");
+        state.viewport.capture();
+        await state.viewport.settle();
+        height = 1600;
+        await state.viewport.settle();
+        state.viewport.capture();
+        if (retention !== "evicted") {
+          entryOffset = 400;
+          turn.append(entry);
+          await state.viewport.settle();
+        }
+        expect(position).toBe(retention === "evicted" ? 400 : 700);
+        expect(state.viewport.follow.value).toBe(false);
+        expect([getPage.mock.calls.length, getItems.mock.calls.length]).toEqual(requests);
+      } finally {
+        wrapper.unmount();
+      }
+    },
+  );
+  it("qualifies retained activity keys and unknown payloads without presentation requests", async () => {
+    const source = disjointWindow();
+    source.items.push({
+      ...source.items[1]!,
+      itemId: "thought",
+      item: {
+        id: "thought",
+        type: "reasoning",
+        summary: ["Reason"],
+        content: [],
+        startedAtMs: null,
+        completedAtMs: null,
+        evidence: null,
+      },
+    });
+    const repository = pageRepository(source);
+    const getPage = vi.spyOn(repository, "getHistoryPage");
+    const getItems = vi.spyOn(repository, "getTurnItems");
+    const prepare = vi.spyOn(repository, "prepareHistoryPresentation");
+    const wrapper = await mountSuspended(ProgressiveConversationView, {
+      props: {
+        metadata: catalogSessionMetadataSchema.parse(summary),
+        repository,
+        targetTurnId: null,
+      },
+    });
+    try {
+      await flushPromises();
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- VTU exposes the actual producer's data-owned predicate
+      const state = wrapper.vm as unknown as {
+        timeline: ReturnType<typeof useProgressiveHistoryTimeline>;
+        entryRetained(key: string, entry: string): boolean | undefined;
+      };
+      const rowKey = JSON.stringify([source.physicalRolloutId, source.turnId]);
+      const requests = [
+        getPage.mock.calls.length,
+        getItems.mock.calls.length,
+        prepare.mock.calls.length,
+      ];
+      expect(state.entryRetained(rowKey, "activity:thought")).toBe(true);
+      expect(state.entryRetained(rowKey, "activity:absent")).toBe(false);
+      expect(state.entryRetained(rowKey, "future:unknown-kind")).toBeUndefined();
+      const retained = state.timeline.windows.value[0]!;
+      publishRetainedWindows(state.timeline, [
+        {
+          ...retained,
+          items: retained.items.map((item) =>
+            item.itemId === "thought" ? { ...item, item: null, detail: "unresolved" } : item,
+          ),
+        },
+      ]);
+      expect(state.entryRetained(rowKey, "activity:thought")).toBeUndefined();
+      publishRetainedWindows(state.timeline, [
+        { ...retained, items: retained.items.filter((item) => item.itemId !== "thought") },
+      ]);
+      expect(state.entryRetained(rowKey, "activity:thought")).toBe(false);
+      expect([
+        getPage.mock.calls.length,
+        getItems.mock.calls.length,
+        prepare.mock.calls.length,
+      ]).toEqual(requests);
+    } finally {
+      wrapper.unmount();
+    }
+  });
   it("opens supplied progressive media through the existing lazy viewer", async () => {
     const window = disjointWindow();
     const wrapper = await mountSuspended(ProgressiveConversationView, {
@@ -981,6 +1997,9 @@ describe("progressive and legacy presentation paths", () => {
       }
       if (path.endsWith("turn-1.json")) {
         return chunk;
+      }
+      if (path.endsWith("history-index.json")) {
+        throw Object.assign(new Error("Old archive has no history manifest"), { statusCode: 404 });
       }
       throw new Error(`Unexpected static request ${path}`);
     });

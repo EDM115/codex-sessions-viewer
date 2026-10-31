@@ -154,6 +154,19 @@ export default defineNuxtConfig({
     },
   },
   hooks: {
+    "nitro:config"(config) {
+      if (config.imports === false || config.buildDir === undefined) {
+        return;
+      }
+      config.imports ??= {};
+      const exclude = config.imports.exclude;
+      const generatedServer = `${resolve(config.buildDir, "dist/server").replaceAll("\\", "/")}/**`;
+      // Nuxt has already resolved imports in this output, a second pass can mistake minified bindings for source imports
+      config.imports.exclude = [
+        ...(Array.isArray(exclude) ? exclude : exclude ? [exclude] : []),
+        generatedServer,
+      ];
+    },
     ready(nuxt) {
       const nuxtRequire = createRequire(
         createRequire(import.meta.url).resolve("nuxt/package.json"),

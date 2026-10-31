@@ -117,6 +117,7 @@ function structuralFacet(
     unknown:
       (metadata.threadSource != null &&
         metadata.threadSource !== "user" &&
+        metadata.threadSource !== "subagent" &&
         !internalRoles.has(metadata.threadSource)) ||
       (sourceRecord !== null && subagent === undefined) ||
       (source !== null && typeof source !== "string" && sourceRecord === null),
@@ -200,6 +201,9 @@ function classifyFacets(
   } else if (hasSpawn) {
     visibility = "delegated-child";
     reasons.push(hasExplicitSpawn ? "declared-spawn" : "legacy-flat-parent-delegation");
+  } else if (roles.includes("subagent")) {
+    visibility = "unresolved";
+    reasons.push("missing-spawn-parent");
   } else if (roles.includes("user")) {
     visibility = "user-root";
     reasons.push("explicit-user-thread");

@@ -37,6 +37,7 @@ import {
 } from "#shared/types/repository.ts";
 
 export interface LiveRepositoryMaterializer {
+  observeSelectedHistory?(id: string): () => void;
   getHistoryPage?: ConversationRepository["getHistoryPage"];
   getTurnItems?: ConversationRepository["getTurnItems"];
   readNativeHistory?(
@@ -304,7 +305,17 @@ export class LiveConversationRepository implements ConversationRepository {
     return `/api/favicons/${Buffer.from(origin).toString("base64url")}`;
   }
 
-  subscribe(listener: Parameters<InvalidationBus["subscribe"]>[0]) {
-    return this.#bus.subscribe(listener);
+  subscribe(
+    listener: Parameters<InvalidationBus["subscribe"]>[0],
+    selection?: { threadId: string },
+  ) {
+    const release = selection
+      ? this.#materializer.observeSelectedHistory?.(selection.threadId)
+      : undefined;
+    const unsubscribe = this.#bus.subscribe(listener);
+    return () => {
+      unsubscribe();
+      release?.();
+    };
   }
 }

@@ -39,6 +39,92 @@ async function fixture(records: unknown[], finalNewline = true) {
   return { root, path, store, reader, lineage: fixtureLineage(fixtureRef(path)) };
 }
 describe("bounded raw history pages", () => {
+  it.each(["core-first", "legacy-first"])(
+    "preserves distinct Core/legacy equal prose and final evidence in %s order",
+    async (order) => {
+      const records = canonicalRecords("same prose");
+      const core = records[3]!;
+      const coreItem = core.payload["item"];
+      if (!coreItem || typeof coreItem !== "object") {
+        throw new Error("Expected supplied Core fixture");
+      }
+      Object.assign(coreItem, { phase: "commentary" });
+      const legacy = {
+        type: "response_item",
+        payload: {
+          type: "message",
+          id: "distinct-final",
+          role: "assistant",
+          phase: "final_answer",
+          content: [{ type: "output_text", text: "same prose" }],
+        },
+      };
+      records.splice(3, 1, ...(order === "core-first" ? [core, legacy] : [legacy, core]));
+      const f = await fixture(records);
+      try {
+        const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+        const window = page.turns[0]!;
+        expect(
+          window.items
+            .filter((entry) => entry.item?.type === "agentMessage")
+            .map((entry) => entry.itemId),
+        ).toEqual(
+          order === "core-first" ? ["answer", "distinct-final"] : ["distinct-final", "answer"],
+        );
+        expect(window.finalAnswerItemId).toBe("distinct-final");
+        expect(historyWindowPresentation("stable", window).assistantMessages).toHaveLength(2);
+        expect(
+          historyWindowInspector("stable", window, { type: "message", id: "distinct-final" })
+            ?.phase,
+        ).toBe("final_answer");
+        expect(
+          JSON.stringify(
+            historyWindowInspector("stable", window, { type: "turn", id: window.turnId })
+              ?.rawRecords,
+          ),
+        ).toContain("distinct-final");
+      } finally {
+        await f.store.close();
+      }
+    },
+  );
+  it.each(["incompatible-phase", "separated", "same-id", "idless"])(
+    "requires compatible adjacent Core/legacy mirror proof (%s)",
+    async (kind) => {
+      const records = canonicalRecords();
+      const legacy = {
+        type: "response_item",
+        payload: {
+          type: "message",
+          ...(kind === "idless" ? {} : { id: "answer" }),
+          role: "assistant",
+          phase: kind === "incompatible-phase" ? "commentary" : "final_answer",
+          content: [{ type: "output_text", text: "answer A" }],
+        },
+      };
+      const activity = {
+        type: "response_item",
+        payload: { type: "reasoning", summary: [{ type: "summary_text", text: "intervening" }] },
+      };
+      records.splice(4, 0, ...(kind === "separated" ? [activity, legacy] : [legacy]));
+      const f = await fixture(records);
+      try {
+        const page = await f.reader.read(f.lineage, { anchor: { kind: "latest" } });
+        const window = page.turns[0]!;
+        expect(window.items.filter((entry) => entry.item?.type === "agentMessage")).toHaveLength(
+          kind === "same-id" || kind === "idless" ? 1 : 2,
+        );
+        expect(window.finalAnswerItemId).not.toBeNull();
+        const evidence = JSON.stringify(
+          historyWindowInspector("stable", window, { type: "turn", id: window.turnId })?.rawRecords,
+        );
+        expect(evidence).toContain("item_completed");
+        expect(evidence).toContain("response_item");
+      } finally {
+        await f.store.close();
+      }
+    },
+  );
   it.each(["canonical-first", "echo-first"] as const)(
     "I1 coalesces both final envelope orders without rewriting the selected source pointer: %s",
     async (order) => {

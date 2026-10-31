@@ -289,6 +289,7 @@ onBeforeUnmount(() => {
         :initial-chunk="transcript.chunk"
         :initial-target-turn-id="null"
         :mode="mode"
+        :legacy-evidence="mode === 'static'"
         @open-child="emit('select', $event)"
       />
       <ConversationProgressiveConversationView

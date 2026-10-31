@@ -114,15 +114,28 @@ export function payloadObject(event: CodexEvent): JsonObject | null {
   return isJsonObject(event.payload) ? event.payload : null;
 }
 
-export function parseCodexEvent(record: JsonlRecord): CodexEventParseResult {
-  const notification =
-    isJsonObject(record.value) &&
+export function isNativeReviewNotification(value: unknown): value is JsonObject {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    "method" in value &&
+    "params" in value &&
     ["item/autoApprovalReview/started", "item/autoApprovalReview/completed"].includes(
-      typeof record.value["method"] === "string" ? record.value["method"] : "",
+      typeof value.method === "string" ? value.method : "",
     ) &&
-    isJsonObject(record.value["params"] ?? null)
-      ? record.value
-      : null;
+    value.params !== null &&
+    typeof value.params === "object" &&
+    !Array.isArray(value.params)
+  );
+}
+
+export function isCodexEventEnvelope(value: unknown): boolean {
+  return isNativeReviewNotification(value) || eventEnvelopeSchema.safeParse(value).success;
+}
+
+export function parseCodexEvent(record: JsonlRecord): CodexEventParseResult {
+  const notification = isNativeReviewNotification(record.value) ? record.value : null;
   const parsed = eventEnvelopeSchema.safeParse(
     notification ? { type: "native_notification", payload: notification["params"] } : record.value,
   );

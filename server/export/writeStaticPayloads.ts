@@ -349,6 +349,7 @@ async function reconcileSessionChunks(
   root: string,
   sessionId: string,
   chunkCount: number,
+  historyFiles: ReadonlySet<string>,
 ): Promise<void> {
   const directory = join(root, "payloads", "sessions", sessionId);
   const expected = new Set(
@@ -357,9 +358,15 @@ async function reconcileSessionChunks(
       `inspector-${index}.json`,
     ]).flat(),
   );
+  for (const name of historyFiles) {
+    expected.add(name);
+  }
   const entries = await readdir(directory);
   for (const entry of entries.toSorted()) {
-    if (!/^(?:inspector|turn)-\d+\.json$/u.test(entry) || expected.has(entry)) {
+    if (
+      !/^(?:(?:inspector|turn)-\d+|history-index|history-\d+-\d+)\.json$/u.test(entry) ||
+      expected.has(entry)
+    ) {
       continue;
     }
     // oxlint-disable-next-line no-await-in-loop -- Only proven obsolete viewer-owned chunks are removed after replacement writes succeed.
@@ -523,6 +530,24 @@ export async function writeStaticPayloads(
         sessions: ordered.map(({ summary }) =>
           options.catalog ? catalogSessionMetadataSchema.parse(summary) : summary,
         ),
+        ...(options.catalog
+          ? {
+              filterFacets: Object.fromEntries(
+                ordered.map(({ summary }) => [
+                  summary.id,
+                  {
+                    authority: "saved-export-observation",
+                    revision: summary.revision,
+                    models: summary.models,
+                    tools: Object.entries(summary.toolCounts)
+                      .filter(([, count]) => count > 0)
+                      .map(([tool]) => tool),
+                    hasMedia: summary.hasMedia,
+                  },
+                ]),
+              ),
+            }
+          : {}),
       })),
     );
     dispositions.push(
@@ -560,12 +585,14 @@ export async function writeStaticPayloads(
     const id = conversation.summary.id;
     assertSafeOutputComponent(id);
     const history = options.histories?.get(id);
+    const historyFiles = new Set<string>();
     if (history) {
       // oxlint-disable-next-line no-await-in-loop -- The selected saved history is published with its summary and legacy compatibility chunks
       await writeStaticHistory(
         history,
         async (name, value) => {
           dispositions.push(...(await writePayload(options, ["sessions", id, name], value)));
+          historyFiles.add(name);
         },
         options.historySources?.get(id),
         options.historyMedia,
@@ -637,10 +664,10 @@ export async function writeStaticPayloads(
       turnChunkCount += 1;
     }
     // oxlint-disable-next-line no-await-in-loop -- Stale chunks are removed only after this session's complete generated payload has succeeded.
-    await reconcileSessionChunks(options.generatedRoot, id, turnChunks.length);
+    await reconcileSessionChunks(options.generatedRoot, id, turnChunks.length, historyFiles);
     if (options.publicRoot !== undefined) {
       // oxlint-disable-next-line no-await-in-loop -- The public mirror is reconciled independently after all of its replacement writes succeed.
-      await reconcileSessionChunks(options.publicRoot, id, turnChunks.length);
+      await reconcileSessionChunks(options.publicRoot, id, turnChunks.length, historyFiles);
     }
   }
   return {

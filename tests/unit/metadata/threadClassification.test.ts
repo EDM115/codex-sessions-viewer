@@ -34,6 +34,32 @@ async function rawSession(payload: JsonObject) {
 }
 
 describe("structural visibility policy", () => {
+  it("recognizes native subagent declarations without inventing a parent or root", () => {
+    const source = { subAgent: { thread_spawn: { parent_thread_id: "parent" } } };
+    expect(classifyCatalogThread({ threadSource: "subagent", source })).toMatchObject({
+      visibility: "delegated-child",
+      parentThreadId: "parent",
+    });
+    expect(
+      classifyCatalogThread({ threadSource: "subagent" }, { spawnParentThreadId: "orphan" }),
+    ).toMatchObject({ visibility: "delegated-child", parentThreadId: "orphan" });
+    expect(classifyCatalogThread({ threadSource: "subagent" }).visibility).toBe("unresolved");
+    expect(
+      classifyCatalogThread({
+        threadSource: "subagent",
+        source: { subAgent: { thread_spawn: {} } },
+      }).visibility,
+    ).toBe("unresolved");
+    expect(
+      classifyCatalogThread({
+        threadSource: "subagent",
+        source: { subAgent: { other: "guardian" } },
+      }).visibility,
+    ).toBe("internal");
+    expect(classifyCatalogThread({ threadSource: "custom-role", source }).visibility).toBe(
+      "unresolved",
+    );
+  });
   it.each([
     {
       subAgent: {

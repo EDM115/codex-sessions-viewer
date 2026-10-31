@@ -269,11 +269,14 @@ export class LiveApiConversationRepository implements ConversationRepository {
     );
   }
 
-  subscribe(listener: (event: ViewerInvalidation) => void): () => void {
+  subscribe(
+    listener: (event: ViewerInvalidation) => void,
+    selection?: { threadId: string },
+  ): () => void {
     if (typeof EventSource === "undefined") {
       return () => undefined;
     }
-    const source = new EventSource("/api/events");
+    const source = new EventSource(`/api/events${selection ? queryString(selection) : ""}`);
     const handlers: Array<[ViewerInvalidation["type"], EventListener]> = [];
     for (const type of [
       "favicon.updated",

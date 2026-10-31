@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import { CACHE_PARSER_VERSION } from "#server/cache/sourceManifest.ts";
 import { writeStaticPayloads } from "#server/export/writeStaticPayloads.ts";
@@ -18,6 +18,81 @@ import {
   fixtureLineage,
   fixtureRef,
 } from "../../fixtures/history/nativeHistory.ts";
+
+it("caches genuine HTTP 404 absence from the default browser requester", async () => {
+  const requester = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(new Response("not found", { status: 404 }));
+  try {
+    const repository = new StaticConversationRepository();
+    await expect(repository.supportsHistory("stable")).resolves.toBe(false);
+    await expect(repository.supportsHistory("stable")).resolves.toBe(false);
+    expect(requester).toHaveBeenCalledTimes(1);
+  } finally {
+    requester.mockRestore();
+  }
+});
+it.each(["500", "invalid-json", "null", "malformed", "wrong-owner", "abort"])(
+  "distinguishes genuine absence from recoverable failures through the default browser requester (%s)",
+  async (kind) => {
+    const manifest = {
+      version: 1,
+      threadId: "stable",
+      metadataRevision: null,
+      historyEpoch: "epoch",
+      contentRevision: "revision",
+      preparation: "ready",
+      coverage: { status: "complete", segments: [], gaps: [] },
+      turns: [],
+    };
+    const requester = vi.spyOn(globalThis, "fetch");
+    requester.mockImplementationOnce(async () => {
+      if (kind === "abort") {
+        throw new DOMException("aborted", "AbortError");
+      }
+      if (kind === "500") {
+        return new Response("unavailable", { status: Number(kind) });
+      }
+      return new Response(
+        kind === "invalid-json"
+          ? "{truncated"
+          : kind === "null"
+            ? "null"
+            : kind === "malformed"
+              ? "{}"
+              : JSON.stringify({ ...manifest, threadId: "foreign" }),
+        { status: 200 },
+      );
+    });
+    requester.mockImplementation(async () => Response.json(manifest));
+    try {
+      const repository = new StaticConversationRepository();
+      await expect(repository.supportsHistory("stable")).rejects.toBeInstanceOf(Error);
+      await expect(repository.supportsHistory("stable")).resolves.toBe(true);
+      expect(requester).toHaveBeenCalledTimes(2);
+    } finally {
+      requester.mockRestore();
+    }
+  },
+);
+
+it.each([
+  Object.assign(new Error("server"), { statusCode: 500 }),
+  new SyntaxError("truncated JSON"),
+  new DOMException("cancelled", "AbortError"),
+])("propagates history manifest failures and retries after %s", async (failure) => {
+  let calls = 0;
+  const repository = new StaticConversationRepository(async () => {
+    calls += 1;
+    if (calls === 1) {
+      throw failure;
+    }
+    throw Object.assign(new Error("not found"), { statusCode: 404 });
+  });
+  await expect(repository.supportsHistory("stable")).rejects.toBe(failure);
+  await expect(repository.supportsHistory("stable")).resolves.toBe(false);
+  expect(calls).toBe(2);
+});
 
 it("serves saved source-qualified history and rich text through the actual static repository without manufacturing old archive history", async () => {
   const root = await mkdtemp(join(tmpdir(), "static-history-"));
@@ -72,7 +147,7 @@ it("serves saved source-qualified history and rich text through the actual stati
     ).rejects.toThrow();
     expect(requested.some((request) => request.includes("history"))).toBe(true);
     const legacy = new StaticConversationRepository(async () => {
-      throw new Error("Not available in this v1 archive");
+      throw Object.assign(new Error("Not available in this v1 archive"), { statusCode: 404 });
     });
     await expect(
       legacy.getHistoryPage("old", { anchor: { kind: "latest" } }),
@@ -161,6 +236,35 @@ it("pages giant saved turns with exact requested item limits and rejects foreign
       }),
     ).rejects.toThrow("owner_mismatch");
     expect(latest.coverage.status).toBe("partial");
+    const directory = join(root, "payloads/sessions/stable");
+    expect((await readdir(directory)).filter((name) => name.startsWith("history-"))).toHaveLength(
+      4,
+    );
+    await writeStaticPayloads([conversation], {
+      generatedRoot: root,
+      histories: new Map([
+        [
+          "stable",
+          {
+            ...history,
+            turns: [{ ...history.turns[0]!, items: history.turns[0]!.items.slice(0, 2) }],
+          },
+        ],
+      ]),
+    });
+    expect((await readdir(directory)).filter((name) => name.startsWith("history-"))).toEqual([
+      "history-0-0.json",
+      "history-index.json",
+    ]);
+    await writeStaticPayloads([conversation], { generatedRoot: root });
+    expect((await readdir(directory)).filter((name) => name.startsWith("history-"))).toEqual([]);
+    const unavailable = new StaticConversationRepository(
+      async (request) => JSON.parse(await readFile(join(root, request), "utf8")) as unknown,
+    );
+    expect(await unavailable.supportsHistory("stable")).toBe(false);
+    await expect(
+      unavailable.getHistoryPage("stable", { anchor: { kind: "latest" } }),
+    ).rejects.toMatchObject({ code: "history.unsupported" });
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });

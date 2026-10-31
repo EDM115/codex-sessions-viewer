@@ -8,6 +8,106 @@ import { expect, it } from "vitest";
 import { runStaticExport } from "#server/export/exportPipeline.ts";
 import { StaticConversationRepository } from "~/repositories/static.ts";
 
+it("reconciles an unavailable new history without republishing the old generation and preserves output on failed publication", async () => {
+  const root = await mkdtemp(join(tmpdir(), "viewer-export-repeated-history-"));
+  const codexHome = join(root, "home");
+  const id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const source = join(codexHome, `sessions/rollout-${id}.jsonl`);
+  const outputRoot = join(root, "output");
+  const paths = {
+    cacheDir: join(root, "cache"),
+    cacheDatabase: join(root, "cache/viewer.sqlite"),
+    configDir: join(root, "config"),
+    configFile: join(root, "config/config.json"),
+    generatedDir: join(root, "generated"),
+  };
+  const generate = async ({ outputRoot: destination }: { outputRoot: string }) => {
+    await mkdir(destination, { recursive: true });
+    await writeFile(join(destination, "index.html"), "<!doctype html><title>Fixture shell</title>");
+  };
+  const options = {
+    codexHome,
+    paths,
+    outputRoot,
+    generatedRoot: paths.generatedDir,
+    offline: true,
+    index: false,
+    generate,
+  };
+  const repository = () =>
+    new StaticConversationRepository(
+      async (path) => JSON.parse(await readFile(join(outputRoot, path), "utf8")) as unknown,
+    );
+  const records = (answer: string) =>
+    [
+      { type: "session_meta", payload: { id, source: "cli", thread_source: "user" } },
+      { type: "event_msg", payload: { type: "task_started", turn_id: "turn" } },
+      { type: "event_msg", payload: { type: "user_message", message: "Known prompt" } },
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          phase: "final_answer",
+          content: [{ type: "output_text", text: answer }],
+        },
+      },
+      {
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: "turn", last_agent_message: answer },
+      },
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n") + "\n";
+  try {
+    await mkdir(join(codexHome, "sessions"), { recursive: true });
+    await writeFile(source, records("ANSWER_A"));
+    await runStaticExport(options);
+    const initial = await repository().getHistoryPage(id, { anchor: { kind: "latest" } });
+    expect(initial.coverage.status).toBe("complete");
+    expect(JSON.stringify(initial)).toContain("ANSWER_A");
+    const publishedManifest = await readFile(
+      join(outputRoot, `payloads/sessions/${id}/history-index.json`),
+      "utf8",
+    );
+    await writeFile(source, records("ANSWER_B") + "{broken}\n");
+    await expect(
+      runStaticExport({
+        ...options,
+        generate: async () => {
+          throw new Error("fixture.publication_failed");
+        },
+      }),
+    ).rejects.toThrow("fixture.publication_failed");
+    expect(
+      await readFile(join(outputRoot, `payloads/sessions/${id}/history-index.json`), "utf8"),
+    ).toBe(publishedManifest);
+    expect(JSON.stringify(await repository().getTurns(id, { limit: 20 }))).toContain("ANSWER_A");
+    const exported = await runStaticExport(options);
+    expect(exported.sessionCount).toBe(1);
+    expect(exported.diagnosticCounts["source.invalid_jsonl"]).toBeGreaterThan(0);
+    const current = repository();
+    expect(await current.supportsHistory(id)).toBe(false);
+    await expect(current.getHistoryPage(id, { anchor: { kind: "latest" } })).rejects.toMatchObject({
+      code: "history.unsupported",
+    });
+    const retained = JSON.stringify(await current.getTurns(id, { limit: 20 }));
+    expect(retained).toContain("ANSWER_B");
+    expect(retained).not.toContain("ANSWER_A");
+    expect((await current.getSession(id)).diagnosticCount).toBeGreaterThan(0);
+    expect((await current.listSessions({ scope: "active", model: "absent-model" })).total).toBe(0);
+    expect((await current.listSessions({ scope: "active", tool: "absent-tool" })).total).toBe(0);
+    expect((await current.listSessions({ scope: "active", hasMedia: true })).total).toBe(0);
+    expect(
+      (await current.listSessions({ scope: "active", hasMedia: false })).items.map(
+        ({ id: threadId }) => threadId,
+      ),
+    ).toEqual([id]);
+  } finally {
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 it.each(["unsupported", "malformed", "unfinished", "oversized-inline-image"])(
   "qualifies retained export records with %s source coverage",
   async (condition) => {

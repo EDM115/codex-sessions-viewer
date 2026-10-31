@@ -16,6 +16,7 @@ import { normalizeSession } from "#server/normalization/normalizeSession.ts";
 import {
   historyWindowInspector,
   historyWindowPresentation,
+  historyWindowMessageIdentity,
 } from "#shared/timeline/historyPresentation.ts";
 import type { HistoryTurnWindow } from "#shared/types/history.ts";
 
@@ -28,6 +29,120 @@ function deferred<T>() {
   return { promise, resolve };
 }
 describe("immutable history formatting", () => {
+  it.each(["qualified", "unresolved", "gap", "activity", "role", "phase", "source"] as const)(
+    "retains the existing message alias proof in the identity-only projection: %s",
+    (qualification) => {
+      const item = {
+        id: "canonical",
+        type: "agentMessage" as const,
+        text: "Same answer",
+        phase: "final_answer",
+        memoryCitation: null,
+        delivery: null,
+        questions: null,
+        startedAtMs: null,
+        completedAtMs: null,
+        evidence: {
+          source: {
+            type: "response_item",
+            payload: { type: "message", id: "canonical", role: "assistant", phase: "final_answer" },
+          },
+        },
+      };
+      const echo = {
+        ...item,
+        id: "echo",
+        evidence: {
+          source: {
+            type: "event_msg",
+            payload: {
+              type: "agent_message",
+              phase: "final_answer",
+              ...(qualification === "source" ? { id: "unrelated" } : {}),
+            },
+          },
+        },
+        phase: qualification === "phase" ? "commentary" : "final_answer",
+      };
+      const entries: HistoryTurnWindow["items"] = [item, echo].map((value, ordinal) => ({
+        physicalRolloutId: "physical",
+        itemId: value.id,
+        item: value,
+        ordinal,
+        updatedAtOrdinal: ordinal,
+        detail: qualification === "unresolved" ? "unresolved" : "full",
+      }));
+      if (qualification === "activity") {
+        entries.splice(1, 0, {
+          ...entries[0]!,
+          itemId: "separator",
+          item: {
+            id: "separator",
+            type: "contextCompaction",
+            startedAtMs: null,
+            completedAtMs: null,
+            evidence: null,
+          },
+        });
+      }
+      if (qualification === "role") {
+        entries[1] = {
+          ...entries[1]!,
+          item: {
+            id: "echo",
+            type: "userMessage",
+            text: item.text,
+            content: [],
+            clientId: null,
+            startedAtMs: null,
+            completedAtMs: null,
+            evidence: null,
+          },
+        };
+      }
+      const window: HistoryTurnWindow = {
+        turnId: "turn",
+        physicalRolloutId: "physical",
+        historyEpoch: "epoch",
+        contentRevision: "revision",
+        order: 0,
+        status: "completed",
+        startedAt: null,
+        completedAt: null,
+        durationMs: null,
+        opening: { itemId: "unknown-opening", item: null, availability: "notLoaded" },
+        items: entries,
+        itemsView: "full",
+        beforeCursor: null,
+        afterCursor: null,
+        loadedRanges: [],
+        itemIslands:
+          qualification === "gap"
+            ? [["canonical"], ["echo"]]
+            : [entries.map((entry) => entry.itemId)],
+        coverage: { status: "complete", segments: [], gaps: [] },
+        finalAnswerItemId: "echo",
+      };
+      const identity = historyWindowMessageIdentity(window);
+      expect(identity.messageAliases).toEqual(
+        qualification === "qualified"
+          ? { echo: ["canonical", "echo"] }
+          : { canonical: ["canonical"], echo: ["echo"] },
+      );
+      expect(identity.unknownIds).toEqual(["unknown-opening"]);
+      expect(identity.duplicateMessageIds).toEqual(
+        new Set(qualification === "qualified" ? ["canonical"] : []),
+      );
+      expect(historyWindowPresentation("thread", window, [], identity).messageAliases).toEqual(
+        identity.messageAliases,
+      );
+      expect(Object.keys(identity).toSorted()).toEqual([
+        "duplicateMessageIds",
+        "messageAliases",
+        "unknownIds",
+      ]);
+    },
+  );
   it("projects no asset authority until generated media has a matching prepared presentation", () => {
     const item = {
       id: "generated",

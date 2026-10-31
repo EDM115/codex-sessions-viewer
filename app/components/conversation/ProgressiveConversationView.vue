@@ -3,13 +3,16 @@ import {
   historyGapBeforeItemIds,
   historyWindowPresentation,
   historyWindowInspector,
+  historyWindowMessageIdentity,
 } from "#shared/timeline/historyPresentation.ts";
+import type { ConversationActivity } from "#shared/types/conversation.ts";
 import type { HistoryNavigatorPage, HistoryTurnWindow } from "#shared/types/history.ts";
 import type { CatalogSessionMetadata } from "#shared/types/library.ts";
 import type {
   ConversationRepository,
   InspectorRecord,
   InspectorTarget,
+  HistoryPageQuery,
 } from "#shared/types/repository.ts";
 import type { ScrollAnchorSnapshot } from "~/composables/useScrollAnchoring.ts";
 
@@ -36,6 +39,12 @@ const timeline = useProgressiveHistoryTimeline({
   },
 });
 const { settings } = usePresentationSettings();
+const historyStatuses = computed(() =>
+  [
+    timeline.stale.value ? "Showing previously loaded history while the source is checked." : null,
+    timeline.loading.value ? "Loading history…" : null,
+  ].filter((status) => status !== null),
+);
 const viewport = useMeasuredConversationViewport({
   keys: () =>
     timeline.windows.value.map((window) =>
@@ -45,6 +54,7 @@ const viewport = useMeasuredConversationViewport({
   canvas,
   storageKey: props.metadata.id,
   followEnabled: () => settings.liveFollow,
+  canFollow: () => timeline.page.value !== null && !timeline.canLoadAfter.value,
   sourceIdentity: (key) => {
     const window = timeline.windows.value.find(
       (entry) => JSON.stringify([entry.physicalRolloutId, entry.turnId]) === key,
@@ -53,6 +63,7 @@ const viewport = useMeasuredConversationViewport({
       ? JSON.stringify([selectionId, window.physicalRolloutId, window.turnId, window.historyEpoch])
       : null;
   },
+  entryRetained,
 });
 timeline.setVisible([]);
 watch(
@@ -61,6 +72,11 @@ watch(
 );
 function readInput(event: Event) {
   if (viewport.readInput(event)) {
+    timeline.cancelTarget();
+  }
+}
+function readScroll() {
+  if (viewport.scroll()) {
     timeline.cancelTarget();
   }
 }
@@ -113,30 +129,197 @@ const approvals = useApprovalEvidence(
   approvalOwner,
 );
 const messageKeysByIdentity = new Map<string, string>();
+type MessageKeyOwner = { key: string; identityId: string; members: string[]; known: boolean };
+const messageOwners = new Map<
+  string,
+  { token: symbol; groups: MessageKeyOwner[]; keys: Record<string, string> }
+>();
+const windowTokens = new WeakMap<HistoryTurnWindow, symbol>();
+const messageIdentities = new WeakMap<
+  HistoryTurnWindow,
+  ReturnType<typeof historyWindowMessageIdentity>
+>();
+function windowToken(window: HistoryTurnWindow) {
+  let token = windowTokens.get(window);
+  if (!token) {
+    token = Symbol();
+    windowTokens.set(window, token);
+  }
+  return token;
+}
+const windowOwner = (window: HistoryTurnWindow) =>
+  JSON.stringify([window.physicalRolloutId, window.turnId, window.historyEpoch]);
+const retainedIds = (window: HistoryTurnWindow) =>
+  new Set([
+    ...window.items.map((item) => item.itemId),
+    ...(window.opening.itemId === null ? [] : [window.opening.itemId]),
+  ]);
+function retainedMessageIdentity(window: HistoryTurnWindow) {
+  let identity = messageIdentities.get(window);
+  if (!identity) {
+    identity = historyWindowMessageIdentity(window);
+    messageIdentities.set(window, identity);
+  }
+  return identity;
+}
+function messageOwnership(window: HistoryTurnWindow) {
+  const owner = windowOwner(window);
+  const token = windowToken(window);
+  const previous = messageOwners.get(owner);
+  if (previous?.token === token) {
+    return previous;
+  }
+  const identity = retainedMessageIdentity(window);
+  const classes = Object.entries(identity.messageAliases).map(([id, members]) => ({
+    id,
+    members,
+    known: true,
+  }));
+  const knownIds = new Set(classes.flatMap((group) => group.members));
+  for (const id of identity.unknownIds) {
+    if (!knownIds.has(id)) {
+      classes.push({ id, members: [id], known: false });
+    }
+  }
+  const claims = new Map<string, MessageKeyOwner[]>();
+  const retained = retainedIds(window);
+  for (const prior of previous?.groups ?? []) {
+    const designated = classes.find((group) => group.members.includes(prior.identityId));
+    const successors = designated
+      ? [designated]
+      : retained.has(prior.identityId)
+        ? []
+        : classes.filter((group) => group.members.some((id) => prior.members.includes(id)));
+    if (successors.length === 1) {
+      const id = successors[0]!.id;
+      claims.set(id, [...(claims.get(id) ?? []), prior]);
+    }
+  }
+  const inherited = classes.map((group) => {
+    const candidates = claims.get(group.id) ?? [];
+    return [group.id, ...group.members]
+      .map((id) => messageKeysByIdentity.get(`${owner}:${id}`))
+      .find((key) => key !== undefined && candidates.some((candidate) => candidate.key === key));
+  });
+  const used = new Set((previous?.groups ?? []).map((group) => group.key));
+  const groups = classes.map((group, index): MessageKeyOwner => {
+    let key = inherited[index];
+    if (key === undefined) {
+      const base = `${owner}:${group.id}`;
+      key = base;
+      let suffix = 1;
+      while (used.has(key)) {
+        key = `${base}:split:${suffix++}`;
+      }
+      used.add(key);
+    }
+    return { key, identityId: group.id, members: group.members, known: group.known };
+  });
+  for (const group of previous?.groups ?? []) {
+    for (const id of group.members) {
+      messageKeysByIdentity.delete(`${owner}:${id}`);
+    }
+  }
+  for (const group of groups) {
+    for (const id of group.members) {
+      messageKeysByIdentity.set(`${owner}:${id}`, group.key);
+    }
+  }
+  const current = {
+    token,
+    groups,
+    keys: Object.fromEntries(
+      groups.filter((group) => group.known).map((group) => [group.identityId, group.key]),
+    ),
+  };
+  messageOwners.set(owner, current);
+  return current;
+}
+let publishedEntries: Array<{
+  window: HistoryTurnWindow;
+  turn: { activities: readonly ConversationActivity[] };
+}> = [];
+let activityEvidence: {
+  owner: string;
+  key: string;
+  token: symbol;
+  sourceItemIds: string[];
+  present: boolean | undefined;
+} | null = null;
+function entryRetained(key: string, entry: string): boolean | undefined {
+  const window = timeline.windows.value.find(
+    (candidate) => JSON.stringify([candidate.physicalRolloutId, candidate.turnId]) === key,
+  );
+  if (!window) {
+    activityEvidence = null;
+    return false;
+  }
+  const owner = windowOwner(window);
+  if (activityEvidence?.owner !== owner || activityEvidence.key !== entry) {
+    activityEvidence = null;
+  }
+  if (!entry.startsWith("message:") && !entry.startsWith("activity:")) {
+    return undefined;
+  }
+  if (entry.startsWith("message:")) {
+    const current = messageOwnership(window);
+    const group = current.groups.find((candidate) => `message:${candidate.key}` === entry);
+    return group
+      ? group.known
+        ? true
+        : undefined
+      : current.groups.some((candidate) => !candidate.known)
+        ? undefined
+        : false;
+  }
+  const token = windowToken(window);
+  const ids = retainedIds(window);
+  if (activityEvidence?.sourceItemIds.some((id) => !ids.has(id))) {
+    activityEvidence = null;
+    return false;
+  }
+  const published = publishedEntries.find((candidate) => candidate.window === window);
+  if (published) {
+    const activity = published.turn.activities.find(
+      (candidate) => `activity:${candidate.id}` === entry,
+    );
+    if (
+      !activity &&
+      (window.items.some((item) => item.item === null) ||
+        (window.opening.itemId !== null && window.opening.item === null))
+    ) {
+      return undefined;
+    }
+    activityEvidence = {
+      owner,
+      key: entry,
+      token,
+      sourceItemIds: activity
+        ? [activity.id, ...activity.rawEventIds].filter((id) => ids.has(id))
+        : [],
+      present: activity !== undefined,
+    };
+    return activityEvidence.present;
+  }
+  const rawId = entry.slice("activity:".length);
+  if (!activityEvidence && ids.has(rawId)) {
+    activityEvidence = { owner, key: entry, token, sourceItemIds: [rawId], present: undefined };
+  }
+  return activityEvidence?.token === token ? activityEvidence.present : undefined;
+}
 const presented = computed(() => {
-  const activeIdentities = new Set<string>();
   const entries = viewport.rows.value.flatMap((row) => {
     const window = timeline.windows.value[row.index];
     if (!window) {
       return [];
     }
-    const turn = historyWindowPresentation(props.metadata.id, window, timeline.presentations.value);
-    const owner = JSON.stringify([window.physicalRolloutId, window.turnId, window.historyEpoch]);
-    const messageKeys = Object.fromEntries(
-      Object.entries(turn.messageAliases).map(([id, aliases]) => {
-        const key =
-          messageKeysByIdentity.get(`${owner}:${id}`) ??
-          aliases
-            .map((alias) => messageKeysByIdentity.get(`${owner}:${alias}`))
-            .find((value) => value !== undefined) ??
-          `${owner}:${id}`;
-        for (const alias of aliases) {
-          activeIdentities.add(`${owner}:${alias}`);
-          messageKeysByIdentity.set(`${owner}:${alias}`, key);
-        }
-        return [id, key];
-      }),
+    const turn = historyWindowPresentation(
+      props.metadata.id,
+      window,
+      timeline.presentations.value,
+      retainedMessageIdentity(window),
     );
+    const messageKeys = messageOwnership(window).keys;
     return {
       window,
       row,
@@ -149,12 +332,40 @@ const presented = computed(() => {
       unsupportedDetails: window.items.some((item) => item.detail === "unsupported"),
     };
   });
-  for (const key of messageKeysByIdentity.keys()) {
-    if (!activeIdentities.has(key)) {
-      messageKeysByIdentity.delete(key);
+  publishedEntries = entries;
+  const retained = new Map(
+    timeline.windows.value.map((window) => [windowOwner(window), retainedIds(window)]),
+  );
+  for (const [owner, state] of messageOwners) {
+    const ids = retained.get(owner);
+    for (const group of state.groups) {
+      for (const id of group.members) {
+        if (!ids?.has(id)) {
+          messageKeysByIdentity.delete(`${owner}:${id}`);
+        }
+      }
+      group.members = group.members.filter((id) => ids?.has(id));
+    }
+    state.groups = state.groups.filter((group) => group.members.length > 0);
+    state.keys = Object.fromEntries(
+      state.groups
+        .filter((group) => group.known && ids?.has(group.identityId))
+        .map((group) => [group.identityId, group.key]),
+    );
+    if (!ids || state.groups.length === 0) {
+      messageOwners.delete(owner);
     }
   }
+  if (activityEvidence && !retained.has(activityEvidence.owner)) {
+    activityEvidence = null;
+  }
   return entries;
+});
+onBeforeUnmount(() => {
+  publishedEntries = [];
+  activityEvidence = null;
+  messageOwners.clear();
+  messageKeysByIdentity.clear();
 });
 const inspection = shallowRef<InspectorRecord | null>(null);
 let inspectionOpener: HTMLElement | null = null;
@@ -169,6 +380,7 @@ function closeInspection() {
     if (!inspectionDisposed && action === inspectionAction && opener?.isConnected) {
       opener.focus();
     }
+    return undefined;
   });
 }
 function inspect(window: HistoryTurnWindow, target: InspectorTarget) {
@@ -225,7 +437,10 @@ watch(
   { flush: "sync" },
 );
 const navigator = shallowRef<HistoryNavigatorPage | null>(null);
-const navigatorController = new AbortController();
+const navigatorError = ref<string | null>(null);
+let navigatorController = new AbortController();
+let navigatorDisposed = false;
+let navigatorQuery: HistoryPageQuery = { anchor: { kind: "latest" }, limit: 5 };
 async function revealTarget(turnId: string, restored?: ScrollAnchorSnapshot) {
   const owner = viewport.beginNavigation();
   try {
@@ -253,18 +468,63 @@ async function revealTarget(turnId: string, restored?: ScrollAnchorSnapshot) {
     viewport.finishNavigation(owner);
   }
 }
-async function loadNavigator(cursor?: string) {
+async function loadNavigator(cursor?: string, refresh = false) {
+  navigatorController.abort();
+  const controller = new AbortController();
+  navigatorController = controller;
+  if (!refresh) {
+    navigatorQuery = { anchor: cursor ? { kind: "before", cursor } : { kind: "latest" }, limit: 5 };
+  }
+  const previous = navigator.value;
+  const query = navigatorQuery;
+  navigatorError.value = null;
   try {
-    const result = await props.repository.getHistoryNavigator(
-      props.metadata.id,
-      { anchor: cursor ? { kind: "before", cursor } : { kind: "latest" }, limit: 5 },
-      { signal: navigatorController.signal },
-    );
-    if (!navigatorController.signal.aborted) {
-      navigator.value = result;
+    const read = (request: HistoryPageQuery) =>
+      props.repository.getHistoryNavigator(selectionId, request, { signal: controller.signal });
+    let result = await read(refresh ? { anchor: { kind: "latest" }, limit: 5 } : query);
+    if (controller.signal.aborted || navigatorDisposed || props.metadata.id !== selectionId) {
+      return;
     }
-  } catch {
-    /* History remains usable while navigator coverage is unavailable */
+    if (result.threadId !== selectionId) {
+      throw new Error("Navigation belongs to a different conversation");
+    }
+    if (
+      refresh &&
+      query.anchor.kind !== "latest" &&
+      previous?.historyEpoch === result.historyEpoch
+    ) {
+      const paged = await read(query);
+      if (controller.signal.aborted || navigatorDisposed || props.metadata.id !== selectionId) {
+        return;
+      }
+      if (
+        paged.threadId !== selectionId ||
+        paged.historyEpoch !== result.historyEpoch ||
+        paged.contentRevision !== result.contentRevision
+      ) {
+        throw new Error("Navigation changed while refreshing, retry to reload it");
+      }
+      const seen = new Set(paged.turns.map((turn) => `${turn.physicalRolloutId}:${turn.turnId}`));
+      result = {
+        ...paged,
+        turns: [
+          ...paged.turns,
+          ...result.turns.filter((turn) => !seen.has(`${turn.physicalRolloutId}:${turn.turnId}`)),
+        ],
+      };
+    } else if (refresh && previous?.historyEpoch !== result.historyEpoch) {
+      navigatorQuery = { anchor: { kind: "latest" }, limit: 5 };
+    }
+    if (!controller.signal.aborted && !navigatorDisposed && props.metadata.id === selectionId) {
+      viewport.capture();
+      navigator.value = result;
+      void viewport.settle();
+    }
+  } catch (error) {
+    if (!controller.signal.aborted && !navigatorDisposed) {
+      navigatorError.value =
+        error instanceof Error ? error.message : "Turn navigation is unavailable";
+    }
   }
 }
 let unsubscribe = () => {};
@@ -279,12 +539,20 @@ onMounted(() => {
     void latest();
   }
   void loadNavigator();
-  unsubscribe = props.repository.subscribe((event) => {
-    if (event.type === "session.updated" && event.ids.includes(props.metadata.id)) {
-      viewport.latestAvailable.value = !viewport.follow.value || !settings.liveFollow;
-      void timeline.refresh();
-    }
-  });
+  unsubscribe = props.repository.subscribe(
+    (event) => {
+      if (event.type === "session.updated" && event.ids.includes(props.metadata.id)) {
+        viewport.latestAvailable.value = !viewport.follow.value || !settings.liveFollow;
+        void timeline.refresh().then(() => {
+          if (!navigatorDisposed) {
+            return loadNavigator(undefined, true);
+          }
+          return undefined;
+        });
+      }
+    },
+    { threadId: selectionId },
+  );
 });
 watch(
   () => props.targetTurnId,
@@ -301,6 +569,7 @@ onBeforeUnmount(() => {
   unsubscribe();
   timeline.dispose();
   navigatorController.abort();
+  navigatorDisposed = true;
 });
 </script>
 
@@ -308,14 +577,10 @@ onBeforeUnmount(() => {
   <section ref="historyWorkbench" class="progressive-workbench">
     <header class="conversation-heading">
       <h1 class="theme-display">{{ metadata.title }}</h1>
-      <p v-if="timeline.stale.value" role="status">
-        Showing previously loaded history while the source is checked.
-      </p>
       <p v-if="timeline.error.value" role="status">
         {{ timeline.error.value }}
         <button type="button" @click="timeline.refresh()">Retry history</button>
       </p>
-      <p v-if="timeline.loading.value" role="status">Loading history…</p>
       <slot name="actions" :summary="metadata" />
       <ConversationApprovals
         v-if="repository.getApprovalEvidence"
@@ -326,26 +591,41 @@ onBeforeUnmount(() => {
         @load="approvals.load"
       />
     </header>
-    <nav v-if="navigator" aria-label="Loaded turn navigation">
-      <span>{{
-        navigator.coverage.status === "complete" ? "Turn navigation" : "Partial turn navigation"
-      }}</span>
+    <p v-if="navigatorError" role="status">
+      {{ navigatorError }}
       <button
-        v-for="turn in navigator.turns"
-        :key="`${turn.physicalRolloutId}:${turn.turnId}`"
         type="button"
-        @click="revealTarget(turn.turnId)"
+        @click="
+          loadNavigator(
+            navigatorQuery.anchor.kind === 'before' ? navigatorQuery.anchor.cursor : undefined,
+          )
+        "
       >
-        {{ turn.promptPreview ?? "Opening not loaded" }}
+        Retry navigation
       </button>
-      <button
-        v-if="navigator.beforeCursor"
-        type="button"
-        @click="loadNavigator(navigator.beforeCursor)"
-      >
-        Older navigation
-      </button>
-    </nav>
+    </p>
+    <div class="history-navigation">
+      <nav v-if="navigator" aria-label="Loaded turn navigation">
+        <span>{{
+          navigator.coverage.status === "complete" ? "Turn navigation" : "Partial turn navigation"
+        }}</span>
+        <button
+          v-for="turn in navigator.turns"
+          :key="`${turn.physicalRolloutId}:${turn.turnId}`"
+          type="button"
+          @click="revealTarget(turn.turnId)"
+        >
+          {{ turn.promptPreview ?? "Opening not loaded" }}
+        </button>
+        <button
+          v-if="navigator.beforeCursor"
+          type="button"
+          @click="loadNavigator(navigator.beforeCursor)"
+        >
+          Older navigation
+        </button>
+      </nav>
+    </div>
     <section
       ref="historySurface"
       class="progressive-conversation"
@@ -357,8 +637,12 @@ onBeforeUnmount(() => {
       tabindex="0"
       aria-label="Conversation timeline"
       @toggle.capture="expandedDetailsChanged"
-      @scroll.passive="viewport.scroll"
+      @scroll.passive="readScroll"
       @wheel.passive="readInput"
+      @touchstart.passive="readInput"
+      @touchmove.passive="readInput"
+      @touchend.passive="readInput"
+      @touchcancel.passive="readInput"
       @keydown.capture="readInput"
       @pointerdown.capture="readInput"
     >
@@ -367,14 +651,6 @@ onBeforeUnmount(() => {
           Load older turns
         </button>
       </div>
-      <button
-        v-if="viewport.latestAvailable.value || !viewport.follow.value"
-        class="history-latest"
-        type="button"
-        @click="latest"
-      >
-        Latest content
-      </button>
       <div
         ref="historyCanvas"
         class="history-canvas"
@@ -497,6 +773,19 @@ onBeforeUnmount(() => {
         This conversation has no turns.
       </p>
     </section>
+    <div class="history-actions" @pointerdown.capture="readInput" @keydown.capture="readInput">
+      <div class="history-status" :title="historyStatuses.join(' ')">
+        <span v-for="status in historyStatuses" :key="status" role="status">{{ status }} </span>
+      </div>
+      <button
+        v-if="viewport.latestAvailable.value || !viewport.follow.value"
+        class="history-latest"
+        type="button"
+        @click="latest"
+      >
+        Latest content
+      </button>
+    </div>
     <ConversationInspector
       v-if="inspection"
       :record="inspection"
@@ -528,6 +817,24 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow-anchor: none;
+  scroll-padding-block: 0.5rem;
+}
+.history-navigation {
+  flex: none;
+  block-size: 3.5rem;
+  min-width: 0;
+}
+.history-navigation nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: 100%;
+  padding-inline: 0.5rem;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.history-navigation nav > * {
+  flex: none;
 }
 .history-load {
   min-height: 2rem;
@@ -543,11 +850,23 @@ onBeforeUnmount(() => {
   width: 100%;
   min-width: 0;
 }
+.history-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  min-height: 2rem;
+}
+.history-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .history-latest {
-  position: absolute;
-  bottom: 1.5rem;
-  right: 1.5rem;
-  z-index: 2;
+  flex: none;
 }
 .history-gap {
   padding: 0.75rem;

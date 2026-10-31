@@ -157,6 +157,7 @@ export class LinkPreviewService {
   readonly #waiting: Array<() => void> = [];
   #active = 0;
   #closed = false;
+  #publication: Promise<void> = Promise.resolve();
   constructor(
     database: DatabaseSync,
     root: string,
@@ -304,6 +305,7 @@ export class LinkPreviewService {
         finalUrl,
       );
       let image: LinkPreview["image"] = null;
+      let imageBytes: Buffer | undefined;
       if (metadata.imageUrl) {
         try {
           const responseImage = await client(new URL(metadata.imageUrl), {
@@ -333,7 +335,7 @@ export class LinkPreviewService {
               byteSize: responseImage.body.length,
               ...dimensions,
             });
-            await writeOutputFile(this.root, [filename(image)], responseImage.body);
+            imageBytes = responseImage.body;
           }
         } catch {
           signal.throwIfAborted();
@@ -353,8 +355,7 @@ export class LinkPreviewService {
         retryAt: new Date(now + (image ? 600000 : 30000)).toISOString(),
       };
       result.revision = digest(JSON.stringify(result));
-      this.#save(result, now);
-      await this.#prune();
+      await this.#publish(result, now, signal, imageBytes);
       return result;
     } catch (error) {
       if (signal.aborted) {
@@ -366,42 +367,87 @@ export class LinkPreviewService {
         fetchedAt: new Date(now).toISOString(),
         retryAt: new Date(now + 30000).toISOString(),
       };
-      this.#save(result, now);
+      await this.#publish(result, now, signal);
       return result;
     } finally {
       this.#active -= 1;
       this.#waiting.shift()?.();
     }
   }
-  #save(result: LinkPreview, now: number) {
-    if (!this.#closed) {
+  #publish(result: LinkPreview, now: number, signal: AbortSignal, imageBytes?: Buffer) {
+    const operation = this.#publication.then(async () => {
+      signal.throwIfAborted();
+      if (this.#closed) {
+        throw new Error("preview.closed");
+      }
+      const previous = this.database
+        .prepare("SELECT payload_json FROM website_previews WHERE url = ?")
+        .get(result.url);
+      let oldImage: LinkPreview["image"] = null;
+      try {
+        const saved = linkPreviewSchema.safeParse(JSON.parse(String(previous?.["payload_json"])));
+        oldImage = saved.success ? saved.data.image : null;
+      } catch {
+        /* A corrupt previous payload cannot authorize deletion */
+      }
+      if (result.image && imageBytes) {
+        await writeOutputFile(this.root, [filename(result.image)], imageBytes);
+        if (signal.aborted || this.#closed) {
+          await this.#retireImage(result.image);
+          signal.throwIfAborted();
+          throw new Error("preview.closed");
+        }
+      }
       this.database
         .prepare(
           "INSERT INTO website_previews(url,payload_json,fetched_at) VALUES(?,?,?) ON CONFLICT(url) DO UPDATE SET payload_json=excluded.payload_json,fetched_at=excluded.fetched_at",
         )
         .run(result.url, JSON.stringify(result), now);
+      if (oldImage) {
+        await this.#retireImage(oldImage);
+      }
+      await this.#prune();
+      return undefined;
+    });
+    this.#publication = operation.catch(() => undefined);
+    return operation;
+  }
+  async #retireImage(image: NonNullable<LinkPreview["image"]>) {
+    if (
+      !this.database
+        .prepare(
+          "SELECT 1 FROM website_previews WHERE CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.image.sha256') END=? LIMIT 1",
+        )
+        .get(image.sha256) &&
+      (await readPreviewImage(this.root, image))
+    ) {
+      await rm(join(this.root, filename(image)), { force: true });
     }
   }
   async #prune() {
+    if (this.#closed) {
+      return;
+    }
     const expired = this.database
       .prepare(
         "SELECT url,payload_json FROM website_previews ORDER BY fetched_at DESC,url LIMIT -1 OFFSET 128",
       )
       .all();
     for (const row of expired) {
-      const saved = linkPreviewSchema.safeParse(JSON.parse(String(row["payload_json"])));
+      if (this.#closed) {
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(String(row["payload_json"]));
+      } catch {
+        payload = null;
+      }
+      const saved = linkPreviewSchema.safeParse(payload);
       this.database.prepare("DELETE FROM website_previews WHERE url = ?").run(String(row["url"]));
-      if (
-        saved.success &&
-        saved.data.image &&
-        !this.database
-          .prepare(
-            "SELECT 1 FROM website_previews WHERE json_extract(payload_json,'$.image.sha256')=? LIMIT 1",
-          )
-          .get(saved.data.image.sha256)
-      ) {
+      if (saved.success && saved.data.image) {
         // oxlint-disable-next-line no-await-in-loop -- Only an unreferenced content-addressed image in the viewer preview root is removed
-        await rm(join(this.root, filename(saved.data.image)), { force: true });
+        await this.#retireImage(saved.data.image);
       }
     }
   }

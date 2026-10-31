@@ -56,6 +56,72 @@ async function foreignOpen(f: Awaited<ReturnType<typeof fixture>>): Promise<unkn
   );
 }
 describe("owned seekable rollout generations", () => {
+  it("admits supported native notifications across concatenated and skippable Zstd frames", async () => {
+    const f = await fixture();
+    const records: unknown[] = canonicalRecords();
+    records.splice(
+      2,
+      0,
+      ...["started", "completed"].map((phase) => ({
+        method: `item/autoApprovalReview/${phase}`,
+        params: { threadId: "stable", turnId: "turn", itemId: "review" },
+      })),
+    );
+    const bytes = Buffer.from(records.map((value) => JSON.stringify(value)).join("\n") + "\n");
+    const skip = Buffer.alloc(8);
+    skip.writeUInt32LE(0x184d2a50, 0);
+    const boundary = bytes.indexOf(10) + 1;
+    await writeFile(
+      f.path,
+      Buffer.concat([
+        zstdCompressSync(bytes.subarray(0, boundary)),
+        skip,
+        zstdCompressSync(bytes.subarray(boundary)),
+      ]),
+    );
+    const store = new RolloutStore({ cacheDirectory: f.cache });
+    try {
+      const lease = await store.open(f.ref);
+      try {
+        expect(await lease.read(0, lease.size)).toEqual(bytes);
+      } finally {
+        await lease.close();
+      }
+    } finally {
+      await store.close();
+    }
+  });
+  it("rejects a cache under a dot-dot-named source child before creating it", async () => {
+    const f = await fixture();
+    const sessions = join(f.root, "home", "sessions");
+    await mkdir(sessions, { recursive: true });
+    const sourcePath = join(sessions, "source.jsonl.zst");
+    await writeFile(sourcePath, zstdCompressSync(f.bytes));
+    const cache = join(f.root, "home", "..viewer", "decoded");
+    const store = new RolloutStore({ cacheDirectory: cache });
+    try {
+      await expect(
+        store.open({ ...f.ref, sourcePath }).then(async (lease) => {
+          await lease.close();
+          return undefined;
+        }),
+      ).rejects.toThrow("rollout.source_cache_overlap");
+      await expect(stat(cache)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await store.close();
+    }
+    const outside = new RolloutStore({ cacheDirectory: f.cache });
+    try {
+      const lease = await outside.open({ ...f.ref, sourcePath });
+      try {
+        expect(await lease.read(0, lease.size)).toEqual(f.bytes);
+      } finally {
+        await lease.close();
+      }
+    } finally {
+      await outside.close();
+    }
+  });
   it("B1 retains ownership through shared-store leases, store close and a closing lease's unfinished read", async () => {
     const f = await fixture();
     const first = new RolloutStore({ cacheDirectory: f.cache });

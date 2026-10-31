@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 
 import type { CustomRecord } from "pagefind";
 
@@ -20,6 +21,8 @@ import {
   SessionCacheUpdater,
   CACHE_PARSER_VERSION,
   getSourceManifestEntry,
+  refreshUnchangedSourceManifest,
+  type SourceManifestEntry,
 } from "#server/cache/sourceManifest.ts";
 import { storeEmbeddedMedia } from "#server/content/extractMedia.ts";
 import { prepareHistoryAttachments } from "#server/content/historyAttachments.ts";
@@ -156,6 +159,7 @@ export interface StaticExportSummary {
   publishedFavicons: number;
   removedArtifacts: number;
   diagnosticCounts: Record<string, number>;
+  unresolvedSources: ViewerDiagnostic[];
   richContentFailures: RichContentFailure[];
 }
 
@@ -283,7 +287,10 @@ async function prepareConversations(
   failedSessions: Set<string>,
   richContentFailures: RichContentFailure[],
   prepareConversation: ConversationPreparer,
-  onPrepared: (conversation: NormalizedSession) => Promise<void>,
+  onPrepared: (
+    conversation: NormalizedSession,
+    manifest: SourceManifestEntry | null,
+  ) => Promise<boolean>,
   onProgress: (completed: number, total: number) => void,
 ): Promise<{
   conversations: NormalizedSession[];
@@ -394,6 +401,7 @@ async function prepareConversations(
       continue;
     }
     let conversation = cached;
+    const normalizedManifest = getSourceManifestEntry(database, cached.summary.sourcePath);
     conversation.classification = classifications.get(sessionId)!;
     const fields = resolveThreadFields({
       id: sessionId,
@@ -491,7 +499,11 @@ async function prepareConversations(
       }
     }
     // oxlint-disable-next-line no-await-in-loop -- Full raw events are staged before this loop releases the session object.
-    await onPrepared(conversation);
+    if (!(await onPrepared(conversation, normalizedManifest))) {
+      failedSessions.add(sessionId);
+      onProgress(sessionIndex + 1, orderedSessionIds.length);
+      continue;
+    }
     conversations.push({
       summary: conversation.summary,
       turns: [],
@@ -537,6 +549,7 @@ export async function runStaticExport(
   const discovery = await discoverSources(config.settings.codexHome);
   const metadata = await loadExportMetadata(config.settings.codexHome, config.paths, progress);
   const sourceSelection = await selectSessionSources(discovery.rollouts, {
+    codexHome: config.settings.codexHome,
     currentRolloutPaths: new Map(
       (metadata.stateSnapshot?.threads ?? []).map((thread) => [thread.id, thread.rolloutPath]),
     ),
@@ -562,7 +575,12 @@ export async function runStaticExport(
     ...metadata.diagnostics,
   ];
   const diagnosticsBySession = new Map<string, ViewerDiagnostic[]>();
-  const failedSessions = new Set<string>();
+  const unresolvedSources = sourceSelection.diagnostics.filter(
+    ({ code }) => code === "source.current_rollout_unresolved",
+  );
+  const failedSessions = new Set(
+    unresolvedSources.map(({ sessionId, path }) => `selection:${sessionId ?? path}`),
+  );
   const richContentFailures: RichContentFailure[] = [];
   const transformedSessions = new Set<string>();
   const reusedSessions = new Set<string>();
@@ -614,7 +632,11 @@ export async function runStaticExport(
         }
       } else {
         diagnostics.push(...result.diagnostics);
-        if (result.retainedSessionId !== null) {
+        if (
+          result.retainedSessionId !== null &&
+          (source.stableThreadId === undefined ||
+            source.stableThreadId === result.retainedSessionId)
+        ) {
           failedSessions.add(result.retainedSessionId);
           sessionIds.add(result.retainedSessionId);
           addSessionDiagnostics(diagnosticsBySession, result.retainedSessionId, result.diagnostics);
@@ -652,7 +674,7 @@ export async function runStaticExport(
       failedSessions,
       richContentFailures,
       options.prepareConversation ?? prepareConversationForExport,
-      async (conversation) => {
+      async (conversation, normalizedManifest) => {
         let history: HistoryPage | undefined;
         let historySources;
         try {
@@ -677,19 +699,38 @@ export async function runStaticExport(
             (source, signal) => rolloutStore.open(source, signal),
             CACHE_PARSER_VERSION,
           );
+          if (
+            normalizedManifest?.sessionId !== conversation.summary.id ||
+            normalizedManifest.fingerprint.sha256 !== complete.generation.encodedSha256 ||
+            normalizedManifest.fingerprint.parserVersion !== complete.generation.parserVersion ||
+            !isDeepStrictEqual(
+              normalizedManifest.generation?.dependencies ?? [],
+              complete.dependencies,
+            )
+          ) {
+            throw new Error("history.export_generation_mismatch");
+          }
           history = completeHistoryPage(complete);
           historySources = complete.segments.map(({ generation }) => generation);
           if (history.coverage.status !== "complete") {
             throw new Error("history.unsupported_records");
           }
         } catch (error) {
+          const changed =
+            (error instanceof Error && error.message === "history.export_generation_mismatch") ||
+            !(await refreshUnchangedSourceManifest(
+              database,
+              conversation.summary.sourcePath,
+              conversation.summary.id,
+            ));
           const diagnostic = createViewerDiagnostic({
             code: "source.invalid_jsonl",
             severity: "warning",
             area: "export",
             sessionId: conversation.summary.id,
-            message:
-              "Saved history is incomplete or contains unsupported records, inspect the retained source evidence before treating it as complete.",
+            message: changed
+              ? "The logical source changed during export preparation, this conversation was omitted to avoid publishing mixed generations."
+              : "Saved history is incomplete or contains unsupported records, inspect the retained source evidence before treating it as complete.",
             details: { reason: error instanceof Error ? error.message : "history.export_failed" },
           });
           diagnostics.push(diagnostic);
@@ -697,6 +738,9 @@ export async function runStaticExport(
           conversation.summary.diagnosticCount = diagnosticsBySession.get(
             conversation.summary.id,
           )!.length;
+          if (changed) {
+            return false;
+          }
         }
         await writeConversationExport(conversation, { generatedRoot });
         await writeStaticPayloads([conversation], {
@@ -745,6 +789,7 @@ export async function runStaticExport(
           await appendPagefindRecords(pagefindSpoolPath, records);
           pagefindRecords?.push(...records);
         }
+        return true;
       },
       (completed, total) => progress.statusProgress("Preparing conversations", completed, total),
     );
@@ -916,6 +961,7 @@ export async function runStaticExport(
         publishedFavicons: published.faviconCount,
         removedArtifacts: removed.length,
         diagnosticCounts: diagnosticCounts(diagnostics),
+        unresolvedSources,
         richContentFailures,
       };
     } finally {

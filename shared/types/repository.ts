@@ -241,8 +241,15 @@ export interface ConversationRepository {
   getInspector(id: string, target: InspectorTarget): Promise<InspectorRecord>;
   resolveAsset(assetId: string): Promise<ResolvedAsset>;
   resolveFavicon(origin: string): Promise<string | null>;
-  subscribe(listener: (event: ViewerInvalidation) => void): () => void;
+  subscribe(
+    listener: (event: ViewerInvalidation) => void,
+    selection?: { threadId: string },
+  ): () => void;
 }
+
+export const invalidationSubscriptionQuerySchema = z.strictObject({
+  threadId: z.string().min(1).max(512).optional(),
+});
 
 export const repositoryCapabilitiesSchema = z.strictObject({
   progressiveHistory: z.boolean().optional(),

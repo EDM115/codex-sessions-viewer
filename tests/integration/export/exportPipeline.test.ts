@@ -6,12 +6,14 @@ import {
   readFile,
   readdir,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { zstdCompressSync } from "node:zlib";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as z from "zod";
@@ -67,6 +69,190 @@ afterEach(async () => {
 });
 
 describe("static export pipeline", () => {
+  it.skipIf(process.platform !== "win32").each([false, true])(
+    "exports the same Windows file through differently cased native references (relative=%s)",
+    async (relative) => {
+      const root = await temporaryRoot();
+      const codexHome = join(root, "home");
+      const id = "12345678-1234-4234-8234-123456789abc";
+      const name = `rollout-2026-10-31T10-00-00-${id}.jsonl`;
+      const source = join(codexHome, "sessions", name);
+      await mkdir(join(codexHome, "sessions"), { recursive: true });
+      await writeFile(
+        source,
+        [
+          { type: "session_meta", payload: { id, source: "cli", thread_source: "user" } },
+          {
+            type: "event_msg",
+            payload: { type: "user_message", message: "Windows same-file body" },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join("\n") + "\n",
+      );
+      const declared = relative ? join("SESSIONS", name.toUpperCase()) : source.toUpperCase();
+      const [sourceStat, pointerStat] = await Promise.all([
+        stat(source, { bigint: true }),
+        stat(resolvePath(codexHome, declared), { bigint: true }),
+      ]);
+      expect(pointerStat.ino).toBe(sourceStat.ino);
+      expect(pointerStat.dev).toBe(sourceStat.dev);
+      const state = createStateDatabase(join(codexHome, "state_5.sqlite"));
+      state.prepare("UPDATE threads SET id = ?, rollout_path = ?").run(id, declared);
+      state.close();
+      const outputRoot = join(root, "output");
+      const result = await runStaticExport({
+        cwd: root,
+        codexHome,
+        paths: viewerPaths(root),
+        generatedRoot: join(root, "generated"),
+        outputRoot,
+        offline: true,
+        index: false,
+        generate: async ({ outputRoot: destination }) => {
+          await mkdir(destination, { recursive: true });
+          await writeFile(
+            join(destination, "index.html"),
+            "<!doctype html><title>Private Windows fixture</title>",
+          );
+        },
+      });
+      expect(result).toMatchObject({
+        discovered: 1,
+        sessionCount: 1,
+        failed: 0,
+        unresolvedSources: [],
+      });
+      expect(result.diagnosticCounts["source.current_rollout_unresolved"]).toBeUndefined();
+      const repository = new StaticConversationRepository(
+        async (path) => JSON.parse(await readFile(join(outputRoot, path), "utf8")) as unknown,
+      );
+      expect(JSON.stringify(await repository.getTurns(id, { limit: 20 }))).toContain(
+        "Windows same-file body",
+      );
+    },
+  );
+
+  it.each(["missing", "ambiguous", "outside-root"])(
+    "reports the thread/path/reason and failed source qualification for an unresolved native export reference (%s)",
+    async (reason) => {
+      const root = await temporaryRoot();
+      const codexHome = join(root, "home");
+      await mkdir(join(codexHome, "sessions"), { recursive: true });
+      if (reason === "ambiguous") {
+        await Promise.all(
+          ["22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"].map(
+            (physical) =>
+              writeFile(
+                join(
+                  codexHome,
+                  `sessions/rollout-2026-10-31T10-00-00-11111111-1111-4111-8111-111111111111_${physical}.jsonl`,
+                ),
+                JSON.stringify({
+                  type: "session_meta",
+                  payload: { id: "thread-1", source: "cli", thread_source: "user" },
+                }) + "\n",
+              ),
+          ),
+        );
+      }
+      const declared = reason === "outside-root" ? "../outside.jsonl" : "sessions/missing.jsonl";
+      const state = createStateDatabase(join(codexHome, "state_5.sqlite"));
+      state.prepare("UPDATE threads SET rollout_path = ?").run(declared);
+      state.close();
+      const result = await runStaticExport({
+        cwd: root,
+        codexHome,
+        paths: viewerPaths(root),
+        generatedRoot: join(root, "generated"),
+        outputRoot: join(root, "output"),
+        offline: true,
+        index: false,
+        generate: async ({ outputRoot }) => {
+          await mkdir(outputRoot, { recursive: true });
+          await writeFile(
+            join(outputRoot, "index.html"),
+            "<!doctype html><title>Qualified empty fixture</title>",
+          );
+        },
+      });
+      expect(result).toMatchObject({
+        discovered: 0,
+        sessionCount: 0,
+        failed: 1,
+        diagnosticCounts: { "source.current_rollout_unresolved": 1 },
+        unresolvedSources: [
+          {
+            code: "source.current_rollout_unresolved",
+            sessionId: "thread-1",
+            path: join(codexHome, declared),
+            details: { declaredPath: declared, reason },
+          },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    { absolute: false, compressed: false },
+    { absolute: true, compressed: false },
+    { absolute: false, compressed: true },
+    { absolute: true, compressed: true },
+  ])(
+    "exports a native noncanonical rollout reference from the selected home (%j)",
+    async ({ absolute, compressed }) => {
+      const root = await temporaryRoot();
+      const codexHome = join(root, "home");
+      const relative = `sessions/rollout-thread-1.jsonl${compressed ? ".zst" : ""}`;
+      const source = join(codexHome, relative);
+      await mkdir(join(codexHome, "sessions"), { recursive: true });
+      const text =
+        [
+          {
+            type: "session_meta",
+            payload: { id: "thread-1", source: "cli", thread_source: "user" },
+          },
+          {
+            type: "event_msg",
+            payload: { type: "user_message", message: "Relative pointer body" },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join("\n") + "\n";
+      await writeFile(source, compressed ? zstdCompressSync(Buffer.from(text)) : text);
+      const state = createStateDatabase(join(codexHome, "state_5.sqlite"));
+      state.prepare("UPDATE threads SET rollout_path = ?").run(absolute ? source : relative);
+      state.close();
+      expect(process.cwd()).not.toBe(codexHome);
+      const outputRoot = join(root, "output");
+      const result = await runStaticExport({
+        cwd: root,
+        codexHome,
+        paths: viewerPaths(root),
+        generatedRoot: join(root, "generated"),
+        outputRoot,
+        offline: true,
+        index: false,
+        generate: async ({ outputRoot: destination }) => {
+          await mkdir(destination, { recursive: true });
+          await writeFile(
+            join(destination, "index.html"),
+            "<!doctype html><title>Private fixture</title>",
+          );
+        },
+      });
+      expect(result.discovered).toBe(1);
+      expect(result.sessionCount).toBe(1);
+      expect(result.diagnosticCounts["source.current_rollout_unresolved"]).toBeUndefined();
+      const repository = new StaticConversationRepository(
+        async (path) => JSON.parse(await readFile(join(outputRoot, path), "utf8")) as unknown,
+      );
+      expect(JSON.stringify(await repository.getTurns("thread-1", { limit: 20 }))).toContain(
+        "Relative pointer body",
+      );
+    },
+  );
+
   it("overlays current metadata titles and millisecond timestamps on warm selected and exported summaries without reparsing", async () => {
     const root = await temporaryRoot();
     const codexHome = join(root, "home");
@@ -305,6 +491,8 @@ describe("static export pipeline", () => {
         type: "session_meta",
         payload: {
           id: childId,
+          thread_source: "subagent",
+          source: { subAgent: { thread_spawn: { parent_thread_id: parentId } } },
           session_id: "child-root",
           parent_thread_id: parentId,
           history_base: {
@@ -884,65 +1072,86 @@ it("preserves logical review visibility through fresh and cached exports and the
   expect(Buffer.compare(await readFile(sourcePath), bytes)).toBe(0);
 });
 
-it("exports supplied parent native reviews and reads them through the actual static repository", async () => {
-  const root = await temporaryRoot();
-  const codexHome = join(root, "home");
-  const id = "11111111-1111-4111-8111-111111111111";
-  const records = parentReviewRecords(id);
-  await mkdir(join(codexHome, "sessions"), { recursive: true });
-  await writeFile(
-    join(codexHome, "sessions", "rollout-parent.jsonl"),
-    records.map((record) => JSON.stringify(record)).join("\n") + "\n",
-  );
-  const outputRoot = join(root, "output");
-  await runStaticExport({
-    cwd: root,
-    codexHome,
-    generatedRoot: join(root, "generated"),
-    outputRoot,
-    paths: viewerPaths(root),
-    offline: true,
-    index: false,
-    async generate({ outputRoot: destination }) {
-      await mkdir(destination, { recursive: true });
-      await writeFile(join(destination, "index.html"), "parent review fixture");
-    },
-  });
-  const repository = new StaticConversationRepository(async (path) =>
-    JSON.parse(await readFile(join(outputRoot, path.replace(/^\//u, "")), "utf8")),
-  );
-  const evidence = await repository.getApprovalEvidence(id);
-  expect(evidence).toMatchObject({
-    sessionId: id,
-    parentSource: { availability: "partial", historyEpoch: null, coverage: null },
-    matched: [
-      {
-        activityId: "command",
-        attempts: [
-          { reviewId: "review-a", outcome: "allow" },
-          { reviewId: "review-b", outcome: null },
-        ],
+it.each(["plain", "zstd", "zstd-frames"])(
+  "exports supplied parent native reviews and reads them through the actual static repository (%s)",
+  async (representation) => {
+    const root = await temporaryRoot();
+    const codexHome = join(root, "home");
+    const id = "11111111-1111-4111-8111-111111111111";
+    const records = parentReviewRecords(id);
+    await mkdir(join(codexHome, "sessions"), { recursive: true });
+    const bytes = Buffer.from(records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const boundary = bytes.indexOf(10) + 1;
+    const skip = Buffer.alloc(8);
+    skip.writeUInt32LE(0x184d2a50, 0);
+    const encoded =
+      representation === "plain"
+        ? bytes
+        : representation === "zstd"
+          ? zstdCompressSync(bytes)
+          : Buffer.concat([
+              zstdCompressSync(bytes.subarray(0, boundary)),
+              skip,
+              zstdCompressSync(bytes.subarray(boundary)),
+            ]);
+    await writeFile(
+      join(
+        codexHome,
+        "sessions",
+        `rollout-2026-10-31T10-00-00-${id}.jsonl${representation === "plain" ? "" : ".zst"}`,
+      ),
+      encoded,
+    );
+    const outputRoot = join(root, "output");
+    await runStaticExport({
+      cwd: root,
+      codexHome,
+      generatedRoot: join(root, "generated"),
+      outputRoot,
+      paths: viewerPaths(root),
+      offline: true,
+      index: false,
+      async generate({ outputRoot: destination }) {
+        await mkdir(destination, { recursive: true });
+        await writeFile(join(destination, "index.html"), "parent review fixture");
       },
-    ],
-  });
-  expect(evidence.parentSource?.contentRevision).toMatch(/^[a-f0-9]{64}$/u);
-  expect(evidence.unattached.map(({ review, reason }) => [review.reviewId, reason])).toEqual([
-    ["network", "missing-target"],
-    ["mcp-denied", "standalone-denial"],
-  ]);
-  const sources = evidence.matched[0]?.attempts[0]?.sourceRecords;
-  const expectedStart = Buffer.byteLength(
-    records
-      .slice(0, 5)
-      .map((record) => JSON.stringify(record))
-      .join("\n") + "\n",
-  );
-  expect(sources).toHaveLength(2);
-  expect(sources?.[0]?.identity.decodedByteStart).toBe(expectedStart);
-  expect(sources?.[1]?.identity.decodedByteStart).toBeGreaterThan(expectedStart);
-  expect(sources?.[0]?.identity.rangeSha256).toMatch(/^[a-f0-9]{64}$/u);
-  expect(sources?.[0]?.envelope).toMatchObject({
-    method: "item/autoApprovalReview/started",
-    params: { threadId: id, turnId: "turn", reviewId: "review-a" },
-  });
-});
+    });
+    const repository = new StaticConversationRepository(async (path) =>
+      JSON.parse(await readFile(join(outputRoot, path.replace(/^\//u, "")), "utf8")),
+    );
+    const evidence = await repository.getApprovalEvidence(id);
+    expect(evidence).toMatchObject({
+      sessionId: id,
+      parentSource: { availability: "partial", historyEpoch: null, coverage: null },
+      matched: [
+        {
+          activityId: "command",
+          attempts: [
+            { reviewId: "review-a", outcome: "allow" },
+            { reviewId: "review-b", outcome: null },
+          ],
+        },
+      ],
+    });
+    expect(evidence.parentSource?.contentRevision).toMatch(/^[a-f0-9]{64}$/u);
+    expect(evidence.unattached.map(({ review, reason }) => [review.reviewId, reason])).toEqual([
+      ["network", "missing-target"],
+      ["mcp-denied", "standalone-denial"],
+    ]);
+    const sources = evidence.matched[0]?.attempts[0]?.sourceRecords;
+    const expectedStart = Buffer.byteLength(
+      records
+        .slice(0, 5)
+        .map((record) => JSON.stringify(record))
+        .join("\n") + "\n",
+    );
+    expect(sources).toHaveLength(2);
+    expect(sources?.[0]?.identity.decodedByteStart).toBe(expectedStart);
+    expect(sources?.[1]?.identity.decodedByteStart).toBeGreaterThan(expectedStart);
+    expect(sources?.[0]?.identity.rangeSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(sources?.[0]?.envelope).toMatchObject({
+      method: "item/autoApprovalReview/started",
+      params: { threadId: id, turnId: "turn", reviewId: "review-a" },
+    });
+  },
+);

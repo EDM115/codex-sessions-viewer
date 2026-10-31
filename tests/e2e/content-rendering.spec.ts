@@ -234,20 +234,50 @@ test("renders code and tables without widening responsive conversation layouts",
     expect(Math.abs(adjusted.y - captureGeometry.y)).toBeLessThanOrEqual(0.5);
     expect(adjusted.y - captureGeometry.y).toBe(adjustment);
     expect(adjusted.y - Math.floor(adjusted.y)).toBe(0.75);
+    const clip = {
+      x: Math.floor(adjusted.x),
+      y: Math.floor(adjusted.y),
+      width: Math.ceil(adjusted.x + adjusted.width) - Math.floor(adjusted.x),
+      height: Math.ceil(adjusted.bottom) - Math.floor(adjusted.y),
+    };
+    expect(clip.width).toBe(640);
+    expect(clip.height).toBe(692);
+    const captureViewport = page.viewportSize();
+    if (captureViewport === null) {
+      throw new Error("The measured screenshot requires a fixed viewport");
+    }
+    expect(clip.x).toBeGreaterThanOrEqual(0);
+    expect(clip.y).toBeGreaterThanOrEqual(0);
+    expect(clip.x + clip.width).toBeLessThanOrEqual(captureViewport.width);
+    expect(clip.y + clip.height).toBeLessThanOrEqual(captureViewport.height);
+    const captureIdentity = () =>
+      answer.evaluate((element) => ({
+        messageId: element.getAttribute("data-message-id"),
+        turnId: element.closest("[data-history-turn]")?.getAttribute("data-history-turn"),
+        source: element.closest("[data-anchor-source]")?.getAttribute("data-anchor-source"),
+      }));
+    const identity = await captureIdentity();
+    expect(identity.messageId).toBe("message-1");
+    expect(identity.turnId).toBe("turn-1");
+    expect(identity.source).toBeTruthy();
     const phaseReceipt = {
       natural: captureGeometry,
       requestedDelta: adjustment,
       actualDelta: adjusted.y - captureGeometry.y,
       adjusted,
+      clip,
+      identity,
     };
     console.log(JSON.stringify({ rootCapturePhase: phaseReceipt }));
     await test.info().attach("root-capture-phase", {
       body: JSON.stringify(phaseReceipt, null, 2),
       contentType: "application/json",
     });
-    await expect(answer).toHaveScreenshot("rich-conversation-message.png", {
+    // Capture the measured pixel cover without the locator screenshot's second native scroll
+    await expect(page).toHaveScreenshot("rich-conversation-message.png", {
       animations: "disabled",
       caret: "hide",
+      clip,
     });
     const settledPosition = await answer.evaluate((element) => {
       const { x, y, width, height } = element.getBoundingClientRect();
@@ -259,6 +289,7 @@ test("renders code and tables without widening responsive conversation layouts",
       width: adjusted.width,
       height: adjusted.height,
     });
+    expect(await captureIdentity()).toEqual(identity);
   } finally {
     await answer.evaluate((element, savedStyle) => {
       if (savedStyle === null) {

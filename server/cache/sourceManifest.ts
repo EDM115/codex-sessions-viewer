@@ -18,7 +18,6 @@ import {
 import { rolloutRefFromSource } from "#server/ingestion/rolloutIdentity.ts";
 import {
   filesystemRolloutResolver,
-  readPlainRolloutLineage,
   type RolloutSourceResolver,
   type ResolvedRolloutLineage,
 } from "#server/ingestion/rolloutLineage.ts";
@@ -466,6 +465,10 @@ export class SessionCacheUpdater {
   async #readFull(source: DiscoveredRolloutSource): Promise<ReadCandidate | null> {
     if (source.path.endsWith(".jsonl.zst")) {
       const initial = rolloutRefFromSource(source.path, null);
+      if (initial.stableThreadId.startsWith("path:") && source.stableThreadId) {
+        initial.stableThreadId = source.stableThreadId;
+        initial.physicalRolloutId = source.stableThreadId;
+      }
       const complete = await readCompleteRollout(
         initial,
         this.#rolloutSources ?? filesystemRolloutResolver(initial),
@@ -540,24 +543,24 @@ export class SessionCacheUpdater {
     const ref = rolloutRefFromSource(source.path, meta);
     const lineage =
       ref.historyBase !== null || ref.subagentHistoryStartOrdinal !== null
-        ? await readPlainRolloutLineage(
+        ? await readCompleteRollout(
             ref,
             this.#rolloutSources ?? filesystemRolloutResolver(ref),
-            undefined,
-            { parserVersion: this.#parserVersion },
+            this.#openRollout,
+            this.#parserVersion,
           )
         : null;
     if (
       lineage !== null &&
-      (lineage.currentGeneration.encodedSha256 !== hash.copy().digest("hex") ||
-        lineage.currentGeneration.observation.encodedSize !== observed.size ||
-        lineage.currentGeneration.parserVersion !== this.#parserVersion)
+      (lineage.generation.encodedSha256 !== hash.copy().digest("hex") ||
+        lineage.generation.observation.encodedSize !== observed.size ||
+        lineage.generation.parserVersion !== this.#parserVersion)
     ) {
       return null;
     }
     return {
       mode: "full",
-      ...(lineage === null ? {} : { generation: lineage.currentGeneration }),
+      ...(lineage === null ? {} : { generation: lineage.generation }),
       rolloutRef: ref,
       dependencies: lineage?.dependencies ?? [],
       ...(lineage === null
@@ -771,6 +774,12 @@ export class SessionCacheUpdater {
     source: DiscoveredRolloutSource,
     context: SessionCacheUpdateContext = {},
   ): Promise<SessionCacheUpdateResult> {
+    if (context.expectedCatalogSessionId === undefined && source.stableThreadId !== undefined) {
+      context = { ...context, expectedCatalogSessionId: source.stableThreadId };
+    }
+    if (context.expectedCatalogSessionId) {
+      source = { ...source, stableThreadId: context.expectedCatalogSessionId };
+    }
     const jobKey =
       context.expectedCatalogSessionId ?? rolloutRefFromSource(source.path, null).stableThreadId;
     const jobToken = this.#fence.begin(jobKey);
@@ -810,6 +819,8 @@ export class SessionCacheUpdater {
       const normalizedExists =
         persisted?.sessionId !== null &&
         persisted?.sessionId !== undefined &&
+        (context.expectedCatalogSessionId === undefined ||
+          persisted.sessionId === context.expectedCatalogSessionId) &&
         hasCachedSession(this.#database, persisted.sessionId);
       if (
         !context.force &&

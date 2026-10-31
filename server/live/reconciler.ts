@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 
@@ -71,6 +71,7 @@ import {
   MaterializationQueue,
   type MaterializationPriority,
 } from "#server/live/materializationQueue.ts";
+import { SelectedHistoryObserver } from "#server/live/selectedHistoryObserver.ts";
 import {
   readCatalogMetadata,
   type CatalogMetadataSnapshot,
@@ -109,6 +110,10 @@ import type {
 import type { RichTextDocument } from "#shared/types/richText.ts";
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 30_000;
+function sourceFamily(path: string): string {
+  const family = resolve(path).replace(/\.zst$/iu, "");
+  return process.platform === "win32" ? family.toLowerCase() : family;
+}
 
 export function coalesceSourceWatchBatches(
   batches: readonly SourceWatchBatch[],
@@ -170,6 +175,8 @@ export class LiveReconciler {
   readonly #nativeHistory: NativeHistoryService;
   readonly #historyPager: HistoryPager;
   readonly #rolloutStore: RolloutStore;
+  readonly #selectedHistory: SelectedHistoryObserver;
+  readonly #historyDependencies = new Map<string, { selectedPath: string; paths: string[] }>();
   readonly #debounceMs: number | undefined;
   readonly #reconciliationIntervalMs: number;
   readonly #fetchFavicons: boolean;
@@ -238,7 +245,41 @@ export class LiveReconciler {
       epochAuthority,
       native: this.#nativeHistory,
       open: (ref, signal) => this.#rolloutStore.open(ref, signal),
+      onLineage: (lineage) => {
+        const selected = lineage.segments.at(-1)?.ref;
+        if (selected) {
+          const previous = this.#historyDependencies.get(selected.stableThreadId);
+          this.#historyDependencies.set(selected.stableThreadId, {
+            selectedPath: selected.sourcePath,
+            paths: [
+              ...new Set([
+                ...lineage.segments.map((segment) => segment.ref.sourcePath),
+                ...(lineage.status === "unresolved" &&
+                previous &&
+                sourceFamily(previous.selectedPath) === sourceFamily(selected.sourcePath)
+                  ? previous.paths
+                  : []),
+              ]),
+            ],
+          });
+          if (this.#historyDependencies.size > 128) {
+            this.#historyDependencies.delete(this.#historyDependencies.keys().next().value!);
+          }
+        }
+      },
     });
+    this.#selectedHistory = new SelectedHistoryObserver(
+      (id) => {
+        const selected = this.#historySelection(id, false).ref;
+        const dependencies = this.#historyDependencies.get(id);
+        return dependencies &&
+          sourceFamily(dependencies.selectedPath) === sourceFamily(selected.sourcePath)
+          ? dependencies.paths
+          : [selected.sourcePath];
+      },
+      (id) => this.#publish({ type: "session.updated", ids: [id], revision: this.#nextRevision() }),
+      options.observeSource,
+    );
     this.#debounceMs = options.debounceMs;
     this.#reconciliationIntervalMs = interval;
     this.#fetchFavicons = options.fetchFavicons ?? true;
@@ -1314,34 +1355,44 @@ export class LiveReconciler {
     return this.#nativeHistory.read(lineage, source, query, options.signal);
   }
 
-  #historySelection(id: string) {
+  #historySelection(id: string, includeKnown = true) {
     const record = catalogSession(this.#database, id);
     if (!record) {
       throw new Error("Session not found");
     }
-    const references = listAllCatalogSessions(this.#database).flatMap((entry) => {
-      if (!entry.summary.sourcePath) {
-        return [];
-      }
-      const ref = rolloutRefFromSource(
-        entry.summary.sourcePath,
-        entry.structuralEvidence?.meta ?? null,
-      );
-      return [
-        {
-          ...ref,
-          stableThreadId: entry.summary.id,
-          physicalRolloutId: ref.physicalRolloutId?.startsWith("path:")
-            ? entry.summary.id
-            : ref.physicalRolloutId,
-        },
-      ];
-    });
+    const references = (includeKnown ? listAllCatalogSessions(this.#database) : [record]).flatMap(
+      (entry) => {
+        if (!entry.summary.sourcePath) {
+          return [];
+        }
+        const ref = rolloutRefFromSource(
+          entry.summary.sourcePath,
+          entry.structuralEvidence?.meta ?? null,
+        );
+        return [
+          {
+            ...ref,
+            stableThreadId: entry.summary.id,
+            physicalRolloutId: ref.physicalRolloutId?.startsWith("path:")
+              ? entry.summary.id
+              : ref.physicalRolloutId,
+          },
+        ];
+      },
+    );
     const ref = references.find((entry) => entry.stableThreadId === id);
     if (!ref) {
       throw new Error("rollout.source_unresolved");
     }
+    const contained = relative(this.#codexHome, resolve(ref.sourcePath));
+    if (contained === ".." || contained.startsWith(`..${sep}`) || isAbsolute(contained)) {
+      throw new Error("rollout.source_outside_home");
+    }
     return { ref, references, sourceRevision: record.sourceRevision };
+  }
+
+  observeSelectedHistory(id: string): () => void {
+    return this.#selectedHistory.acquire(id);
   }
 
   async getHistoryPage(
@@ -1351,22 +1402,37 @@ export class LiveReconciler {
   ) {
     const release = this.#materializationQueue.holdSelected();
     try {
-      const selection = this.#historySelection(id);
-      const result = await this.#historyPager.read(
-        selection.ref,
-        selection.references,
-        query,
-        options.signal,
-        selection.sourceRevision,
-      );
-      const current = catalogSession(this.#database, id);
-      if (
-        current?.summary.sourcePath !== selection.ref.sourcePath ||
-        current.sourceRevision !== selection.sourceRevision
-      ) {
-        throw new HistoryReloadError("history.selection_changed");
+      const readSelection = async () => {
+        const selection = this.#historySelection(id);
+        const result = await this.#historyPager.read(
+          selection.ref,
+          selection.references,
+          query,
+          options.signal,
+          selection.sourceRevision,
+        );
+        const current = catalogSession(this.#database, id);
+        if (
+          current?.summary.sourcePath !== selection.ref.sourcePath ||
+          current.sourceRevision !== selection.sourceRevision
+        ) {
+          throw new HistoryReloadError("history.selection_changed");
+        }
+        return result;
+      };
+      try {
+        return await readSelection();
+      } catch (error) {
+        if (
+          !(error instanceof HistoryReloadError) ||
+          query.anchor.kind !== "latest" ||
+          this.#closed
+        ) {
+          throw error;
+        }
+        options.signal?.throwIfAborted();
+        return await readSelection();
       }
-      return result;
     } finally {
       release();
     }
@@ -1463,6 +1529,7 @@ export class LiveReconciler {
       return;
     }
     this.#closed = true;
+    await this.#selectedHistory.close();
     this.#faviconController.abort();
     this.#faviconQueue.length = 0;
     await Promise.allSettled(this.#faviconTasks);

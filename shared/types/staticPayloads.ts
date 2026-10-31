@@ -15,9 +15,22 @@ import { inspectorRecordSchema, type InspectorRecord } from "#shared/types/repos
 
 export const compactInspectorRecordSchema = inspectorRecordSchema.omit({ rawRecords: true });
 
+export const staticSessionFilterFacetsSchema = z.strictObject({
+  authority: z.literal("saved-export-observation"),
+  revision: z.string().min(1),
+  models: z.array(z.string()),
+  tools: z.array(z.string()),
+  hasMedia: z.boolean(),
+});
+export type StaticSessionFilterFacets = z.infer<typeof staticSessionFilterFacetsSchema>;
+
 export const staticSessionIndexSchema = z.discriminatedUnion("version", [
   z.strictObject({ version: z.literal(1), sessions: z.array(conversationSummarySchema) }),
-  z.strictObject({ version: z.literal(2), sessions: z.array(catalogSessionMetadataSchema) }),
+  z.strictObject({
+    version: z.literal(2),
+    sessions: z.array(catalogSessionMetadataSchema),
+    filterFacets: z.record(z.string(), staticSessionFilterFacetsSchema).optional(),
+  }),
 ]);
 
 export const legacyStaticLibraryPayloadSchema = z.strictObject({

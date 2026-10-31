@@ -16,6 +16,7 @@ export type ViewerDiagnosticCode =
   | "codex_home.unreadable"
   | "source.changed_during_read"
   | "source.duplicate_session"
+  | "source.current_rollout_unresolved"
   | "source.invalid_jsonl"
   | "source.metadata_budget_exhausted"
   | "metadata.snapshot_invalid"
@@ -59,6 +60,7 @@ export const viewerDiagnosticCodeSchema = z.enum([
   "codex_home.unreadable",
   "source.changed_during_read",
   "source.duplicate_session",
+  "source.current_rollout_unresolved",
   "source.invalid_jsonl",
   "source.metadata_budget_exhausted",
   "metadata.snapshot_invalid",

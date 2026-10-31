@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { formatDoctorOfflineOutput, inspectOfflineOutput } from "#server/export/doctorReport.ts";
+import { openCacheDatabase } from "#server/cache/database.ts";
+import {
+  collectDoctorReport,
+  formatDoctorOfflineOutput,
+  inspectOfflineOutput,
+} from "#server/export/doctorReport.ts";
 import { verifyGeneratedOutput } from "#server/export/verifyOutput.ts";
 
 import { driftOutputDiagnosticCount, writeValidOutputFixture } from "../../fixtures/output.ts";
@@ -24,6 +29,42 @@ async function temporaryRoot(): Promise<string> {
 }
 
 describe("doctor offline-output inspection", () => {
+  it("serializes unavailable saved aggregate evidence without turning it into a measured zero or exposing payload content", async () => {
+    const root = await temporaryRoot();
+    const codexHome = join(root, "home");
+    const cacheDir = join(root, "cache");
+    await mkdir(codexHome);
+    await mkdir(cacheDir);
+    const paths = {
+      cacheDir,
+      cacheDatabase: join(cacheDir, "viewer.sqlite"),
+      configDir: join(root, "config"),
+      configFile: join(root, "config/config.json"),
+      generatedDir: join(root, "generated"),
+    };
+    const database = openCacheDatabase(paths.cacheDatabase);
+    database.exec(
+      "CREATE TABLE catalog_sidebar (id INTEGER PRIMARY KEY, payload_json TEXT NOT NULL)",
+    );
+    database
+      .prepare("INSERT INTO catalog_sidebar VALUES (1, ?)")
+      .run('{"prompt":"private-doctor-payload",broken}');
+    database.close();
+    const serialized = JSON.stringify(await collectDoctorReport({ cwd: root, codexHome, paths }));
+    expect(JSON.parse(serialized)).toMatchObject({
+      cache: {
+        status: "available",
+        evidence: {
+          unresolvedProjectMappings: null,
+          sections: {
+            projectMappings: { availability: "invalid", diagnostics: ["payload-invalid"] },
+          },
+        },
+      },
+    });
+    expect(serialized).not.toContain("private-doctor-payload");
+  });
+
   it("distinguishes missing and incomplete output without claiming integrity", async () => {
     const parent = await temporaryRoot();
     await expect(inspectOfflineOutput(join(parent, "missing"))).resolves.toEqual({

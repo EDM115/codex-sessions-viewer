@@ -55,6 +55,13 @@ async function main(): Promise<void> {
   if (Object.keys(summary.diagnosticCounts).length > 0) {
     console.log(`Diagnostics: ${JSON.stringify(summary.diagnosticCounts)}`);
   }
+  for (const diagnostic of summary.unresolvedSources) {
+    const reason = diagnostic.details["reason"];
+    console.log(
+      `Unresolved current rollout: ${diagnostic.sessionId} (${typeof reason === "string" ? reason : "unavailable"})`,
+    );
+    console.log(`  Source: ${diagnostic.path}`);
+  }
   if (summary.richContentFailures.length > 0) {
     console.log("Rich-content fallbacks:");
     for (const failure of summary.richContentFailures) {

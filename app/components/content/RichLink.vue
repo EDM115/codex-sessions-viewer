@@ -237,6 +237,9 @@ function previewKey(event: KeyboardEvent) {
   } else if (event.key === "Tab" && event.shiftKey && event.target === previewOpenLink.value) {
     event.preventDefault();
     previewTrigger.value?.focus();
+  } else if (event.key === "Tab" && !event.shiftKey && event.target === previewOpenLink.value) {
+    // Resume native forward traversal from the inline trigger's document position
+    closePreview(true);
   }
 }
 watch(

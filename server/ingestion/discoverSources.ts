@@ -12,6 +12,7 @@ import { createViewerDiagnostic, type ViewerDiagnostic } from "#shared/types/dia
 export interface DiscoveredRolloutSource {
   path: string;
   scope: ConversationScope;
+  stableThreadId?: string;
 }
 
 export interface DiscoveredMetadataSources {

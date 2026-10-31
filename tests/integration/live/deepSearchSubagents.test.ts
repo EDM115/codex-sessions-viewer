@@ -19,6 +19,7 @@ describe("deep search child discovery", () => {
     const guardianId = "33333333-3333-4333-8333-333333333333";
     const scanId = "44444444-4444-4444-8444-444444444444";
     const unknownId = "55555555-5555-4555-8555-555555555555";
+    const nestedId = "66666666-6666-4666-8666-666666666666";
     const timestamp = "2026-09-14T10:00:00.000Z";
     const rollout = (id: string, source: unknown, prompt: string, threadSource?: string) =>
       [
@@ -40,6 +41,15 @@ describe("deep search child discovery", () => {
         .map((record) => JSON.stringify(record))
         .join("\n") + "\n";
     await Promise.all([
+      writeFile(
+        join(sessions, "nested.jsonl"),
+        rollout(
+          nestedId,
+          { subAgent: { thread_spawn: { parent_thread_id: childId } } },
+          "Nested unrelated task",
+          "subagent",
+        ),
+      ),
       writeFile(join(sessions, "root.jsonl"), rollout(rootId, "cli", "Ordinary parent", "user")),
       writeFile(
         join(sessions, "scan.jsonl"),
@@ -55,6 +65,7 @@ describe("deep search child discovery", () => {
           childId,
           { subagent: { thread_spawn: { parent_thread_id: rootId } } },
           "UniquelyDiscoverableChildTerm",
+          "subagent",
         ),
       ),
       writeFile(
@@ -63,6 +74,7 @@ describe("deep search child discovery", () => {
           guardianId,
           { subagent: { other: "guardian", parent_thread_id: rootId } },
           "UniquelyDiscoverableChildTerm",
+          "subagent",
         ),
       ),
     ]);
@@ -92,11 +104,11 @@ describe("deep search child discovery", () => {
       ).toEqual([rootId]);
       expect((await repository.search(query)).total).toBe(0);
       const started = await repository.startDeepSearch(query);
-      expect(started.total).toBe(2);
+      expect(started.total).toBe(3);
       await vi.waitFor(async () => {
         expect(await repository.getDeepSearch(started.id)).toMatchObject({
           state: "completed",
-          completed: 2,
+          completed: 3,
           failed: 0,
           resultCount: 1,
         });
@@ -107,6 +119,11 @@ describe("deep search child discovery", () => {
         items: [{ sessionId: childId, parentThreadId: rootId, turnId: `${childId}-turn` }],
       });
       expect(await repository.getSession(childId)).toMatchObject({ parentThreadId: rootId });
+      expect(
+        (await repository.listSessions({ scope: "active", parentThreadId: childId })).items.map(
+          (item) => item.id,
+        ),
+      ).toEqual([nestedId]);
       expect(
         (await repository.getTurns(childId, { targetTurnId: found.items[0]!.turnId, limit: 1 }))
           .turns[0]?.userMessage?.sourceMarkdown,

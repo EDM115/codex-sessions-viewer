@@ -104,8 +104,273 @@ function messageText(turn: HistoryTurnWindow, text: string) {
   }
   item.text = text;
 }
+function pendingHistoryRequests() {
+  const requests: Array<{
+    signal: AbortSignal;
+    resolve: (value: HistoryPage) => void;
+    reject: (reason: unknown) => void;
+  }> = [];
+  const getHistoryPage = vi.fn<ConversationRepository["getHistoryPage"]>((_id, _query, options) => {
+    if (!options?.signal) {
+      throw new Error("Expected history request cancellation");
+    }
+    const signal = options.signal;
+    return new Promise<HistoryPage>((resolve, reject) => {
+      requests.push({ signal, resolve, reject });
+      signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+        once: true,
+      });
+    });
+  });
+  return { requests, repository: { getHistoryPage, getTurnItems: async () => window() } };
+}
 
 describe("progressive timeline publication", () => {
+  it("waits for the A-to-B-to-C latest replacement chain without creating requests or suppressing data", async () => {
+    const { requests, repository } = pendingHistoryRequests();
+    const timeline = useProgressiveHistoryTimeline({ sessionId: "thread", repository });
+    const completed = vi.fn<() => void>();
+    const owned = timeline.refresh({ isCurrent: () => true }).then(completed);
+    const automaticB = timeline.refresh();
+    await flushPromises();
+    expect(completed).not.toHaveBeenCalled();
+    const automaticC = timeline.refresh();
+    await flushPromises();
+    expect(completed).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(3);
+    expect(requests.slice(0, 2).every((request) => request.signal.aborted)).toBe(true);
+    requests[2]!.resolve(page([window("replacement-C")]));
+    await Promise.all([owned, automaticB, automaticC]);
+    expect(completed).toHaveBeenCalledTimes(1);
+    expect(timeline.windows.value.map((entry) => entry.turnId)).toEqual(["replacement-C"]);
+    expect(repository.getHistoryPage).toHaveBeenCalledTimes(3);
+    timeline.dispose();
+  });
+  it.each(["reader cancellation", "disposal", "error"] as const)(
+    "settles an owned latest replacement on %s while preserving owner-free data publication",
+    async (outcome) => {
+      const { requests, repository } = pendingHistoryRequests();
+      const timeline = useProgressiveHistoryTimeline({ sessionId: "thread", repository });
+      let current = true;
+      const completed = vi.fn<() => void>();
+      const owned = timeline.refresh({ isCurrent: () => current }).then(completed);
+      const automatic = timeline.refresh();
+      await flushPromises();
+      expect(completed).not.toHaveBeenCalled();
+      if (outcome === "reader cancellation") {
+        current = false;
+        requests[1]!.resolve(page([window("automatic-update")]));
+      } else if (outcome === "disposal") {
+        timeline.dispose();
+      } else {
+        requests[1]!.reject(new Error("replacement unavailable"));
+      }
+      await Promise.all([owned, automatic]);
+      expect(completed).toHaveBeenCalledTimes(1);
+      expect(repository.getHistoryPage).toHaveBeenCalledTimes(2);
+      expect(timeline.loading.value).toBe(false);
+      expect(timeline.windows.value.map((entry) => entry.turnId)).toEqual(
+        outcome === "reader cancellation" ? ["automatic-update"] : [],
+      );
+      expect(timeline.error.value).toBe(outcome === "error" ? "replacement unavailable" : null);
+      timeline.dispose();
+    },
+  );
+  it("processes equal-ID disjoint progress with empty source proof", async () => {
+    const selected = page([window("selected", 0)]);
+    const latest = page([window("latest", 900)]);
+    const beforeApply = vi.fn<() => void>();
+    const timeline = useProgressiveHistoryTimeline({
+      sessionId: "thread",
+      initialPage: selected,
+      repository: {
+        getHistoryPage: async () => latest,
+        getTurnItems: async () => latest.turns[0]!,
+      },
+      beforeApply,
+    });
+    try {
+      await timeline.refresh();
+      expect(timeline.windows.value.map((entry) => entry.turnId)).toEqual(["selected", "latest"]);
+      expect(beforeApply).toHaveBeenCalledTimes(1);
+    } finally {
+      timeline.dispose();
+    }
+  });
+  it.each(["automatic", "retry", "latest"] as const)(
+    "processes valid history for %s refresh",
+    async (mode) => {
+      const selected = page([window("selected", 0)]);
+      const latest = page([window("latest", 900)]);
+      const read = vi.fn<ConversationRepository["getHistoryPage"]>(async () => latest);
+      const beforeApply = vi.fn<() => void>();
+      const afterApply = vi.fn<() => void>();
+      const timeline = useProgressiveHistoryTimeline({
+        sessionId: "thread",
+        initialPage: selected,
+        repository: { getHistoryPage: read, getTurnItems: async () => latest.turns[0]! },
+        beforeApply,
+        afterApply,
+      });
+      try {
+        await timeline.refresh(mode === "latest" ? { isCurrent: () => true } : undefined);
+        expect(read).toHaveBeenCalledTimes(1);
+        expect(timeline.windows.value.map((entry) => entry.turnId)).toEqual(["selected", "latest"]);
+        expect(beforeApply).toHaveBeenCalledTimes(1);
+        expect(afterApply).toHaveBeenCalledTimes(1);
+        expect(timeline.stale.value).toBe(false);
+      } finally {
+        timeline.dispose();
+      }
+    },
+  );
+  it.each([
+    "epoch",
+    "revision",
+    "coverage",
+    "coverage-total",
+    "source-range",
+    "preparation",
+    "opening",
+    "detail",
+    "range",
+    "review",
+    "page-review",
+  ])("processes meaningful %s changes during automatic refresh", async (change) => {
+    const selected = page([window("selected", 0)]);
+    const updated = structuredClone(selected);
+    if (change === "epoch") {
+      updated.historyEpoch = "replacement";
+      updated.turns[0]!.historyEpoch = "replacement";
+    } else if (change === "revision") {
+      updated.contentRevision = "b";
+      updated.turns[0]!.contentRevision = "b";
+    } else if (change === "coverage") {
+      updated.coverage.status = "complete";
+    } else if (change === "coverage-total") {
+      updated.coverage.total = 1;
+    } else if (change === "source-range") {
+      updated.coverage.segments.push({
+        physicalRolloutId: "physical",
+        endOrdinalExclusive: 1,
+        endDecodedByteExclusive: 10,
+        coveredRanges: updated.turns[0]!.loadedRanges,
+        projectionWatermark: null,
+        sourceWatermark: { nextOrdinal: 1, nextByteOffset: 10 },
+      });
+    } else if (change === "preparation") {
+      updated.preparation = "ready";
+    } else if (change === "opening") {
+      updated.turns[0]!.opening.availability = "absent";
+    } else if (change === "detail") {
+      updated.turns[0]!.items[0]!.detail = "unresolved";
+    } else if (change === "range") {
+      updated.turns[0]!.loadedRanges[0]!.sha256 = "new-proof";
+    } else if (change === "review") {
+      updated.turns[0]!.reviewEvidence = { availability: "complete", records: [] };
+    } else {
+      updated.reviewEvidence = { availability: "complete", records: [] };
+    }
+    const beforeApply = vi.fn<() => void>();
+    const timeline = useProgressiveHistoryTimeline({
+      sessionId: "thread",
+      initialPage: selected,
+      repository: {
+        getHistoryPage: async () => updated,
+        getTurnItems: async () => updated.turns[0]!,
+      },
+      beforeApply,
+    });
+    try {
+      await timeline.refresh();
+      expect(beforeApply).toHaveBeenCalledTimes(1);
+      expect(timeline.page.value?.historyEpoch).toBe(updated.historyEpoch);
+      expect(timeline.page.value?.contentRevision).toBe(updated.contentRevision);
+      expect(timeline.page.value?.preparation).toBe(updated.preparation);
+      expect(timeline.page.value?.coverage.status).toBe(updated.coverage.status);
+    } finally {
+      timeline.dispose();
+    }
+  });
+  it.each(["stale", "unavailable", "failure", "wrong-thread"])(
+    "exposes automatic %s responses and allows manual retry with unchanged source IDs",
+    async (failure) => {
+      const selected = page([window("selected", 0)]);
+      let retry = false;
+      const beforeApply = vi.fn<() => void>();
+      const timeline = useProgressiveHistoryTimeline({
+        sessionId: "thread",
+        initialPage: selected,
+        repository: {
+          getHistoryPage: async () => {
+            if (retry) {
+              return selected;
+            }
+            if (failure === "failure") {
+              throw new Error("source unavailable");
+            }
+            return {
+              ...selected,
+              ...(failure === "stale" ? { stale: true } : {}),
+              ...(failure === "unavailable" ? { preparation: "unavailable" as const } : {}),
+              ...(failure === "wrong-thread" ? { threadId: "foreign" } : {}),
+            };
+          },
+          getTurnItems: async () => selected.turns[0]!,
+        },
+        beforeApply,
+      });
+      try {
+        await timeline.refresh();
+        expect(timeline.stale.value).toBe(true);
+        expect(timeline.error.value).not.toBeNull();
+        expect(beforeApply).not.toHaveBeenCalled();
+        retry = true;
+        await timeline.refresh();
+        expect(timeline.error.value).toBeNull();
+        expect(timeline.stale.value).toBe(false);
+        expect(beforeApply).toHaveBeenCalledTimes(1);
+      } finally {
+        timeline.dispose();
+      }
+    },
+  );
+  it.each(["before", "after", "preparation", "preparation-advance", "token-only"])(
+    "retains automatic refresh continuation semantics for %s changes",
+    async (change) => {
+      const selected = page([window("selected", 0)]);
+      selected.turns[0]!.afterCursor = "after-A";
+      selected.turns[0]!.preparation = { kind: "opening", cursor: "preparation-A" };
+      selected.turns[0]!.itemIslands = [["answer"]];
+      const updated = structuredClone(selected);
+      if (change === "before") {
+        updated.turns[0]!.beforeCursor = null;
+      } else if (change === "after") {
+        updated.turns[0]!.afterCursor = null;
+      } else if (change === "preparation" || change === "preparation-advance") {
+        updated.turns[0]!.preparation!.cursor = change === "preparation" ? null : "preparation-B";
+      } else {
+        updated.turns[0]!.beforeCursor = "new-before-token";
+        updated.turns[0]!.afterCursor = "new-after-token";
+      }
+      const beforeApply = vi.fn<() => void>();
+      const timeline = useProgressiveHistoryTimeline({
+        sessionId: "thread",
+        initialPage: selected,
+        repository: {
+          getHistoryPage: async () => updated,
+          getTurnItems: async () => updated.turns[0]!,
+        },
+        beforeApply,
+      });
+      try {
+        await timeline.refresh();
+        expect(beforeApply).toHaveBeenCalledTimes(1);
+      } finally {
+        timeline.dispose();
+      }
+    },
+  );
   it("does not prepare a hidden assistant tail as a final answer when native final identity is explicitly absent", async () => {
     const prepare = vi.fn<ConversationRepository["prepareHistoryPresentation"]>();
     const result = page();

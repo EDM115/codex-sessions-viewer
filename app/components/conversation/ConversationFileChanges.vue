@@ -119,7 +119,12 @@ function onFileToggle(event: Event, file: PresentedFile): void {
       <span class="tabular">{{ totals }}</span>
     </summary>
     <div v-if="open" class="conversation-file-changes__files">
-      <details v-for="file in files" :key="fileKey(file)" @toggle="onFileToggle($event, file)">
+      <details
+        v-for="file in files"
+        :key="fileKey(file)"
+        :open="openedFiles.has(fileKey(file))"
+        @toggle="onFileToggle($event, file)"
+      >
         <summary :aria-expanded="openedFiles.has(fileKey(file))">
           <span>{{ file.path }}</span>
           <span class="tabular">{{ fileLineCountLabel(file) }}</span>

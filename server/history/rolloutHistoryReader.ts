@@ -119,6 +119,47 @@ interface ItemEntry {
   updatedRecord: JsonlRecord;
   canonical: boolean;
 }
+function provedCoreMessageMirror(
+  previous: ItemEntry,
+  item: HistoryItem,
+  record: JsonlRecord,
+  canonical: boolean,
+): boolean {
+  if (
+    previous.canonical === canonical ||
+    previous.updatedRecord.byteEnd !== record.byteStart ||
+    previous.item.type !== item.type ||
+    !(item.type === "agentMessage" || item.type === "userMessage") ||
+    !(previous.item.type === "agentMessage" || previous.item.type === "userMessage") ||
+    previous.item.text !== item.text
+  ) {
+    return false;
+  }
+  if (
+    item.type === "agentMessage" &&
+    previous.item.type === "agentMessage" &&
+    item.phase !== null &&
+    previous.item.phase !== null &&
+    item.phase !== previous.item.phase &&
+    !(isFinalAnswerPhase(item.phase) && isFinalAnswerPhase(previous.item.phase))
+  ) {
+    return false;
+  }
+  const priorPayload = object(object(previous.updatedRecord.value)?.["payload"]);
+  const nextPayload = object(object(record.value)?.["payload"]);
+  const core = canonical ? nextPayload : priorPayload;
+  const legacy = canonical ? priorPayload : nextPayload;
+  if (
+    core?.["type"] !== "item_completed" ||
+    !["message", "agent_message", "user_message"].includes(text(legacy?.["type"]) ?? "")
+  ) {
+    return false;
+  }
+  const coreId = text(object(core["item"])?.["id"]);
+  const legacyId =
+    text(legacy?.["id"]) ?? text(legacy?.["item_id"]) ?? text(legacy?.["message_id"]);
+  return coreId !== null && (legacyId === null || legacyId === coreId);
+}
 interface RawTurn {
   id: string;
   start: JsonlRecord;
@@ -293,7 +334,6 @@ export function assembleHistoryRecords(
   const reviewRecords: ReviewSourceRecord[] = [];
   const calls = new Map<string, Record<string, JsonValue>>(inherited?.calls);
   const contextOnlyCalls = new Set(calls.keys());
-  const pairedCanonicalMessages = new Set<string>();
   const turnContexts = new Map<string, RawTurn["context"]>();
   let contextTurnId: string | null = inherited?.contextTurnId ?? null;
   let active: RawTurn | null = null;
@@ -559,45 +599,49 @@ export function assembleHistoryRecords(
     ) {
       unsupported = true;
     }
-    const prior = active.items.get(item.id);
-    if (prior?.canonical && !canonical) {
-      pairedCanonicalMessages.add(`${active.id}:${item.id}`);
+    let prior = active.items.get(item.id);
+    const message = item.type === "agentMessage" || item.type === "userMessage";
+    if (prior?.canonical && !canonical && !message) {
       continue;
     }
-    if (canonical || prior === undefined) {
-      if (!canonical) {
-        const duplicate = [...active.items.values()].find(
-          (entry) =>
-            entry.canonical &&
-            !pairedCanonicalMessages.has(`${active!.id}:${entry.item.id}`) &&
-            entry.item.type === item!.type &&
-            "text" in entry.item &&
-            "text" in item! &&
-            entry.item.text === item.text,
-        );
-        if (duplicate) {
-          pairedCanonicalMessages.add(`${active.id}:${duplicate.item.id}`);
-          continue;
-        }
+    const adjacent = [...active.items.values()].find(
+      (entry) => entry.updatedRecord.byteEnd === record.byteStart,
+    );
+    const mirror =
+      adjacent && provedCoreMessageMirror(adjacent, item, record, canonical) ? adjacent : undefined;
+    if (mirror && !canonical) {
+      active.items.set(mirror.item.id, {
+        ...mirror,
+        updatedRecord: record,
+        item: {
+          ...mirror.item,
+          evidence: {
+            original: mirror.item.evidence,
+            source: mirror.record.value,
+            mirrored: record.value,
+          },
+        },
+      });
+      continue;
+    }
+    if (mirror) {
+      active.items.delete(mirror.item.id);
+      prior = mirror;
+    } else if (message && prior && prior.canonical !== canonical) {
+      if (canonical) {
+        active.items.delete(prior.item.id);
+        const separateId = stableRecordKey(segment.ref, prior.record);
+        active.items.set(separateId, { ...prior, item: { ...prior.item, id: separateId } });
       } else {
-        const duplicate = [...active.items.values()].find(
-          (entry) =>
-            !entry.canonical &&
-            entry.item.type === item!.type &&
-            "text" in entry.item &&
-            "text" in item! &&
-            entry.item.text === item.text,
-        );
-        if (duplicate) {
-          active.items.delete(duplicate.item.id);
-          pairedCanonicalMessages.add(`${active.id}:${item.id}`);
-        }
+        item = { ...item, id: stableRecordKey(segment.ref, record) };
       }
+      prior = undefined;
     }
     item = {
       ...item,
       evidence: {
         original: item.evidence,
+        ...(mirror ? { mirrored: mirror.item.evidence } : {}),
         source: record.value,
         rawIdentity: jsonValueSchema.parse(record.identity ?? null),
         contextOnlyCall:

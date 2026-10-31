@@ -5,6 +5,74 @@ import { threadClassificationSchema } from "#shared/types/library.ts";
 import { StaticConversationRepository } from "~/repositories/static.ts";
 
 describe("static conversation repository", () => {
+  it("keeps older v2 browsing body-free and explicitly rejects filters whose saved facets are unavailable", async () => {
+    const requests: string[] = [];
+    const requester = async (path: string): Promise<unknown> => {
+      requests.push(path);
+      if (path.endsWith("sessions/index.json")) {
+        return { version: 2, sessions: [] };
+      }
+      if (path.endsWith("projects.json")) {
+        return {
+          version: 2,
+          catalog: {
+            projects: [],
+            threads: [
+              {
+                id: "old",
+                title: "Old saved metadata",
+                scope: "active",
+                projectId: null,
+                hostId: null,
+                sectionId: null,
+                sectionPosition: null,
+                pinned: false,
+                recencyAt: null,
+                classification: {
+                  visibility: "user-root",
+                  transportSource: null,
+                  threadSource: "user",
+                  ephemeral: null,
+                  historyMode: null,
+                  relationship: "none",
+                  parentThreadId: null,
+                  attachedParentThreadId: null,
+                  agentPath: null,
+                  agentNickname: null,
+                  agentRole: null,
+                  agentDepth: null,
+                  reasons: [],
+                },
+              },
+            ],
+            sections: [],
+            preferences: {
+              scope: "active",
+              chatSortMode: "updated_at",
+              projectSortMode: "manual",
+              projectOrder: [],
+              pinnedOrder: [],
+              projectThreadOrders: {},
+            },
+            diagnostics: [],
+          },
+        };
+      }
+      throw new Error("Body payload must remain lazy");
+    };
+    const repository = new StaticConversationRepository(requester);
+    expect((await repository.listSessions({ scope: "active" })).items.map(({ id }) => id)).toEqual([
+      "old",
+    ]);
+    for (const filter of [{ model: "unknown" }, { tool: "unknown" }, { hasMedia: false }]) {
+      // oxlint-disable-next-line no-await-in-loop -- Each supported filter must qualify absent saved evidence
+      await expect(repository.listSessions({ scope: "active", ...filter })).rejects.toMatchObject({
+        code: "static.filter_facets_unavailable",
+      });
+    }
+    expect(requests).toEqual(["/payloads/sessions/index.json", "/payloads/projects.json"]);
+  });
+
   it.each([true, false])(
     "reveals children across inherited filters and qualifies their project only when its definition exists (%s)",
     async (projectExists) => {
