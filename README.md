@@ -1,18 +1,18 @@
 # Codex Sessions Viewer
 
-Codex Sessions Viewer is a local, read-only Nuxt application for browsing Codex conversations. It discovers active and archived JSONL rollouts, preserves unknown protocol records for inspection, enriches them with optional Codex metadata, and presents the same repository contract through a live loopback server or a fully generated static archive.
+Codex Sessions Viewer is a local, read-only Nuxt application for browsing Codex conversations. It discovers active and archived JSONL rollouts, preserves unknown protocol records for inspection, enriches them with optional Codex metadata and presents the same repository contract through a live loopback server or a fully generated static archive.
 
-The viewer never writes, renames, locks, migrates, or deletes anything under the selected Codex home. Its SQLite cache, configuration, generated Markdown, copied media, favicons, and static output are viewer-owned derivatives stored elsewhere.
+The viewer never writes, renames, locks, migrates, or deletes anything under the selected Codex home. Its SQLite cache, configuration, generated Markdown, copied media, favicons and static output are viewer-owned derivatives stored elsewhere.
 
 ## Requirements
 
-- Node.js 26 (the project pins Node 26.12.1 for its commands)
-- PNPM 11.28.9
+- Node.js 26+
+- PNPM 11+
 - Windows, macOS, or Linux; Windows is the primary acceptance platform
 
 Install the exact locked dependencies:
 
-```powershell
+```pwsh
 pnpm install --frozen-lockfile
 ```
 
@@ -22,17 +22,17 @@ PNPM can provision the Node runtime declared by the package when the active syst
 
 Build the application, then start the live viewer on the loopback interface:
 
-```powershell
+```pwsh
 pnpm build
 pnpm live
 ```
 
 Then open `http://127.0.0.1:3000`. Startup serves a metadata catalog without enumerating or reading rollouts when usable metadata is available. Project folders, projectless Recents and root counts are independent of transcript preparation. Selecting a chat reads a bounded recent history page, older turns and large-turn items load separately. Missing metadata enters an explicitly qualified recovery path. The persistent library remains usable while selected content loads.
 
-Build an offline archive without making favicon requests:
+Build an offline archive:
 
-```powershell
-pnpm export --offline
+```pwsh
+pnpm export --link-previews
 pnpm verify:output
 pnpm offline
 ```
@@ -43,7 +43,7 @@ Then open `http://127.0.0.1:3000`. Static output requires this local HTTP server
 
 ### Live viewer
 
-```powershell
+```pwsh
 pnpm live [--codex-home <path>] [--media-root <path>] [--port <number>]
 ```
 
@@ -57,7 +57,7 @@ The Codex-home precedence is the explicit CLI argument, viewer configuration, `C
 
 ### Static export
 
-```powershell
+```pwsh
 pnpm export [--codex-home <path>] [--output <path>] [--offline] [--force] [--no-index] [--link-previews]
 ```
 
@@ -73,11 +73,9 @@ Pagefind creates one flat search record per turn and can require substantial mem
 
 New exports include a version 2 metadata/library catalog and source-qualified history pages. Saved history supports separate turn and item paging, including large turns, with explicit coverage and generation provenance. Legacy compatibility chunks retain their turn/byte budget and exact turn map (one large legacy turn can still be indivisible). Prerendered session routes ship the conversation skeleton and fetch selected content after hydration, avoiding duplication of multi-megabyte tool output in session HTML. Missing, malformed or unsupported source history is reported, old archives without qualified history retain an explicitly labeled saved-record view.
 
-See [history and artifact contracts](docs/history-and-artifact-contracts.md) for compatibility, source-generation validation, retained media, file-authority and diff provenance. The measured runtime conditions and limitations are recorded in [performance observations](docs/performance-observations.md).
-
 ### Offline server
 
-```powershell
+```pwsh
 pnpm offline [--port <number>]
 ```
 
@@ -85,7 +83,7 @@ This server reads `.output/public`, binds only to `127.0.0.1`, accepts `GET` and
 
 ### Diagnostics
 
-```powershell
+```pwsh
 pnpm run doctor [--codex-home <path>]
 ```
 
@@ -93,7 +91,7 @@ Doctor is read-only. It reports discovered active and archived sources, catalog 
 
 ### Generated-output verification
 
-```powershell
+```pwsh
 pnpm verify:output [--output <path>]
 ```
 
@@ -134,13 +132,13 @@ Start development with hot reload using `pnpm dev`. It accepts the same `--codex
 
 Run the normal source checks with:
 
-```powershell
+```pwsh
 pnpm verify:source
 ```
 
 For complete local release readiness, including the production build and browser checks, run:
 
-```powershell
+```pwsh
 pnpm verify:release
 ```
 
