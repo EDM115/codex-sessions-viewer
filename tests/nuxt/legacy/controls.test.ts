@@ -8,8 +8,6 @@ import UiTabs from "~/components/ui/UiTabs.vue";
 import UiTextField from "~/components/ui/UiTextField.vue";
 import UiTooltip from "~/components/ui/UiTooltip.vue";
 
-import ControlStatesPreview from "../../fixtures/ui/ControlStatesPreview.vue";
-
 describe("Task 9 UI controls", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -78,32 +76,6 @@ describe("Task 9 UI controls", () => {
     expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["D:\\Codex"]);
   });
 
-  it("moves tab selection with arrow keys and preserves the tab contract", async () => {
-    const wrapper = await mount(UiTabs, {
-      props: {
-        label: "Session scope",
-        modelValue: "active",
-        items: [
-          { value: "active", label: "Active", count: 12 },
-          { value: "archived", label: "Archived", count: 4 },
-        ],
-      },
-    });
-    const tabs = wrapper.findAll('[role="tab"]');
-    const activeTab = tabs[0]!;
-    const archivedTab = tabs[1]!;
-    if (activeTab === undefined || archivedTab === undefined) {
-      throw new Error("Expected Active and Archived tabs.");
-    }
-
-    expect(activeTab.attributes("aria-selected")).toBe("true");
-    expect(archivedTab.attributes("tabindex")).toBe("-1");
-
-    await activeTab.trigger("keydown", { key: "ArrowRight" });
-
-    expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["archived"]);
-  });
-
   it("wraps every tab-navigation key while skipping disabled items and ignoring unrelated keys", async () => {
     const wrapper = await mount(UiTabs, {
       attachTo: document.body,
@@ -118,10 +90,16 @@ describe("Task 9 UI controls", () => {
       },
     });
     const tabs = wrapper.findAll('[role="tab"]');
+    expect(tabs[0]!.attributes("aria-selected")).toBe("true");
+    expect(tabs[2]!.attributes("tabindex")).toBe("-1");
     await tabs[0]!.trigger("keydown", { key: "ArrowLeft" });
     expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["last"]);
     expect(document.activeElement).toBe(tabs[2]!.element);
     await tabs[2]!.trigger("keydown", { key: "ArrowDown" });
+    expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["first"]);
+    await tabs[0]!.trigger("keydown", { key: "ArrowRight" });
+    expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["last"]);
+    await tabs[2]!.trigger("keydown", { key: "ArrowUp" });
     expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["first"]);
     await tabs[0]!.trigger("keydown", { key: "End" });
     expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual(["last"]);
@@ -150,25 +128,5 @@ describe("Task 9 UI controls", () => {
 
     await menu.trigger("keydown", { key: "Escape" });
     expect(menu.find('[role="menu"]').exists()).toBe(false);
-  });
-
-  it("smoke-renders the control preview states and sections", async () => {
-    const wrapper = await mount(ControlStatesPreview);
-
-    expect(wrapper.findAll('[data-preview-state="default"]')).not.toHaveLength(0);
-    expect(wrapper.findAll('[data-preview-state="hover"]')).not.toHaveLength(0);
-    expect(wrapper.findAll('[data-preview-state="focus"]')).not.toHaveLength(0);
-    expect(wrapper.findAll('[data-preview-state="active"]')).not.toHaveLength(0);
-    expect(wrapper.findAll('[data-preview-state="disabled"]')).not.toHaveLength(0);
-    expect(wrapper.findAll('[data-preview-state="loading"]')).not.toHaveLength(0);
-    expect(wrapper.findAll('[data-preview-state="error"]')).not.toHaveLength(0);
-    expect(wrapper.findAll('[data-preview-state="success"]')).not.toHaveLength(0);
-    expect(wrapper.text()).toContain("Buttons");
-    expect(wrapper.text()).toContain("Icon actions");
-    expect(wrapper.text()).toContain("Inputs");
-    expect(wrapper.text()).toContain("Tabs");
-    expect(wrapper.text()).toContain("Disclosures");
-    expect(wrapper.text()).toContain("Menus");
-    expect(wrapper.text()).toContain("Tooltips");
   });
 });

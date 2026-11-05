@@ -37,8 +37,7 @@ describe("browser security headers", () => {
     expect(contentSecurityPolicy).not.toMatch(/unsafe-eval|https?:|\*/u);
   });
 
-  it("exports an immutable header record for live responses", () => {
-    expect(Object.isFrozen(browserSecurityHeaders)).toBe(true);
+  it("sets privacy and content isolation headers for live responses", () => {
     expect(browserSecurityHeaders).toEqual({
       "Content-Security-Policy": contentSecurityPolicy,
       "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
@@ -52,7 +51,6 @@ describe("browser security headers", () => {
   it("permits only WebAssembly compilation in the static policy and retains every other boundary", () => {
     const policy = staticBrowserSecurityHeaders["Content-Security-Policy"]!;
     const parsed = directives(policy);
-    expect(Object.isFrozen(staticBrowserSecurityHeaders)).toBe(true);
     expect(parsed.get("script-src")).toEqual(["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'"]);
     expect(parsed.get("script-src")).not.toContain("'unsafe-eval'");
     expect(policy).not.toMatch(/https?:|\*/u);

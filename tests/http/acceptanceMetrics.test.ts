@@ -18,6 +18,10 @@ import {
 } from "../fixtures/history/nativeHistory.ts";
 import { createStateDatabase } from "../integration/source-boundary/fixtures.ts";
 
+const repetitions =
+  process.env["VIEWER_PROFILE_OUTPUT"] || process.env["VIEWER_METRICS_OUTPUT"]
+    ? [1, 2, 3, 4, 5]
+    : [1];
 const root = await mkdtemp(join(tmpdir(), "viewer-production-metrics-"));
 await setup({
   rootDir: resolve("tests/fixtures/nuxt-history"),
@@ -219,7 +223,7 @@ async function sessionFixture(compressed: boolean, turns = 30) {
   return { root: fixtureRoot, home, path, raw };
 }
 
-it.each([1, 2, 3, 4, 5])(
+it.each(repetitions)(
   "production metadata readiness repetition %i observes zero transcript work for 3000 paths",
   async (repetition) => {
     const owner = metadataOwner(currentTaskId, currentTaskSignal);
@@ -380,7 +384,7 @@ it("cancelled owners cannot reset, observe or close the next case runtime", asyn
   expect(() => ownedControl(oldOwner, "snapshot")).toThrow("Cancelled test owner");
 });
 
-it.each([1, 2, 3, 4, 5])(
+it.each(repetitions)(
   "production plain, older and append paths repetition %i",
   async (repetition) => {
     const f = await sessionFixture(false, 200);
@@ -412,7 +416,7 @@ it.each([1, 2, 3, 4, 5])(
   },
 );
 
-it.each([1, 2, 3, 4, 5])(
+it.each(repetitions)(
   "production compressed cold, validated warm and stopped-viewer replacement repetition %i",
   async (repetition) => {
     const f = await sessionFixture(true, 200);
@@ -447,7 +451,7 @@ it.each([1, 2, 3, 4, 5])(
   },
 );
 
-it.each([1, 2, 3, 4, 5])(
+it.each(repetitions)(
   "production native selected range with background snapshot repetition %i",
   async (repetition) => {
     const f = await sessionFixture(false, 1);

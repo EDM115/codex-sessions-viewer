@@ -135,16 +135,20 @@ describe("rich-content actual renderer hierarchy", () => {
     }
   });
 
-  it("renders Windows file coordinates and copies a decoded path without opening it", async () => {
-    const writeText = vi.fn<(value: string) => Promise<void>>(async (_: string) => undefined);
-    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    const { document } = await parseRichText("[reader](<C:/work/my%20file.ts:12:4>)");
-    const wrapper = await mountSuspended(RichTextRenderer, { props: { document } });
-    expect(wrapper.get(".rich-file-reference__path").text()).toBe("C:\\work\\my file.ts");
-    expect(wrapper.get(".rich-file-reference__position").text()).toBe("L12:C4");
-    await wrapper.get('button[aria-label="Copy file path"]').trigger("click");
-    expect(writeText).toHaveBeenCalledWith("C:\\work\\my file.ts");
-  });
+  it.each(["C:/work/my%20file.ts:12:4", "file:///C:/work/my%20file.ts#L12C4"])(
+    "renders coordinates and copies the decoded local path from %s",
+    async (path) => {
+      const writeText = vi.fn<(value: string) => Promise<void>>(async (_: string) => undefined);
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+      const { document } = await parseRichText(`[reader](<${path}>)`);
+      const wrapper = await mountSuspended(RichTextRenderer, { props: { document } });
+      expect(wrapper.get(".rich-file-reference__path").text()).toBe("C:\\work\\my file.ts");
+      expect(wrapper.get(".rich-file-reference__position").text()).toBe("L12:C4");
+      await wrapper.get('button[aria-label="Copy file path"]').trigger("click");
+      expect(writeText).toHaveBeenCalledWith("C:\\work\\my file.ts");
+      expect(wrapper.find('button[aria-label="Copied: Copy file path"]').exists()).toBe(true);
+    },
+  );
 
   it("resolves linked images and exposes separate preview and destination actions", async () => {
     const { document } = await parseRichText(

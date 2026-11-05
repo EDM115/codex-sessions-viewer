@@ -85,30 +85,6 @@ describe("Task 11 rich-text rendering", () => {
     expect(resolveFavicon).toHaveBeenCalledWith("https://nuxt.com");
   });
 
-  it("shows normalized file coordinates and copies only the path", async () => {
-    const writeText = vi.fn<(value: string) => Promise<void>>(async () => undefined);
-    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    const wrapper = await mountSuspended(RichTextRenderer, {
-      props: {
-        document: document([
-          {
-            type: "link",
-            url: "file:///C:/work/src/reader.ts#L12C4",
-            origin: null,
-            title: null,
-            children: [{ type: "text", text: "reader.ts" }],
-          },
-        ]),
-      },
-    });
-
-    expect(wrapper.get(".rich-file-reference__path").text()).toBe("C:\\work\\src\\reader.ts");
-    expect(wrapper.get(".rich-file-reference__position").text()).toBe("L12:C4");
-    await wrapper.get('button[aria-label="Copy file path"]').trigger("click");
-    expect(writeText).toHaveBeenCalledWith("C:\\work\\src\\reader.ts");
-    expect(wrapper.get('button[aria-label="Copied: Copy file path"]')).toBeTruthy();
-  });
-
   it("renders safe highlighted code, preserves plain unknown languages, and toggles wrapping", async () => {
     const writeText = vi.fn<(value: string) => Promise<void>>(async () => undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });

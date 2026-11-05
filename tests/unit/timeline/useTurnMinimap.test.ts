@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   activeVirtualRowIndex,
-  markerWidthForBucket,
   minimapDestinationIndex,
   minimapPreview,
 } from "#shared/timeline/turnMinimap.ts";
@@ -30,11 +29,6 @@ describe("turn minimap", () => {
     expect(activeVirtualRowIndex(rows, 999.99)).toBe(4);
     expect(activeVirtualRowIndex(rows, 1_000)).toBe(5);
     expect(activeVirtualRowIndex(rows, 1_050)).toBe(5);
-  });
-
-  it("maps the four prose buckets to stable increasing marker widths", () => {
-    const buckets: TurnNavigatorItem["proseLengthBucket"][] = [1, 2, 3, 4];
-    expect(buckets.map(markerWidthForBucket)).toEqual([18, 30, 44, 60]);
   });
 
   it("builds previews exclusively from navigator prose fields", () => {

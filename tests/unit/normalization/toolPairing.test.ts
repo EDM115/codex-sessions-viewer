@@ -467,6 +467,9 @@ describe("host-recorded Code Mode delta inventories", () => {
     });
   });
   it("distinguishes absent, partial and complete empty inventories and keeps direct invocation evidence single", () => {
+    const script =
+      "const a = await tools.exec_command({cmd:'first'}); if (false) await tools.apply_patch('never'); text(a)";
+    const printed = { executed_tool_calls: [{ name: "invented", arguments: {} }], exit_code: 7 };
     for (const [calls, complete, expected] of [
       [undefined, undefined, "absent"],
       [[], undefined, "partial"],
@@ -475,15 +478,27 @@ describe("host-recorded Code Mode delta inventories", () => {
       const result = pairToolCalls(
         scoped(
           event(1, time, {
+            type: "custom_tool_call",
+            call_id: "empty",
+            namespace: "functions",
+            name: "exec",
+            input: script,
+          }),
+          event(2, time, {
             type: "custom_tool_call_output",
             call_id: "empty",
-            output: null,
+            output: printed,
             internal_chat_message_metadata_passthrough: metadata("empty-cell", calls, complete),
           }),
         ),
       );
       expect(result.activities).toHaveLength(1);
-      expect(result.activities[0]).toMatchObject({ codeMode: { completeness: expected } });
+      expect(result.activities[0]).toMatchObject({
+        callId: "empty",
+        input: script,
+        output: printed,
+        codeMode: { completeness: expected },
+      });
     }
     const result = pairToolCalls(
       scoped(

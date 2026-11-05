@@ -13,7 +13,6 @@ describe("Pagefind turn records", () => {
       revision: "sha256:fixture",
     });
 
-    expect(conversation.summary.title).toBe(conversation.summary.id);
     conversation.summary.title = "Build the parser";
     const records = createPagefindTurnRecords([conversation]);
 

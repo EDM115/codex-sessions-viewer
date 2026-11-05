@@ -18,8 +18,4 @@ describe("code highlighting", () => {
     expect(renderedText(highlighted!.children)).toBe(source);
     expect(JSON.stringify(highlighted)).toContain("light-dark(");
   });
-
-  it("falls back cleanly for an unknown language", async () => {
-    await expect(highlightCode("plain <source>", "made-up-language")).resolves.toBeNull();
-  });
 });

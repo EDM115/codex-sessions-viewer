@@ -12,6 +12,7 @@ describe("rich-content destination and source regressions", () => {
     "C:\\work\\reader.ts#L12C4",
     "\\\\server\\share\\reader.ts:12",
     "file://server/share/reader.ts#L12",
+    "file:///C:/work/src/reader.ts#L12C4",
     "/work/reader.ts:12",
     "C:/work/my%20file.ts:12",
     "C:/work/my file.ts:12",

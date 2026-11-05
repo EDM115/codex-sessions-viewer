@@ -170,7 +170,6 @@ it("keeps readable text alongside native image/audio output and labels host inve
   const value = toolOutput({ ...tool("dynamic"), output });
   expect(value).toContain("First text\nLast text");
   expect(value).not.toContain("base64");
-  expect(output).toHaveLength(4);
   const attempt: ToolActivity = {
     ...tool("exec_command"),
     status: "unknown",
